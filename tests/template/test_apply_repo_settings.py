@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from scripts.apply_repo_settings import (
     find_main_ruleset,
@@ -7,6 +9,7 @@ from scripts.apply_repo_settings import (
     security_settings_match,
     plan_actions,
     load_desired,
+    _current_rulesets,
 )
 
 REPO_SETTINGS = Path(__file__).resolve().parents[2] / ".github" / "repo-settings"
@@ -22,6 +25,29 @@ def test_load_desired_reads_all_files() -> None:
         ]
         == "enabled"
     )
+
+
+def test_current_rulesets_fetches_full_detail_for_main_only() -> None:
+    # The list endpoint returns bare summaries (no rules/conditions) — full
+    # detail must come from a single-ruleset fetch, and only for "main" (the
+    # only one we ever compare against desired state).
+    calls: list[list[str]] = []
+
+    def fake_runner(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append(cmd)
+        body: object
+        if cmd[-1] == "repos/acme/repo/rulesets":
+            body = [{"id": 1, "name": "other"}, {"id": 2, "name": "main"}]
+        elif cmd[-1] == "repos/acme/repo/rulesets/2":
+            body = {"id": 2, "name": "main", "rules": [{"type": "deletion"}]}
+        else:
+            raise AssertionError(f"unexpected call: {cmd}")
+        return SimpleNamespace(stdout=json.dumps(body))
+
+    result = _current_rulesets("acme/repo", fake_runner)
+    assert result[0] == {"id": 1, "name": "other"}
+    assert result[1] == {"id": 2, "name": "main", "rules": [{"type": "deletion"}]}
+    assert len(calls) == 2  # one list call + one detail call for "main" only
 
 
 def test_find_main_ruleset_returns_match() -> None:

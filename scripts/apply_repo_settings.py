@@ -151,6 +151,28 @@ def _current_repo(runner: Callable[..., Any] = subprocess.run) -> str:
     return str(proc.stdout).strip()
 
 
+def _current_rulesets(
+    repo: str, runner: Callable[..., Any] = subprocess.run
+) -> list[dict]:
+    """Fetch this repo's rulesets, with full detail for the ``main`` one.
+
+    `GET /repos/{owner}/{repo}/rulesets` (the list endpoint) returns bare
+    summaries — no ``conditions``/``rules``/``bypass_actors`` — so comparing
+    those against ``desired.ruleset`` via ``ruleset_matches`` would always see
+    a mismatch and re-PUT on every run. Fetch the single-ruleset endpoint for
+    ``main`` specifically to get the fields we actually need to compare.
+    """
+    summaries = _gh_json(["api", f"repos/{repo}/rulesets"], runner) or []
+    return [
+        (
+            _gh_json(["api", f"repos/{repo}/rulesets/{rs['id']}"], runner)
+            if rs.get("name") == "main"
+            else rs
+        )
+        for rs in summaries
+    ]
+
+
 def main(
     argv: list[str] | None = None,
     runner: Callable[..., Any] = subprocess.run,
@@ -163,7 +185,7 @@ def main(
 
     desired = load_desired(Path(args.settings_dir))
     repo = _current_repo(runner)
-    current_rulesets = _gh_json(["api", f"repos/{repo}/rulesets"], runner) or []
+    current_rulesets = _current_rulesets(repo, runner)
     current_merge = _gh_json(["api", f"repos/{repo}"], runner) or {}
 
     actions = plan_actions(
