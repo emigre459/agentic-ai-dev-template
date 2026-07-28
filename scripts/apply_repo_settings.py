@@ -222,6 +222,7 @@ def main(
                     "-",
                 ],
                 input=json.dumps(desired.ruleset),
+                capture_output=True,
                 text=True,
                 check=True,
             )
@@ -237,6 +238,7 @@ def main(
                     "-",
                 ],
                 input=json.dumps(desired.ruleset),
+                capture_output=True,
                 text=True,
                 check=True,
             )
@@ -248,6 +250,7 @@ def main(
             runner(
                 ["gh", "api", "--method", "PATCH", f"repos/{repo}", "--input", "-"],
                 input=json.dumps(desired.merge),
+                capture_output=True,
                 text=True,
                 check=True,
             )
@@ -258,6 +261,7 @@ def main(
             runner(
                 ["gh", "api", "--method", "PATCH", f"repos/{repo}", "--input", "-"],
                 input=json.dumps(desired.security),
+                capture_output=True,
                 text=True,
                 check=True,
             )
