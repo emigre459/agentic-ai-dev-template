@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Reconcile this repo's `main` ruleset + PR-merge prefs with .github/repo-settings/.
+"""Reconcile this repo's live settings with .github/repo-settings/.
 
+Covers the `main` ruleset, PR-merge prefs, and Dependabot security updates.
 Reads the canonical settings, diffs them against the live repo (via `gh`), prints
 the diff, and — unless ``--yes`` — asks for confirmation before applying. Idempotent.
 """
@@ -35,15 +36,19 @@ class Desired:
 
     ruleset: dict
     merge: dict
+    security: dict
 
 
 def load_desired(settings_dir: Path) -> Desired:
-    """Load the desired ruleset + merge settings from ``settings_dir``."""
+    """Load the desired ruleset + merge + security settings from ``settings_dir``."""
     ruleset = json.loads((settings_dir / "ruleset.json").read_text(encoding="utf-8"))
     merge = json.loads(
         (settings_dir / "merge-settings.json").read_text(encoding="utf-8")
     )
-    return Desired(ruleset=ruleset, merge=merge)
+    security = json.loads(
+        (settings_dir / "security-settings.json").read_text(encoding="utf-8")
+    )
+    return Desired(ruleset=ruleset, merge=merge, security=security)
 
 
 def find_main_ruleset(existing: list[dict]) -> dict | None:
@@ -92,16 +97,30 @@ def merge_settings_match(desired: dict, current: dict) -> bool:
     return all(current.get(k) == v for k, v in desired.items())
 
 
+def security_settings_match(desired: dict, current_repo: dict) -> bool:
+    """Return True when the live repo's security config already satisfies desired.
+
+    ``current_repo`` is the full `GET /repos/{owner}/{repo}` response (the same
+    object already fetched for merge-settings matching) — its
+    ``security_and_analysis`` block carries other toggles (secret scanning, etc.)
+    our sanitized security-settings.json doesn't assert on, so subset (not
+    strict-equality) comparison via ``_is_subset`` avoids a spurious mismatch.
+    """
+    return _is_subset(desired, current_repo)
+
+
 def plan_actions(
     current_rulesets: list[dict],
     current_merge: dict,
     desired_ruleset: dict,
     desired_merge: dict,
+    desired_security: dict,
 ) -> list[tuple]:
     """Compute the minimal set of apply actions.
 
-    Returns a list of tuples: ``("ruleset", "POST"|"PUT", id_or_None)`` and/or
-    ``("merge", "PATCH", None)``. Empty list means everything is already aligned.
+    Returns a list of tuples: ``("ruleset", "POST"|"PUT", id_or_None)``,
+    ``("merge", "PATCH", None)``, and/or ``("security", "PATCH", None)``. Empty
+    list means everything is already aligned.
     """
     actions: list[tuple] = []
     main = find_main_ruleset(current_rulesets)
@@ -111,6 +130,8 @@ def plan_actions(
         actions.append(("ruleset", "PUT", main["id"]))
     if not merge_settings_match(desired_merge, current_merge):
         actions.append(("merge", "PATCH", None))
+    if not security_settings_match(desired_security, current_merge):
+        actions.append(("security", "PATCH", None))
     return actions
 
 
@@ -146,7 +167,11 @@ def main(
     current_merge = _gh_json(["api", f"repos/{repo}"], runner) or {}
 
     actions = plan_actions(
-        current_rulesets, current_merge, desired.ruleset, desired.merge
+        current_rulesets,
+        current_merge,
+        desired.ruleset,
+        desired.merge,
+        desired.security,
     )
     if not actions:
         print(f"{repo}: settings already aligned — no changes.")
@@ -201,6 +226,16 @@ def main(
             runner(
                 ["gh", "api", "--method", "PATCH", f"repos/{repo}", "--input", "-"],
                 input=json.dumps(desired.merge),
+                text=True,
+                check=True,
+            )
+        elif kind == "security":
+            # Same repo PATCH endpoint as "merge" — partial-update semantics mean
+            # this only touches security_and_analysis.dependabot_security_updates,
+            # leaving secret scanning etc. untouched.
+            runner(
+                ["gh", "api", "--method", "PATCH", f"repos/{repo}", "--input", "-"],
+                input=json.dumps(desired.security),
                 text=True,
                 check=True,
             )

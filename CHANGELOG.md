@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-07-28
+- feat: reconcile Dependabot automated security updates via `.github/repo-settings/security-settings.json` + `make apply_repo_settings` (previously only the `main` ruleset + PR-merge prefs were canonicalized), so repos seeded from this template get it by default — no interview question, same deterministic reconciliation as the existing settings
+- fix: rename lingering `agentic-ai-powered-repo` references (package name, issue/commit text) to `agentic-ai-dev-template`
+
 ## 2026-07-03
 - Make `.agents/skills/` harness-agnostic: add the `harness-agnostic-skills` shared rule (canonical paths, skill-root-relative bundled files, frontmatter portability), normalize `review-skill` + `build-from-issue` path references, and wire `AGENTS.md` (#4)
 - Add design spec + implementation plan for harness-agnostic skills (#4)

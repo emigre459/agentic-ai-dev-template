@@ -1,5 +1,5 @@
 [project]
-name = "agentic-ai-powered-repo-tooling"
+name = "agentic-ai-dev-template-tooling"
 version = "0.0.0"
 description = "Template-only tooling: tests for the init/apply machinery. Removed or replaced at `make init`."
 requires-python = ">=3.13.5,<3.14"

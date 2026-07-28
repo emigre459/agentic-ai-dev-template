@@ -9,8 +9,9 @@ Python backend or a React + TypeScript frontend.
 
 Paste the prompt below into your agentic coding harness (Claude Code, Cursor, …).
 It interviews you about the repo you're building, then runs `make init`,
-reconciles this repo's `main` branch protection + PR-merge settings, and opens
-a PR with the init commit (the reconciled settings make `main` PR-only).
+reconciles this repo's `main` branch protection + PR-merge settings + Dependabot
+automated security updates, and opens a PR with the init commit (the reconciled
+settings make `main` PR-only).
 
 ```text
 You are initializing a new repository created from the
@@ -37,7 +38,7 @@ THEN run, in order:
 - Create a "project setup" issue and a linked working branch FIRST — all
   changes reach `main` via PR (the settings step below makes `main` PR-only,
   so a direct push would be rejected):
-    - `gh issue create --title "Project setup: initialize from agentic-ai-powered-repo template" --body "..."`
+    - `gh issue create --title "Project setup: initialize from agentic-ai-dev-template" --body "..."`
       (brief bullet-checklist body; if the repo already has epics on its board,
       parent the issue under the one that fits — otherwise standalone is fine
       for this one-time bootstrap).
@@ -45,12 +46,13 @@ THEN run, in order:
 - `make init STACK=<python|react> PROJECT_NAME="<name>" DESCRIPTION="<desc>"`
   (this promotes the chosen stack to root, prunes the other, and removes the
   template machinery).
-- `make apply_repo_settings` (it prints a diff of this repo's main ruleset +
-  PR-merge prefs vs the canonical settings and asks you to confirm before
-  applying; if your shell can't answer its interactive prompt, confirm with the
-  user via your interview tool, then re-run with `--yes`).
+- `make apply_repo_settings` (it prints a diff of this repo's main ruleset,
+  PR-merge prefs, and Dependabot automated security updates vs the canonical
+  settings, and asks you to confirm before applying; if your shell can't answer
+  its interactive prompt, confirm with the user via your interview tool, then
+  re-run with `--yes`).
 - Stage everything and commit on the branch:
-  `git add -A && git commit -m "chore: initialize from agentic-ai-powered-repo template"`.
+  `git add -A && git commit -m "chore: initialize from agentic-ai-dev-template"`.
 - Run `make deps && make pr_check` yourself to confirm the stack is green
   (fix anything red before proceeding).
 - Push the branch and open a PR to main that closes the issue:
@@ -81,8 +83,9 @@ Do not invent settings or skip the confirmation prompts.
 - **`Makefile` orchestration** with identical verbs across stacks
   (`make deps|format|lint|tests|coverage|security|pr_check`) and `make cc` to drive
   Claude Code.
-- **Canonical repo settings** in `.github/repo-settings/`, applied via
-  `make apply_repo_settings`.
+- **Canonical repo settings** in `.github/repo-settings/` — the `main` branch
+  ruleset, PR-merge prefs, and Dependabot automated security updates — applied
+  via `make apply_repo_settings`.
 
 ## Prerequisites
 
