@@ -39,10 +39,10 @@
 - feat: AGENTS.md dual-stack router + CLAUDE.md import + cursor/mcp config
 - refactor: canonical .agents/skills + single .claude/skills symlink (drop conf-driven sync)
 - chore: disable stale Stop hook during build (Task 7 reinstalls stack-aware version)
-- feat: react agent rules in .agents/rules/react (new Gridium frontend conventions)
+- feat: react agent rules in .agents/rules/react (new frontend conventions)
 - fix: generalize langfuse example + unify package placeholder in python rules
 - feat: python agent rules in .agents/rules/python (ported + genericized)
-- feat: shared agent rules in .agents/rules/shared (ported from gridium-agent)
+- feat: shared agent rules in .agents/rules/shared (ported from an internal production repo)
 - chore: root tooling env + gitignore; drop broken Makefile and skill-sync script
 - docs: implementation plan for dual-stack CI/CD + testing template (issue #1)
 - docs: design for dual-stack CI/CD + testing template (issue #1)

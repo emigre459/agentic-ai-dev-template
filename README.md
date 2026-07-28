@@ -1,6 +1,6 @@
-# agentic-ai-powered-repo
+# agentic-ai-dev-template
 
-A Gridium template repo that seeds new repos with our AI-powered development best
+A template repo that seeds new repos with AI-powered development best
 practices — CI/CD, testing, agent rules/skills, and repo settings — for either a
 Python backend or a React + TypeScript frontend.
 
@@ -13,8 +13,8 @@ reconciles this repo's `main` branch protection + PR-merge settings, and opens
 a PR with the init commit (the reconciled settings make `main` PR-only).
 
 ```text
-You are initializing a new repository created from Gridium's
-agentic-ai-powered-repo template. Drive this end to end.
+You are initializing a new repository created from the
+agentic-ai-dev-template repo. Drive this end to end.
 
 FIRST: use your harness's native structured-interview tool if you have one
 (e.g. Claude Code's AskUserQuestion, Cursor's equivalent) to ask the questions
@@ -23,10 +23,10 @@ chat questions if no such tool exists. Ask ONE question at a time.
 
 Interview:
 1. Is this a FRONTEND or BACKEND repo?
-2. Confirm the stack, seeded with Gridium org defaults:
+2. Confirm the stack, seeded with sensible defaults:
    - Backend default: Python 3.13 + uv (black, ruff, mypy, pytest, bandit).
    - Frontend default: Vite + React + TypeScript + bun
-     (Biome [Gridium snapmeter formatting], Vitest, tsc).
+     (Biome [opinionated formatting], Vitest, tsc).
    The two shipped stacks are the only supported choices today; other
    languages/frameworks are a future template extension.
 3. What is the project NAME (short, kebab-case) and a ONE-LINE description?
@@ -96,5 +96,3 @@ Do not invent settings or skip the confirmation prompts.
 So a frontend-only developer can take this template, run `make init STACK=react`,
 and from then on never touch Python or `uv` — the one-time `make init`/`make
 apply_repo_settings` calls use `python3`, which is already present.
-
-See `docs/superpowers/specs/2026-06-09-cicd-testing-template-design.md` for the design.

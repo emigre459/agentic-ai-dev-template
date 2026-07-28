@@ -8,7 +8,7 @@ appliesTo: "**/*.{ts,tsx}"
 ## Tooling (run via the Makefile)
 
 - **Format + lint:** Biome (`make lint` / `make format`). Biome is configured to match
-  Gridium's existing Prettier output: single quotes, semicolons, trailing commas
+  this project's existing Prettier output: single quotes, semicolons, trailing commas
   everywhere, 2-space indent, 80-col width, always-parenthesized arrow params.
 - **Types:** `tsc --noEmit` (strict mode) is part of `make lint`. No `any` without a
   written justification; prefer `unknown` + narrowing.

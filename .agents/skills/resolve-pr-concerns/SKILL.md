@@ -150,7 +150,7 @@ Surface the detected mode to the user in one line ("Bugbot auto-runs on push her
 
 ### Step 1b (optional). Pre-pass code review when no bots are configured
 
-If the repo has no automated PR reviewers configured (no Cursor Bugbot, no Copilot review, no equivalent), invoke `superpowers:requesting-code-review` to dispatch a fresh reviewer subagent against the PR's SHA range before enumerating. Skip this on Gridium repos — bugbot and Copilot review are configured. Only relevant for repos lacking bot review.
+If the repo has no automated PR reviewers configured (no Cursor Bugbot, no Copilot review, no equivalent), invoke `superpowers:requesting-code-review` to dispatch a fresh reviewer subagent against the PR's SHA range before enumerating. Skip this when the repo already has bot review configured — only relevant for repos lacking one.
 
 ## Step 2: Enumerate concerns
 

@@ -92,7 +92,6 @@ def test_initialize_react_removes_root_python_tooling(template_tree: Path) -> No
     assert "react-lint" not in ci
     # no uv dependabot entry survives — react removes the root pyproject.toml,
     # so a leftover uv entry would scan for a manifest that doesn't exist
-    # (caught by Bugbot on gridium-agent-frontend#13)
     dependabot = (template_tree / ".github" / "dependabot.yml").read_text()
     assert 'package-ecosystem: "uv"' not in dependabot
     assert 'package-ecosystem: "bun"' in dependabot
