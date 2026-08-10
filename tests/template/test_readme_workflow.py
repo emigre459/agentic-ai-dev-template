@@ -35,3 +35,11 @@ def test_initialization_prompt_protects_existing_work_and_pr_template() -> None:
     assert "git diff --name-status" in readme
     assert "do not replace the template with a one-line" in readme
     assert 'gh pr create --fill --body "Closes #' not in readme
+
+
+def test_prerequisites_name_preflight_package_managers() -> None:
+    """Make the pre-init uv/bun requirements visible in the prerequisites table."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "Initialize or work in a **React** repo" in readme
+    assert "Initialize or work in a **Python** repo" in readme

@@ -1,8 +1,9 @@
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from scripts.init_template import ensure_clean_worktree, initialize
+from scripts.init_template import ensure_clean_worktree, initialize, main
 
 
 def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
@@ -199,6 +200,55 @@ def test_ensure_clean_worktree_accepts_clean_repo(tmp_path: Path) -> None:
         return CleanResult()
 
     ensure_clean_worktree(tmp_path, runner=clean_runner)
+
+
+def test_ensure_clean_worktree_reports_missing_git(tmp_path: Path) -> None:
+    """Turn a missing Git executable into an actionable initialization error."""
+
+    def missing_git_runner(*args: object, **kwargs: object) -> object:
+        raise FileNotFoundError("git")
+
+    with pytest.raises(RuntimeError, match="Git is not installed"):
+        ensure_clean_worktree(tmp_path, runner=missing_git_runner)
+
+
+def test_ensure_clean_worktree_reports_git_status_failure(tmp_path: Path) -> None:
+    """Preserve Git's diagnostic without leaking a subprocess traceback."""
+
+    def failing_git_runner(*args: object, **kwargs: object) -> object:
+        raise subprocess.CalledProcessError(
+            128,
+            ["git", "status"],
+            stderr="fatal: not a git repository",
+        )
+
+    with pytest.raises(RuntimeError, match="fatal: not a git repository"):
+        ensure_clean_worktree(tmp_path, runner=failing_git_runner)
+
+
+def test_main_requires_repo_when_applying_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject --apply-settings without its required explicit GitHub target."""
+    monkeypatch.setattr("scripts.init_template.ensure_clean_worktree", lambda *_: None)
+    monkeypatch.setattr("scripts.init_template.initialize", lambda *_, **__: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "--stack",
+                "python",
+                "--project-name",
+                "acme-svc",
+                "--description",
+                "service",
+                "--apply-settings",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    assert "--repo is required when --apply-settings is used" in capsys.readouterr().err
 
 
 def test_initialize_rejects_bad_stack(template_tree: Path) -> None:

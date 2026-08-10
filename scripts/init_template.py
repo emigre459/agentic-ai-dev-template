@@ -97,15 +97,25 @@ def ensure_clean_worktree(
     Raises
     ------
     RuntimeError
-        If Git reports tracked or untracked changes.
+        If Git is unavailable, status cannot be read, or the repository contains
+        tracked or untracked changes.
     """
-    result = runner(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-        cwd=Path(root),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    try:
+        result = runner(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=Path(root),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Git is not installed or is not available on PATH. Install Git, "
+            "then rerun initialization."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "No error detail returned.").strip()
+        raise RuntimeError(f"`git status` failed: {detail}") from exc
     changed = str(getattr(result, "stdout", "")).strip()
     if changed:
         raise RuntimeError(
@@ -453,12 +463,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stack", required=True, choices=STACKS)
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--description", required=True)
-    parser.add_argument("--repo", help="explicit owner/repository settings target")
+    parser.add_argument(
+        "--repo",
+        help="explicit owner/repository settings target (required with --apply-settings)",
+    )
     # Settings are applied by the separate `make apply_repo_settings` step (idempotent,
     # confirm-gated, re-runnable) — see the README interview flow. `make init` only
     # transforms the tree. Pass --apply-settings to fold the apply into init.
-    parser.add_argument("--apply-settings", action="store_true")
+    parser.add_argument(
+        "--apply-settings",
+        action="store_true",
+        help="reconcile settings during init; requires --repo",
+    )
     args = parser.parse_args(argv)
+    if args.apply_settings and not args.repo:
+        parser.error("--repo is required when --apply-settings is used")
     try:
         ensure_clean_worktree(Path.cwd())
     except RuntimeError as exc:

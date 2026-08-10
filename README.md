@@ -112,8 +112,8 @@ settings, skip confirmation prompts, or continue after a preflight failure.
 | To… | You need |
 |-----|----------|
 | Run initialization preflight and repository settings | `git`, authenticated `gh`, repository administrator permission, enabled GitHub Issues, and **`python3`** available on PATH. |
-| Work in a **React** repo (after init) | **`bun`** only — no Python toolchain at all. |
-| Work in a **Python** repo (after init) | **`uv`** (Python 3.13). |
+| Initialize or work in a **React** repo | **`bun`** only — no Python toolchain at all. |
+| Initialize or work in a **Python** repo | **`uv`** (Python 3.13). |
 | Hack on the **template itself** (run `tests/template`, `make machinery_*`) | `uv` — the machinery's own test suite uses pytest. (Template maintainers only; not template *users*.) |
 
 The preflight checks the selected stack's package manager before any mutation.
