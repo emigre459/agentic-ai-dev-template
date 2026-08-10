@@ -119,3 +119,7 @@ settings, skip confirmation prompts, or continue after a preflight failure.
 The preflight checks the selected stack's package manager before any mutation.
 The initialization and repository-settings scripts themselves use only the
 Python standard library.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
