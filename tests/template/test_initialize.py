@@ -166,9 +166,25 @@ def test_initialize_escapes_special_chars_in_python_manifest(
 def test_initialize_rejects_project_name_that_cannot_be_a_python_package(
     template_tree: Path,
 ) -> None:
-    """Reject a distribution name that cannot produce a valid import package."""
+    """Reject an invalid package name before changing any template files."""
+    ignored_cache_dirs = {".mypy_cache", ".pytest_cache", ".ruff_cache"}
+    before = {
+        path.relative_to(template_tree): path.read_bytes()
+        for path in template_tree.rglob("*")
+        if path.is_file()
+        and ignored_cache_dirs.isdisjoint(path.relative_to(template_tree).parts)
+    }
+
     with pytest.raises(ValueError, match="valid Python package"):
         initialize(template_tree, "python", "123-service", "svc", apply_settings=False)
+
+    after = {
+        path.relative_to(template_tree): path.read_bytes()
+        for path in template_tree.rglob("*")
+        if path.is_file()
+        and ignored_cache_dirs.isdisjoint(path.relative_to(template_tree).parts)
+    }
+    assert after == before
 
 
 def test_ensure_clean_worktree_rejects_existing_changes(tmp_path: Path) -> None:

@@ -364,6 +364,11 @@ def initialize(
         raise RuntimeError("no stacks/ directory — repo already initialized?")
     if not (root / "stacks" / stack).is_dir():
         raise RuntimeError(f"stacks/{stack} not found")
+    # Validate stack-specific inputs before _promote or any deletion. Keeping
+    # this ahead of all mutations makes a rejected initialization safely
+    # retryable without requiring Git recovery.
+    if stack == "python":
+        python_package_name(project_name)
 
     # 2. Promote chosen stack to root, then 3. prune.
     _promote(root, stack)
