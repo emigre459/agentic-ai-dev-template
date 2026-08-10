@@ -2,14 +2,15 @@
 """Initialize this dual-stack template into a single-stack project.
 
 `make init STACK=python|react ...` promotes the chosen stack's files to the repo
-root, prunes the other stack, rewrites the marker-wrapped generated files, applies
-the repo settings, and deletes the template-only machinery.
+root, prunes the other stack, rewrites generated files, and deletes template-only
+initialization machinery. Repository settings are reconciled separately.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import keyword
 import re
 import shutil
 import subprocess
@@ -78,6 +79,67 @@ _MANIFEST_FORMAT: dict[str, Callable[[str], str]] = {
 
 def _other(stack: str) -> str:
     return "react" if stack == "python" else "python"
+
+
+def ensure_clean_worktree(
+    root: Path | str,
+    runner: Callable[..., object] = subprocess.run,
+) -> None:
+    """Refuse initialization when the repository contains existing local work.
+
+    Parameters
+    ----------
+    root
+        Repository root to inspect.
+    runner
+        Subprocess-compatible command runner, by default ``subprocess.run``.
+
+    Raises
+    ------
+    RuntimeError
+        If Git reports tracked or untracked changes.
+    """
+    result = runner(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=Path(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    changed = str(getattr(result, "stdout", "")).strip()
+    if changed:
+        raise RuntimeError(
+            "Refusing to initialize because the repository has existing local "
+            "changes. Commit or stash them, then rerun `make init`.\n" + changed
+        )
+
+
+def python_package_name(project_name: str) -> str:
+    """Derive a Python import package from a kebab-case project name.
+
+    Parameters
+    ----------
+    project_name
+        Distribution/project name supplied during initialization.
+
+    Returns
+    -------
+    str
+        Import-safe package name with hyphens converted to underscores.
+
+    Raises
+    ------
+    ValueError
+        If the derived value is not a valid Python identifier.
+    """
+    package_name = project_name.replace("-", "_")
+    if not package_name.isidentifier() or keyword.iskeyword(package_name):
+        raise ValueError(
+            f"{project_name!r} cannot produce a valid Python package name. "
+            "Use lowercase kebab-case beginning with a letter, for example "
+            "'acme-service'."
+        )
+    return package_name
 
 
 def filter_html_markers(text: str, keep: str) -> str:
@@ -236,12 +298,52 @@ def _substitute_manifest_name(root: Path, project_name: str) -> None:
             )
 
 
+def _rename_python_package(root: Path, project_name: str) -> None:
+    """Rename the sample Python package and every generated import.
+
+    Parameters
+    ----------
+    root
+        Initialized repository root after the Python stack is promoted.
+    project_name
+        Kebab-case distribution name supplied by the user.
+    """
+    package_name = python_package_name(project_name)
+    source = root / "src" / "example_app"
+    destination = root / "src" / package_name
+    if not source.is_dir():
+        raise RuntimeError(f"sample Python package not found: {source}")
+    if destination.exists() and destination != source:
+        raise RuntimeError(f"Python package destination already exists: {destination}")
+    if destination != source:
+        shutil.move(str(source), str(destination))
+
+    pyproject = root / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    text = text.replace(
+        'module-name = "example_app"', f'module-name = "{package_name}"'
+    )
+    text = text.replace(
+        "# Sample package lives at `src/example_app/`; init swaps both the project name\n"
+        "# and this module-name to the user's chosen package at `make init`.\n",
+        f"# Build the project package from `src/{package_name}/`.\n",
+    )
+    pyproject.write_text(text, encoding="utf-8")
+
+    for test_file in (root / "tests").rglob("*.py"):
+        test_file.write_text(
+            test_file.read_text(encoding="utf-8").replace("example_app", package_name),
+            encoding="utf-8",
+        )
+
+
 def initialize(
     root: Path | str,
     stack: str,
     project_name: str,
     description: str,
     apply_settings: bool = False,
+    repo: str | None = None,
     runner: Callable[..., object] = subprocess.run,
 ) -> None:
     """Collapse the template into a single-stack project rooted at ``root``."""
@@ -284,6 +386,8 @@ def initialize(
     _rewrite_ci_workdir(root, stack)
     _rewrite_ci_job_ids(root, stack)
     _set_required_status_checks(root)
+    if stack == "python":
+        _rename_python_package(root, project_name)
     for rel in _FILL_ONLY:
         p = root / rel
         if p.exists():
@@ -306,14 +410,24 @@ def initialize(
     # default `make init` path passes apply_settings=False — settings are applied by
     # the separate, idempotent `make apply_repo_settings` step (see README).
     if apply_settings:
+        if repo is None:
+            raise ValueError("repo is required when apply_settings is enabled")
         runner(
-            [sys.executable, str(root / "scripts" / "apply_repo_settings.py")],
+            [
+                sys.executable,
+                str(root / "scripts" / "apply_repo_settings.py"),
+                "--repo",
+                repo,
+                "--phase",
+                "bootstrap",
+            ],
             check=True,
         )
 
     # 6. Self-destruct template-only machinery.
     to_remove = [
         root / "scripts" / "init_template.py",
+        root / "scripts" / "preflight_init.py",
         root / "tests" / "template",
     ]
     if stack == "react":
@@ -339,22 +453,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stack", required=True, choices=STACKS)
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--description", required=True)
+    parser.add_argument("--repo", help="explicit owner/repository settings target")
     # Settings are applied by the separate `make apply_repo_settings` step (idempotent,
     # confirm-gated, re-runnable) — see the README interview flow. `make init` only
     # transforms the tree. Pass --apply-settings to fold the apply into init.
     parser.add_argument("--apply-settings", action="store_true")
     args = parser.parse_args(argv)
+    try:
+        ensure_clean_worktree(Path.cwd())
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     initialize(
         Path.cwd(),
         args.stack,
         args.project_name,
         args.description,
         apply_settings=args.apply_settings,
+        repo=args.repo,
     )
     print(
         f"Initialized as a {args.stack} project. "
-        "Run `make apply_repo_settings` to reconcile the repo's main ruleset + "
-        "PR-merge prefs, then commit and push."
+        "Run `make apply_repo_settings_bootstrap TARGET_REPO=owner/repository` "
+        "before the setup PR, then finalize settings after it merges."
     )
     return 0
 
