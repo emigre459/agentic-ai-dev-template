@@ -76,6 +76,7 @@ CSS = """
   pre code { background: none; padding: 0; color: inherit; }
   .callout { background: var(--callout-bg); border-left: 4px solid var(--accent); padding: .9rem 1.2rem;
     border-radius: 0 6px 6px 0; margin: 1.2rem 0; }
+  .callout.flag { background: #fef2f2; border-left-color: #dc2626; }
   .toc { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.5rem; margin: 1.5rem 0; }
   .toc a { color: var(--accent); text-decoration: none; }
   .toc ul { margin: .3rem 0; }
