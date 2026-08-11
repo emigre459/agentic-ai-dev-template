@@ -14,10 +14,10 @@ diagrams, quiz questions) actually changes per diff. Regenerating the full
 takes a small JSON spec with just the content and renders the final page.
 
 Usage:
-    python render.py spec.json [-o output.html]
+    uv run python scripts/render.py spec.json [-o output.html]
 
-If -o is omitted, writes to <dir-of-spec>/YYYY-MM-DD-<slug>.html (matching the
-skill's filename convention), where <slug> comes from the spec's "slug" field.
+If -o is omitted, writes to /tmp/YYYY-MM-DD-explanation-<slug>.html, where
+<slug> comes from the spec's "slug" field (falling back to a slugified "title").
 
 Spec format (JSON):
 {
@@ -27,6 +27,8 @@ Spec format (JSON):
   "sections": [
     {"id": "background", "heading": "Background", "html": "<p>...</p>"},
     {"id": "intuition", "heading": "Intuition", "html": "<p>...</p><div class=\"diagram\">...</div>"},
+    {"id": "judgment-calls", "heading": "Judgment Calls & Assumptions",
+     "html": "<div class=\"callout flag\"><strong>Scope added:</strong> jitter was not requested, but ...</div>"},
     {"id": "code", "heading": "Code walkthrough", "html": "<pre><code>...</code></pre>"}
   ],
   "quiz": [
@@ -45,10 +47,10 @@ list them in whatever order reads naturally when writing the spec; don't try to
 manually vary position to "seem random", the script already guarantees it.
 
 The "html" fields are raw HTML — write real markup (headings, <pre> blocks,
-tables, ".diagram"/".callout" divs per the skill's CSS classes below), not
-markdown. This keeps the script a pure template renderer; all the writing
-judgment (what to explain, which diagrams to draw) still belongs to the LLM
-following the explain-diff-html recipe, same as before — this just removes
+tables, and the styled divs listed in the Format section of the explain-diff
+skill's SKILL.md), not markdown. This keeps the script a pure template renderer;
+all the writing judgment (what to explain, which diagrams to draw) still belongs
+to the LLM following the explain-diff skill, same as before — this just removes
 the repetitive part.
 """
 import argparse
@@ -148,7 +150,7 @@ def render(spec: dict) -> str:
             options = list(q["options"])
             random.shuffle(options)
             opts = "\n".join(
-                f'<button class="quiz-opt" data-correct="{"true" if o["correct"] else "false"}">{o["text"]}</button>'
+                f'<button class="quiz-opt" data-correct="{"true" if o["correct"] else "false"}">{html.escape(o["text"])}</button>'
                 for o in options
             )
             blocks.append(f'<div class="quiz-q">\n<p><strong>{html.escape(q["question"])}</strong></p>\n{opts}\n</div>')
@@ -191,8 +193,23 @@ def main():
     ap.add_argument("-o", "--output", type=Path, default=None, help="output HTML path")
     args = ap.parse_args()
 
-    spec = json.loads(args.spec.read_text(encoding="utf-8"))
-    out_html = render(spec)
+    try:
+        raw = args.spec.read_text(encoding="utf-8")
+    except OSError as exc:
+        sys.exit(f"render.py: cannot read spec {args.spec}: {exc}")
+
+    try:
+        spec = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        sys.exit(f"render.py: spec {args.spec} is not valid JSON: {exc}")
+
+    if not isinstance(spec, dict) or "title" not in spec:
+        sys.exit(f"render.py: spec {args.spec} must be a JSON object with a \"title\" key")
+
+    try:
+        out_html = render(spec)
+    except (KeyError, TypeError) as exc:
+        sys.exit(f"render.py: malformed spec {args.spec}: missing or invalid field {exc}")
 
     if args.output:
         out_path = args.output
