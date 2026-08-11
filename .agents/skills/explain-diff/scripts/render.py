@@ -134,13 +134,13 @@ def render(spec: dict) -> str:
     quiz = spec.get("quiz", [])
 
     toc_items = "\n".join(
-        f'  <li><a href="#{s["id"]}">{html.escape(s["heading"])}</a></li>' for s in sections
+        f'  <li><a href="#{html.escape(s["id"])}">{html.escape(s["heading"])}</a></li>' for s in sections
     )
     if quiz:
         toc_items += '\n  <li><a href="#quiz">Quiz</a></li>'
 
     body_sections = "\n\n".join(
-        f'<h2 id="{s["id"]}">{html.escape(s["heading"])}</h2>\n{s["html"]}' for s in sections
+        f'<h2 id="{html.escape(s["id"])}">{html.escape(s["heading"])}</h2>\n{s["html"]}' for s in sections
     )
 
     quiz_html = ""
@@ -150,7 +150,7 @@ def render(spec: dict) -> str:
             options = list(q["options"])
             random.shuffle(options)
             opts = "\n".join(
-                f'<button class="quiz-opt" data-correct="{"true" if o["correct"] else "false"}">{html.escape(o["text"])}</button>'
+                f'<button class="quiz-opt" data-correct="{"true" if o["correct"] is True else "false"}">{html.escape(o["text"])}</button>'
                 for o in options
             )
             blocks.append(f'<div class="quiz-q">\n<p><strong>{html.escape(q["question"])}</strong></p>\n{opts}\n</div>')
@@ -215,7 +215,7 @@ def main():
         out_path = args.output
     else:
         date_prefix = datetime.date.today().strftime("%Y-%m-%d")
-        slug = spec.get("slug") or slugify(spec["title"])
+        slug = slugify(spec.get("slug") or spec["title"])
         out_path = Path(f"/tmp/{date_prefix}-explanation-{slug}.html")
 
     out_path.write_text(out_html, encoding="utf-8")
