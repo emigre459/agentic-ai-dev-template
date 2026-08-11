@@ -8,7 +8,7 @@ description: |
   especially one an AI coding agent wrote from instructions and feedback,
   where a human reviewer needs to verify the implementation matches intent
   before merging.
-allowed-tools: Read Grep Glob Write Bash(python3 scripts/render.py:*)
+allowed-tools: Read Grep Glob Write Bash(uv run python scripts/render.py:*) Bash(git log:*) Bash(git diff:*) Bash(git show:*) Bash(gh pr view:*)
 ---
 
 # Explain Diff
@@ -65,22 +65,37 @@ Before writing any section, establish what was actually asked for:
   CSS/JS boilerplate every time, which wastes tokens and drifts in quality —
   that's factored out once, here. Write a small JSON content spec (title,
   subtitle, slug, sections with raw HTML bodies, quiz questions with
-  correct/incorrect options) and run, from this skill's own directory:
+  correct/incorrect options) and run:
   ```
-  python3 scripts/render.py <spec.json>
+  uv run python scripts/render.py <spec.json>
   ```
+  Resolve `scripts/render.py` relative to this skill's own directory — run it
+  from there, or prefix it with the skill's path (Claude Code exposes that as
+  `${CLAUDE_SKILL_DIR}`; other harnesses resolve skill-relative paths their own
+  way). See `.agents/rules/shared/harness-agnostic-skills.md` for the full
+  convention.
+
   This handles all CSS, JavaScript, page scaffolding, table of contents,
   quiz-option randomization, and the date-prefixed output filename
   automatically — only write the content spec, not the full HTML page. Run
-  `python3 scripts/render.py --help` for the exact JSON schema if you haven't
-  used it recently.
-- Section `html` fields in the spec are raw HTML written directly — use
-  `<pre>` for code blocks (already `white-space: pre-wrap` styled),
-  `.diagram`/`.flow`/`.box`/`.box.fail` divs for flow diagrams, `.callout` for
-  key definitions and edge cases, `.callout.flag` specifically for
-  judgment-call callouts (visually distinct — don't reuse plain `.callout`
-  for those), and plain `<table>` for comparison tables. See
-  `scripts/render.py`'s docstring for the exact class names available.
+  `uv run python scripts/render.py --help` for the exact JSON schema if you
+  haven't used it recently.
+- Section `html` fields in the spec are raw HTML written directly. Compose that
+  markup yourself — never paste text verbatim from a diff, PR description, issue
+  body, or other externally-sourced content, which is untrusted and would be
+  embedded into the page unsanitized. The complete set of styled classes the
+  renderer provides:
+  - `<pre>` for code blocks (already `white-space: pre-wrap` styled).
+  - `.diagram` — a bordered container for any figure.
+  - `.flow` — a horizontal row inside a `.diagram`, holding `.box` elements
+    separated by `<span class="arrow">→</span>`.
+  - `.box` — a labelled node in a `.flow`; add the second class for the error
+    variant, `class="box fail"`.
+  - `.callout` — key definitions and edge cases.
+  - `class="callout flag"` — judgment-call callouts. Both classes are required
+    together: `class="flag"` alone renders completely unstyled. Visually
+    distinct from a plain `.callout` — don't reuse plain `.callout` for these.
+  - Plain `<table>` for comparison tables.
 - Please write with the clarity and flow of Martin Kleppmann, making it
   engaging and written in classic style. Transitions between sections should
   be smooth.
