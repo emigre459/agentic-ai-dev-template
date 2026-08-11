@@ -8,7 +8,7 @@ description: |
   especially one an AI coding agent wrote from instructions and feedback,
   where a human reviewer needs to verify the implementation matches intent
   before merging.
-allowed-tools: Read Grep Glob Write Bash(uv run python scripts/render.py:*) Bash(git log:*) Bash(git diff:*) Bash(git show:*) Bash(gh pr view:*)
+allowed-tools: Read Grep Glob Write Artifact Bash(uv run python scripts/render.py:*) Bash(git log:*) Bash(git diff:*) Bash(git show:*) Bash(gh pr view:*)
 ---
 
 # Explain Diff
@@ -62,7 +62,7 @@ Before writing any section, establish what was actually asked for:
 
 - **Use `scripts/render.py` (bundled with this skill) instead of hand-writing
   HTML.** Repeated invocations of this skill tend to regenerate near-identical
-  CSS/JS boilerplate every time, which wastes tokens and drifts in quality —
+  CSS boilerplate every time, which wastes tokens and drifts in quality —
   that's factored out once, here. Write a small JSON content spec (title,
   subtitle, slug, sections with raw HTML bodies, quiz questions with
   correct/incorrect options) and run:
@@ -75,11 +75,22 @@ Before writing any section, establish what was actually asked for:
   way). See `.agents/rules/shared/harness-agnostic-skills.md` for the full
   convention.
 
-  This handles all CSS, JavaScript, page scaffolding, table of contents,
-  quiz-option randomization, and the date-prefixed output filename
-  automatically — only write the content spec, not the full HTML page. Run
-  `uv run python scripts/render.py --help` for the exact JSON schema if you
-  haven't used it recently.
+  This handles all CSS, page scaffolding, table of contents, quiz-option
+  randomization (interactivity is pure CSS, no JavaScript — this keeps it
+  working in sandboxed previews that disable script execution), and the
+  date-prefixed output filename automatically — only write the content spec,
+  not the full HTML page. Run `uv run python scripts/render.py --help` for the
+  exact JSON schema if you haven't used it recently.
+- **Prefer a rich-page publishing mechanism over a raw file attachment when
+  showing the result.** If the current harness has one (e.g. Claude Code's
+  `Artifact` tool), publish the rendered page through it rather than sending
+  the file as a generic attachment. A plain file-attachment preview has been
+  observed to intercept same-page anchor-link (`<a href="#...">`) clicks,
+  breaking the table of contents, even though the underlying HTML is correct
+  (verified working in an unrestricted browser) — a rich-page publishing
+  pipeline does not have this problem. If no such mechanism is available in
+  the current harness, tell the user to open the rendered file directly in a
+  browser for full interactivity.
 - Section `html` fields in the spec are raw HTML written directly. Compose that
   markup yourself — never paste text verbatim from a diff, PR description, issue
   body, or other externally-sourced content, which is untrusted and would be
