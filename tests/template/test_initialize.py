@@ -1,8 +1,9 @@
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from scripts.init_template import initialize
+from scripts.init_template import ensure_clean_worktree, initialize, main
 
 
 def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
@@ -15,7 +16,8 @@ def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
     )
     assert not (template_tree / "stacks").exists()
     assert (template_tree / "pyproject.toml").exists()
-    assert (template_tree / "src" / "example_app" / "greeting.py").exists()
+    assert (template_tree / "src" / "acme_svc" / "greeting.py").exists()
+    assert not (template_tree / "src" / "example_app").exists()
     assert (template_tree / "Makefile").exists()
     # other stack's rules gone, chosen + shared kept
     assert not (template_tree / ".agents" / "rules" / "react").exists()
@@ -23,6 +25,7 @@ def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
     assert (template_tree / ".agents" / "rules" / "shared").exists()
     # machinery self-destructed
     assert not (template_tree / "scripts" / "init_template.py").exists()
+    assert not (template_tree / "scripts" / "preflight_init.py").exists()
     assert not (template_tree / "tests" / "template").exists()
     # AGENTS.md collapsed + filled
     agents = (template_tree / "AGENTS.md").read_text()
@@ -56,7 +59,11 @@ def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
     pyproject = (template_tree / "pyproject.toml").read_text()
     assert "acme-svc" in pyproject
     assert "template-placeholder-project-name" not in pyproject
+    assert 'module-name = "acme_svc"' in pyproject
     assert "{{" not in pyproject
+    tests = (template_tree / "tests" / "test_greeting.py").read_text()
+    assert "from acme_svc.greeting import greet" in tests
+    assert "example_app" not in tests
     assert (
         "template-placeholder-project-name"
         not in (template_tree / "uv.lock").read_text()
@@ -134,6 +141,7 @@ def test_initialize_keeps_machinery_when_settings_apply_fails(
             "acme-svc",
             "svc",
             apply_settings=True,
+            repo="acme/repo",
             runner=failing_runner,
         )
     # apply runs BEFORE self-destruct, so the init machinery survives a failed apply
@@ -153,6 +161,110 @@ def test_initialize_escapes_special_chars_in_python_manifest(
     data = tomllib.loads((template_tree / "pyproject.toml").read_text(encoding="utf-8"))
     assert data["project"]["description"] == desc
     assert data["project"]["name"] == "acme-svc"
+
+
+def test_initialize_rejects_project_name_that_cannot_be_a_python_package(
+    template_tree: Path,
+) -> None:
+    """Reject an invalid package name before changing any template files."""
+    ignored_cache_dirs = {".mypy_cache", ".pytest_cache", ".ruff_cache"}
+    before = {
+        path.relative_to(template_tree): path.read_bytes()
+        for path in template_tree.rglob("*")
+        if path.is_file()
+        and ignored_cache_dirs.isdisjoint(path.relative_to(template_tree).parts)
+    }
+
+    with pytest.raises(ValueError, match="valid Python package"):
+        initialize(template_tree, "python", "123-service", "svc", apply_settings=False)
+
+    after = {
+        path.relative_to(template_tree): path.read_bytes()
+        for path in template_tree.rglob("*")
+        if path.is_file()
+        and ignored_cache_dirs.isdisjoint(path.relative_to(template_tree).parts)
+    }
+    assert after == before
+
+
+def test_ensure_clean_worktree_rejects_existing_changes(tmp_path: Path) -> None:
+    """Refuse destructive initialization when Git reports existing work."""
+
+    class DirtyResult:
+        """Represent a successful Git command that reports a modified file."""
+
+        stdout = " M README.md\n"
+
+    def dirty_runner(*args: object, **kwargs: object) -> DirtyResult:
+        """Return a deterministic dirty-worktree result."""
+        return DirtyResult()
+
+    with pytest.raises(RuntimeError, match="existing local changes"):
+        ensure_clean_worktree(tmp_path, runner=dirty_runner)
+
+
+def test_ensure_clean_worktree_accepts_clean_repo(tmp_path: Path) -> None:
+    """Allow initialization when Git reports no existing work."""
+
+    class CleanResult:
+        """Represent a successful Git command with no changed files."""
+
+        stdout = ""
+
+    def clean_runner(*args: object, **kwargs: object) -> CleanResult:
+        """Return a deterministic clean-worktree result."""
+        return CleanResult()
+
+    ensure_clean_worktree(tmp_path, runner=clean_runner)
+
+
+def test_ensure_clean_worktree_reports_missing_git(tmp_path: Path) -> None:
+    """Turn a missing Git executable into an actionable initialization error."""
+
+    def missing_git_runner(*args: object, **kwargs: object) -> object:
+        raise FileNotFoundError("git")
+
+    with pytest.raises(RuntimeError, match="Git is not installed"):
+        ensure_clean_worktree(tmp_path, runner=missing_git_runner)
+
+
+def test_ensure_clean_worktree_reports_git_status_failure(tmp_path: Path) -> None:
+    """Preserve Git's diagnostic without leaking a subprocess traceback."""
+
+    def failing_git_runner(*args: object, **kwargs: object) -> object:
+        raise subprocess.CalledProcessError(
+            128,
+            ["git", "status"],
+            stderr="fatal: not a git repository",
+        )
+
+    with pytest.raises(RuntimeError, match="fatal: not a git repository"):
+        ensure_clean_worktree(tmp_path, runner=failing_git_runner)
+
+
+def test_main_requires_repo_when_applying_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject --apply-settings without its required explicit GitHub target."""
+    monkeypatch.setattr("scripts.init_template.ensure_clean_worktree", lambda *_: None)
+    monkeypatch.setattr("scripts.init_template.initialize", lambda *_, **__: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "--stack",
+                "python",
+                "--project-name",
+                "acme-svc",
+                "--description",
+                "service",
+                "--apply-settings",
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    assert "--repo is required when --apply-settings is used" in capsys.readouterr().err
 
 
 def test_initialize_rejects_bad_stack(template_tree: Path) -> None:
