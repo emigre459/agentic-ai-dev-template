@@ -4,10 +4,11 @@ description: |
   Produce a rich, self-contained HTML explanation of a code change, diff,
   branch, or PR — background context, intuition, a code walkthrough, an
   explicit account of judgment calls the implementer made, and a
-  comprehension quiz. Use when asked to explain a diff, PR, or branch,
-  especially one an AI coding agent wrote from instructions and feedback,
-  where a human reviewer needs to verify the implementation matches intent
-  before merging.
+  comprehension quiz. Use for a cold or general diff/PR/branch explanation —
+  reviewing someone else's work, revisiting an old change, or a fresh session
+  with no memory of how the change came about. For a same-session pre-merge
+  check of a PR this session itself just wrote, use explain-diff-merge-review
+  instead.
 allowed-tools: Read Grep Glob Write Bash(uv run python scripts/render.py:*) Bash(git log:*) Bash(git diff:*) Bash(git show:*) Bash(gh pr view:*)
 ---
 
