@@ -92,34 +92,18 @@ CSS = """
   th, td { border: 1px solid var(--border); padding: .5rem .7rem; text-align: left; }
   th { background: #f0ede6; }
   .quiz-q { background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 1.2rem 1.5rem; margin: 1.2rem 0; }
+  .quiz-radio { position: absolute; opacity: 0; width: 0; height: 0; }
   .quiz-opt { display: block; width: 100%; text-align: left; padding: .6rem 1rem; margin: .4rem 0;
     border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; font-family: inherit; font-size: .95rem; }
   .quiz-opt:hover { background: #f5f2ec; }
+  .quiz-radio:checked + .quiz-opt { border-color: var(--accent); border-width: 2px; }
   .feedback { display: none; margin-top: .6rem; padding: .6rem 1rem; border-radius: 6px; font-size: .9rem; }
   .feedback.correct { background: #ecfdf3; color: #166534; border-left: 3px solid #16a34a; }
   .feedback.incorrect { background: #fef2f2; color: #991b1b; border-left: 3px solid #dc2626; }
+  .quiz-radio:checked + .quiz-opt + .feedback { display: block; }
   .badge { display: inline-block; font-size: .75rem; padding: .15rem .5rem; border-radius: 10px; font-family: sans-serif; }
   .badge.new { background: #dcfce7; color: #166534; }
   @media (max-width: 600px) { body { padding: 1rem; } .flow { flex-direction: column; } }
-"""
-
-QUIZ_JS = """
-document.querySelectorAll('.quiz-q').forEach(q => {
-  q.querySelectorAll('.quiz-opt').forEach(opt => {
-    opt.addEventListener('click', () => {
-      const correct = opt.dataset.correct === 'true';
-      let fb = opt.nextElementSibling;
-      if (!fb || !fb.classList.contains('feedback')) {
-        fb = document.createElement('div');
-        fb.className = 'feedback';
-        opt.insertAdjacentElement('afterend', fb);
-      }
-      fb.textContent = correct ? '\\u2705 Correct.' : '\\u274c Not quite \\u2014 reread the section above.';
-      fb.className = 'feedback ' + (correct ? 'correct' : 'incorrect');
-      fb.style.display = 'block';
-    });
-  });
-});
 """
 
 
@@ -146,14 +130,21 @@ def render(spec: dict) -> str:
     quiz_html = ""
     if quiz:
         blocks = []
-        for q in quiz:
+        for qi, q in enumerate(quiz):
             options = list(q["options"])
             random.shuffle(options)
-            opts = "\n".join(
-                f'<button class="quiz-opt" data-correct="{"true" if o["correct"] is True else "false"}">{html.escape(o["text"])}</button>'
-                for o in options
-            )
-            blocks.append(f'<div class="quiz-q">\n<p><strong>{html.escape(q["question"])}</strong></p>\n{opts}\n</div>')
+            opts = []
+            for oi, o in enumerate(options):
+                opt_id = f"quiz-q{qi}-opt{oi}"
+                is_correct = o["correct"] is True
+                feedback_cls = "correct" if is_correct else "incorrect"
+                feedback_text = "✅ Correct." if is_correct else "❌ Not quite — reread the section above."
+                opts.append(
+                    f'<input type="radio" name="quiz-q{qi}" id="{opt_id}" class="quiz-radio">\n'
+                    f'<label for="{opt_id}" class="quiz-opt">{html.escape(o["text"])}</label>\n'
+                    f'<div class="feedback {feedback_cls}">{feedback_text}</div>'
+                )
+            blocks.append(f'<div class="quiz-q">\n<p><strong>{html.escape(q["question"])}</strong></p>\n' + "\n".join(opts) + "\n</div>")
         quiz_html = '<h2 id="quiz">Quiz</h2>\n\n' + "\n\n".join(blocks)
 
     return f"""<!DOCTYPE html>
@@ -179,8 +170,6 @@ def render(spec: dict) -> str:
 {body_sections}
 
 {quiz_html}
-
-<script>{QUIZ_JS}</script>
 
 </body>
 </html>
