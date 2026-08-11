@@ -5,7 +5,7 @@ merge-sensitive categories, for the explain-diff-merge-review skill's
 "Pre-merge double-check" section.
 
 Usage:
-    git diff --name-only <base>..HEAD | uv run python scripts/flag_sensitive_paths.py
+    git diff --name-only $(git merge-base origin/main HEAD)..HEAD | uv run python scripts/flag_sensitive_paths.py
     uv run python scripts/flag_sensitive_paths.py path/one path/two ...
 
 Reads changed file paths from stdin (one per line) if no paths are given as

@@ -10,7 +10,7 @@ description: |
   session and wants a final pre-merge check, not a generic diff explanation.
   Refuses and points to the explain-diff skill instead when invoked without
   that same-session context.
-allowed-tools: Read Grep Glob Write Bash(uv run python scripts/render.py:*) Bash(uv run python scripts/flag_sensitive_paths.py:*) Bash(git log:*) Bash(git diff:*) Bash(git show:*) Bash(gh pr view:*)
+allowed-tools: Read Grep Glob Write Bash(uv run python scripts/render.py:*) Bash(uv run python scripts/flag_sensitive_paths.py:*) Bash(git log:*) Bash(git diff:*) Bash(git merge-base:*) Bash(git show:*) Bash(gh pr view:*)
 ---
 
 # Explain Diff — Merge Review
@@ -52,9 +52,12 @@ would misrepresent itself as having verified something it didn't.
   ordered for understanding.
 - **Pre-merge double-check**: Run, from this skill's own directory:
   ```
-  git diff --name-only <base>..HEAD | uv run python scripts/flag_sensitive_paths.py
+  git diff --name-only $(git merge-base origin/main HEAD)..HEAD | uv run python scripts/flag_sensitive_paths.py
   ```
-  using the PR's actual base and head. The script prints every changed path
+  substituting the PR's actual base branch for `origin/main`. Compare against
+  the merge base, not the base branch tip: a plain `<base>..HEAD` range also
+  lists files changed on the base branch since this one was cut, which have
+  nothing to do with this PR. The script prints every changed path
   that falls into a merge-sensitive category (migrations/schema, secrets/env,
   auth/security/permissions, dependency lockfiles, CI/CD & infra, repo
   settings), one `category: path` line per match. **Every path the script
@@ -87,8 +90,7 @@ would misrepresent itself as having verified something it didn't.
 - Section `html` fields are raw HTML written directly. Compose that markup
   yourself — never paste text verbatim from a diff, PR description, issue
   body, or other externally-sourced content, which is untrusted and would be
-  embedded into the page unsanitized. The complete set of styled classes the
-  renderer provides:
+  embedded into the page unsanitized. The styled classes you'll normally need:
   - `<pre>` for code blocks (already `white-space: pre-wrap` styled).
   - `.diagram` — a bordered container for any figure.
   - `.flow` — a horizontal row inside a `.diagram`, holding `.box` elements

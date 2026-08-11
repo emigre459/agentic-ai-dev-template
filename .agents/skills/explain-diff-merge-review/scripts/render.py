@@ -39,10 +39,10 @@ Spec format (JSON):
   ],
   "quiz": [
     {
-      "question": "Why did the first retry attempt fire immediately instead of waiting?",
+      "question": "Why was the added rate limiter built on a token bucket rather than a fixed window?",
       "options": [
-        {"text": "The jitter calculation returned a negative delay.", "correct": false},
-        {"text": "The base delay was multiplied after the first attempt, not before it.", "correct": true}
+        {"text": "A fixed window cannot express a per-tenant limit at all.", "correct": false},
+        {"text": "A token bucket absorbs short bursts instead of rejecting them at a window boundary.", "correct": true}
       ]
     }
   ]
