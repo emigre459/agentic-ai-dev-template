@@ -58,6 +58,14 @@ Before writing any section, establish what was actually asked for:
   any exist — testing whether the reader could defend the decision, not just
   recall it. Present these as interactive multiple-choice questions that give
   feedback on click.
+  - **Keep every option — correct AND incorrect — roughly the same length and
+    level of specificity.** The single most common tell is a correct answer
+    that is visibly longer or more detailed than its distractors: the reader
+    picks the fullest-sounding option without engaging the reasoning, and the
+    question tests nothing. Make the distractors as concrete and as long as the
+    right answer (a plausible-but-wrong mechanism, a real-sounding constraint),
+    and trim the correct one to match. If you can tell the answer by weighing
+    the options in your hand, so can the reader.
 
 ## Format
 
