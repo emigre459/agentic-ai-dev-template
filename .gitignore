@@ -26,3 +26,12 @@ bun.lockb
 
 # Local scratch
 local/
+
+# Repo-root scratch families that tend to leak onto the default branch: one-off
+# handoffs, per-session implementer specs, overnight runner scripts. Root-anchored
+# (leading /) so they never shadow a legitimate nested file (docs/**/SPEC_*.md,
+# scripts/*.sh). The HARD gate is tests/template/test_root_hygiene.py's root-file
+# allowlist; this just keeps the common scratch out of `git status` / `git add`.
+/HANDOFF.md
+/SPEC_*.md
+/run_*.sh
