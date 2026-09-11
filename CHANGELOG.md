@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-08-09
+- fix: require an explicit GitHub target and add a non-mutating initialization preflight for tools, authentication, remotes, admin permission, Issues, and clean Git state
+- fix: split repository settings into bootstrap and final phases so the first PR is not blocked by CI checks whose workflow has not reached `main`
+- fix: derive and rename Python import packages from the kebab-case project name instead of leaving generated repositories on `example_app`
+- fix: preserve existing local work by refusing dirty-tree initialization and replace hidden `gh` subprocess failures with actionable error messages
+- docs: update the initialization prompt to pin every GitHub mutation to `TARGET_REPO`, review generated changes before staging, and populate the PR template
+
 ## 2026-07-28
 - feat: reconcile Dependabot automated security updates via `.github/repo-settings/security-settings.json` + `make apply_repo_settings` (previously only the `main` ruleset + PR-merge prefs were canonicalized), so repos seeded from this template get it by default — no interview question, same deterministic reconciliation as the existing settings
 - fix: rename lingering `agentic-ai-powered-repo` references (package name, issue/commit text) to `agentic-ai-dev-template`

@@ -11,6 +11,7 @@ include mk/shared.mk
 export STACK
 export PROJECT_NAME
 export DESCRIPTION
+export TARGET_REPO
 
 # --- Template machinery (the init/apply scripts + tests/template that build new
 # repos; present only pre-init, removed by `make init`). These targets exist so
@@ -80,3 +81,7 @@ init: ## Initialize this template into a single-stack project. Usage: make init 
 	@# initialize. python3 is standard on macOS/Linux; uv is only needed if you
 	@# choose the Python stack.
 	@python3 scripts/init_template.py --stack "$$STACK" --project-name "$$PROJECT_NAME" --description "$$DESCRIPTION"
+
+.PHONY: init_preflight
+init_preflight: ## Verify tools, clean Git state, target repo, admin permission, and Issues before setup
+	@python3 -m scripts.preflight_init --repo "$$TARGET_REPO" --stack "$$STACK"
