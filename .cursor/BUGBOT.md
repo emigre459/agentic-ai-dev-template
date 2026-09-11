@@ -82,6 +82,19 @@ comment rather than a code finding.
 5. **Tests that pass by coincidence** — the assertion targets a value that only appears
    via a fallback path the test isn't actually exercising.
 6. **Logic errors** — off-by-one, inverted condition, wrong operator, unhandled state.
+7. **Spurious / misplaced files and unexplained new directories** (repo hygiene). The
+   HARD gate is CI (`tests/template/test_root_hygiene.py`: a repo-root file allowlist +
+   a no-tracked-file-is-gitignored invariant); Bugbot is the SECONDARY signal for the
+   fuzzier cases that gate can't express. Report:
+   - **A new file at the repo root** that isn't one of the established root files
+     (build/config, README, CHANGELOG, lockfiles) — root clutter from scratch handoffs
+     / specs / runners is exactly what leaks.
+   - **A file added to an "off" location for its kind** anywhere in the diff — a scratch
+     spec or handoff inside a source package, a one-off script outside `scripts/`.
+   - **A new top-level directory without a clear reason to live at the repo root** — most
+     notably one added WITHOUT a clear, reasonable `README.md` explaining what it is and
+     why. (New root directories are deliberately NOT CI-allowlisted: judging one is a
+     review call, not an allowlist.)
 
 When in doubt about a finding's category — report it. We adjust this filter list over
 time as patterns emerge.
