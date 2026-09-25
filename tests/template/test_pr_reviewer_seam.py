@@ -1,0 +1,149 @@
+"""Guard the reviewer-agnostic PR-review seam.
+
+The active PR reviewer is declared once, in ``.github/pr-reviewer.json``. The
+resolve-pr-concerns and build-from-issue skills and the pr-reviewer-auto-trigger
+rule read it instead of naming a vendor, so swapping reviewers is a config edit.
+These guards keep it that way: every adapter must be well-formed, have a notes
+file for its quirks, and have its trigger comment allow-listed; and no seam-scoped
+file may name a vendor (vendor detail belongs in the config or the per-adapter
+notes files).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess  # nosec B404 -- fixed argv, in-repo git, no shell
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+_REPO = Path(__file__).resolve().parents[2]
+_CONFIG = _REPO / ".github" / "pr-reviewer.json"
+_SKILLS = _REPO / ".agents" / "skills"
+_NOTES_DIR = _SKILLS / "resolve-pr-concerns" / "references" / "reviewers"
+_RULE = _REPO / ".agents" / "rules" / "shared" / "pr-reviewer-auto-trigger.md"
+
+# Whole skill directories, not a file list, so a newly-added file is covered too.
+_SEAM_DIRS = ("resolve-pr-concerns", "build-from-issue")
+_VENDOR_RE = re.compile(r"bugbot|coderabbit", re.IGNORECASE)
+
+# Adapter field -> allowed JSON types (None = JSON null).
+_FIELDS: dict[str, tuple[type | None, ...]] = {
+    "display_name": (str,),
+    "check_name": (str,),
+    "trigger_comment": (str,),
+    "bot_logins": (list,),
+    "summary_marker": (str, None),
+    "clean_pattern": (str,),
+    "findings_pattern": (str,),
+    "reviewed_sha_pattern": (str, None),
+    "self_resolves_threads": (bool,),
+    "summary_in_issue_comments": (bool,),
+}
+
+
+def _load_config() -> dict[str, Any]:
+    config: dict[str, Any] = json.loads(_CONFIG.read_text())
+    return config
+
+
+_KEYS = sorted(_load_config()["reviewers"])
+
+
+def _tracked(*paths: str) -> list[Path]:
+    """Git-tracked files under ``paths`` (local caches don't count)."""
+    out = subprocess.run(  # nosec B603 B607 -- fixed argv, in-repo git, no shell
+        ["git", "ls-files", "-z", *paths],
+        cwd=_REPO,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return [_REPO / rel for rel in sorted(filter(None, out.split("\0")))]
+
+
+def _seam_files() -> list[Path]:
+    files = [
+        path
+        for path in _tracked(*(f".agents/skills/{name}" for name in _SEAM_DIRS))
+        if _NOTES_DIR not in path.parents
+    ]
+    return files + [_RULE]
+
+
+def test_active_reviewer_is_configured() -> None:
+    config = _load_config()
+    assert (
+        config["active"] in config["reviewers"]
+    ), f"{_CONFIG.relative_to(_REPO)}: 'active' must name a key in 'reviewers'."
+
+
+@pytest.mark.parametrize("key", _KEYS)
+def test_every_adapter_is_well_formed(key: str) -> None:
+    adapter = _load_config()["reviewers"][key]
+    for field, types in _FIELDS.items():
+        assert field in adapter, f"reviewer {key!r} is missing {field!r}"
+        value = adapter[field]
+        ok = any(value is None if t is None else isinstance(value, t) for t in types)
+        assert ok, f"reviewer {key!r}: {field!r} has the wrong type ({value!r})"
+    assert adapter["bot_logins"] and all(
+        isinstance(login, str) and login for login in adapter["bot_logins"]
+    ), f"reviewer {key!r}: bot_logins must be a non-empty list of logins"
+    for field in ("clean_pattern", "findings_pattern", "reviewed_sha_pattern"):
+        if adapter[field] is not None:
+            re.compile(adapter[field])
+    assert re.compile(adapter["findings_pattern"]).groups == 1, (
+        f"reviewer {key!r}: findings_pattern needs exactly one capture group "
+        "(the finding count)"
+    )
+    if adapter["reviewed_sha_pattern"] is not None:
+        assert re.compile(adapter["reviewed_sha_pattern"]).groups == 1, (
+            f"reviewer {key!r}: reviewed_sha_pattern needs exactly one capture "
+            "group (the reviewed SHA)"
+        )
+
+
+@pytest.mark.parametrize("key", _KEYS)
+def test_every_reviewer_has_a_notes_file(key: str) -> None:
+    assert (_NOTES_DIR / f"{key}.md").is_file(), (
+        f"Add {_NOTES_DIR.relative_to(_REPO)}/{key}.md describing the reviewer's "
+        "detection quirks -- skill prose points agents there."
+    )
+
+
+@pytest.mark.parametrize("key", _KEYS)
+def test_every_trigger_comment_is_allow_listed(key: str) -> None:
+    trigger = _load_config()["reviewers"][key]["trigger_comment"]
+    settings = json.loads((_REPO / ".claude" / "settings.json").read_text())
+    expected = f"Bash(gh pr comment * {trigger}*)"
+    assert expected in settings["permissions"]["allow"], (
+        f"Add {expected!r} to .claude/settings.json permissions.allow so agents can "
+        f"trigger the {key} reviewer without a prompt."
+    )
+
+
+@pytest.mark.parametrize("path", _seam_files(), ids=lambda p: str(p.relative_to(_REPO)))
+def test_seam_files_do_not_name_a_vendor(path: Path) -> None:
+    hits = [
+        f"{lineno}: {line.strip()}"
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1)
+        if _VENDOR_RE.search(line)
+    ]
+    assert not hits, (
+        f"{path.relative_to(_REPO)} names a PR-reviewer vendor. Say 'the configured "
+        "reviewer' and read .github/pr-reviewer.json; put vendor quirks in "
+        f"{_NOTES_DIR.relative_to(_REPO)}/<key>.md:\n" + "\n".join(hits)
+    )
+
+
+def test_old_vendor_named_rule_is_gone() -> None:
+    old = "bugbot-auto-review"
+    assert not (_RULE.parent / f"{old}.md").exists()
+    stale = [
+        str(path.relative_to(_REPO))
+        for path in _tracked(".agents", ".claude", "AGENTS.md", "README.md")
+        if path.is_file() and old in path.read_text(errors="ignore")
+    ]
+    assert not stale, f"References to the renamed rule {old!r} remain: {stale}"

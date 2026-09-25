@@ -1,0 +1,29 @@
+{
+  "active": "bugbot",
+  "reviewers": {
+    "bugbot": {
+      "display_name": "Cursor Bugbot",
+      "check_name": "Cursor Bugbot",
+      "trigger_comment": "bugbot run",
+      "bot_logins": ["cursor", "cursor[bot]"],
+      "summary_marker": "<!-- BUGBOT_REVIEW -->",
+      "clean_pattern": "found\\s+no\\s+new\\s+issues",
+      "findings_pattern": "found\\s+(\\d+)\\s+potential\\s+issue",
+      "reviewed_sha_pattern": null,
+      "self_resolves_threads": false,
+      "summary_in_issue_comments": false
+    },
+    "coderabbit": {
+      "display_name": "CodeRabbit",
+      "check_name": "CodeRabbit",
+      "trigger_comment": "@coderabbitai review",
+      "bot_logins": ["coderabbitai", "coderabbitai[bot]"],
+      "summary_marker": null,
+      "clean_pattern": "No actionable comments were generated",
+      "findings_pattern": "(?:Actionable comments posted:\\s*|Outside diff range comments \\()(\\d+)",
+      "reviewed_sha_pattern": "between\\s+[0-9a-f]{7,40}\\s+and\\s+([0-9a-f]{7,40})",
+      "self_resolves_threads": true,
+      "summary_in_issue_comments": true
+    }
+  }
+}
