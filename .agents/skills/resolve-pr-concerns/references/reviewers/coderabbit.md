@@ -43,6 +43,16 @@ prose names no vendor; read this file before interpreting a review when
   `reviewed_sha_pattern` captures the second. A walkthrough still naming an older
   head does not vouch for the new one, so after a push the verdict is unknown until
   it re-reviews.
+- **(observed)** **Outside-diff findings live ONLY in the review body**: a review
+  opening `> [!CAUTION] Some comments are outside the diff…` with
+  `**⚠️ Outside diff range comments (N)**` and each finding in a `<details>` block —
+  no `Actionable comments posted` line and **no inline thread**. `findings_pattern`
+  matches either count (`Actionable…` wins when both are present). Because there is
+  no thread, enumerating inline comments (Step 2b) finds nothing: **read the review
+  body** and treat each outside-diff finding as a concern (reply with the fix SHA as
+  a top-level PR comment — there's no thread to reply on or resolve).
+- **(observed)** Re-reviews after a fix: CodeRabbit resolved its addressed threads by
+  itself, then posted an empty-body review (the verdict is in the walkthrough, above).
 - No summary marker (`summary_marker: null`): a review or comment counts as the
   summary only when its body matches a verdict pattern, so empty/reply-style
   reviews can't shadow it.

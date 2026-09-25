@@ -210,3 +210,9 @@ def test_empty_arrays_survive_set_u_on_bash_3(tmp_path: Path) -> None:
     result = _run(tmp_path, [LINT_PASS], None, bash="/bin/bash")
     assert result.returncode == 0, result.stderr
     assert "unbound variable" not in result.stderr
+
+
+def test_explicitly_empty_config_fails_hard(tmp_path: Path) -> None:
+    """`--config ""` is an explicit (broken) value, not a request for the default."""
+    result = _run(tmp_path, [LINT_PASS], None, "--config", "")
+    assert result.returncode == 64

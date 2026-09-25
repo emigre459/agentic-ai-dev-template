@@ -20,7 +20,7 @@
       "bot_logins": ["coderabbitai", "coderabbitai[bot]"],
       "summary_marker": null,
       "clean_pattern": "No actionable comments were generated",
-      "findings_pattern": "Actionable comments posted:\\s*(\\d+)",
+      "findings_pattern": "(?:Actionable comments posted:\\s*|Outside diff range comments \\()(\\d+)",
       "reviewed_sha_pattern": "between\\s+[0-9a-f]{7,40}\\s+and\\s+([0-9a-f]{7,40})",
       "self_resolves_threads": true,
       "summary_in_issue_comments": true

@@ -45,6 +45,7 @@ BOT_WINDOW_SEC=600   # don't wait longer than this for external bot reviews
 POLL_SEC=30
 EXPECTED_BOTS=()
 CONFIG=""
+CONFIG_EXPLICIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,7 +53,7 @@ while [[ $# -gt 0 ]]; do
     --bot-window-sec) BOT_WINDOW_SEC="$2"; shift 2 ;;
     --poll-sec) POLL_SEC="$2"; shift 2 ;;
     --expected-bot) EXPECTED_BOTS+=("$2"); shift 2 ;;
-    --config) CONFIG="$2"; shift 2 ;;
+    --config) CONFIG_EXPLICIT=1; CONFIG="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,37p' "$0"; exit 0 ;;
     *)
@@ -81,9 +82,8 @@ REVIEWER_NAME="the reviewer"
 REVIEWER_LOGINS="[]"
 REVIEWED_SHA_PATTERN=""
 SUMMARY_IN_ISSUE_COMMENTS="false"
-CONFIG_EXPLICIT=1
-if [[ -z "$CONFIG" ]]; then
-  CONFIG_EXPLICIT=0
+# Tracked at parse time, so `--config ""` stays explicit (and fails below).
+if [[ $CONFIG_EXPLICIT -eq 0 ]]; then
   CONFIG="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.github/pr-reviewer.json"
 fi
 if [[ ! -e "$CONFIG" && $CONFIG_EXPLICIT -eq 0 ]]; then
