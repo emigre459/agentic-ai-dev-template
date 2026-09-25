@@ -376,7 +376,7 @@ Three quick actions the moment the PR exists, so momentum survives the review ga
 
 ## Step 12: PR Follow-Up
 
-If a PR was created in Step 11, run Step 11b (momentum hook) first, then invoke `resolve-pr-concerns`. A freshly opened PR draws bot reviews (Cursor Bugbot, Copilot, etc.) within seconds, and dependabot/renovate PRs against the same base branch may be foldable. That skill enumerates everything pending and drives it to merge-ready, including a final `bugbot run` re-trigger after fixes land.
+If a PR was created in Step 11, run Step 11b (momentum hook) first, then invoke `resolve-pr-concerns`. A freshly opened PR draws bot reviews (the configured PR reviewer named in `.github/pr-reviewer.json`, Copilot, etc.) within seconds, and dependabot/renovate PRs against the same base branch may be foldable. That skill enumerates everything pending and drives it to merge-ready, including a final re-review of the latest commit after fixes land (auto-run, or the reviewer's configured trigger comment when the repo is in manual mode).
 
 **Updating the branch from the base is GATING, never optional.** Driving the PR to merge-ready includes ensuring the branch is current with its base (`resolve-pr-concerns` Step 2f). If `mergeStateStatus` is `BEHIND`, merge the base in, re-run CI, and re-trigger the automated reviewer on the merged state — green checks on a stale branch verified code that won't actually land. Do not report the PR as merge-ready while the branch is behind its base.
 

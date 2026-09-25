@@ -6,25 +6,31 @@
 # Usage:
 #   wait_for_pr_checks.sh <pr-number> [<owner>/<repo>] [--timeout-min N]
 #                         [--bot-window-sec S] [--expected-bot NAME]
+#                         [--config PATH]
 #
 # Behaviour:
 #   - Polls every 30s (default; configurable).
 #   - Considers a check "settled" when its bucket is one of:
 #       pass / fail / cancel / skipping
-#   - Cursor Bugbot et al. don't always run on every push; if the only
-#     remaining "pending" checks are external bot reviews (e.g. "Cursor Bugbot")
-#     and we've waited longer than --bot-window-sec since the last push, we
-#     stop waiting on them and report them as "no-review" (still surfaced
-#     so the user can decide to re-trigger or proceed).
+#   - The PR reviewer is whichever one .github/pr-reviewer.json names
+#     (--config overrides the path). Reviewer bots don't always run on every
+#     push; if the only remaining "pending" checks are external bot reviews
+#     (any configured reviewer's check_name, or Copilot) and we've waited
+#     longer than --bot-window-sec since the last push, we stop waiting on
+#     them and report them as "no-review" (still surfaced so the user can
+#     decide to re-trigger or proceed).
 #   - Expected external bots may take time to *register* a check after a
 #     push (gh pr checks won't even list them until they boot up). Pass
 #     --expected-bot NAME (repeatable) to keep the soft-wait window open
 #     for bots that haven't appeared in the check list yet. Default
-#     expected list is "Cursor Bugbot".
+#     expected list is the active reviewer's check_name from the config.
+#   - A missing/unreadable config, or an active reviewer with no check_name,
+#     exits 64 before any gh call (fail hard, not a silent default).
 #   - Exit codes:
 #       0 — all required checks passed
 #       1 — one or more checks failed (or cancelled)
 #       2 — timed out before settling
+#      64 — usage error, or a missing/invalid reviewer config
 #
 # Designed for the resolve-pr-concerns skill — not a general-purpose tool.
 # Keep the dependencies to gh+jq+coreutils so it works on any dev machine.
@@ -37,6 +43,7 @@ TIMEOUT_MIN=20
 BOT_WINDOW_SEC=600   # don't wait longer than this for external bot reviews
 POLL_SEC=30
 EXPECTED_BOTS=()
+CONFIG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,8 +51,9 @@ while [[ $# -gt 0 ]]; do
     --bot-window-sec) BOT_WINDOW_SEC="$2"; shift 2 ;;
     --poll-sec) POLL_SEC="$2"; shift 2 ;;
     --expected-bot) EXPECTED_BOTS+=("$2"); shift 2 ;;
+    --config) CONFIG="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,35p' "$0"; exit 0 ;;
+      sed -n '2,36p' "$0"; exit 0 ;;
     *)
       if [[ -z "$PR" ]]; then PR="$1"
       elif [[ -z "$REPO" ]]; then REPO="$1"
@@ -55,25 +63,52 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Default expected-bots list: Cursor Bugbot (the only async reviewer this
-# skill actively triggers via `bugbot run`). Override or extend with
-# --expected-bot.
-if [[ ${#EXPECTED_BOTS[@]} -eq 0 ]]; then
-  EXPECTED_BOTS=("Cursor Bugbot")
+if [[ -z "$PR" ]]; then
+  echo "usage: $0 <pr-number> [<owner>/<repo>] [--timeout-min N] [--bot-window-sec S] [--config PATH]" >&2
+  exit 64
 fi
 
-if [[ -z "$PR" ]]; then
-  echo "usage: $0 <pr-number> [<owner>/<repo>] [--timeout-min N] [--bot-window-sec S]" >&2
+# The PR reviewer is configured, never hardcoded: .github/pr-reviewer.json names
+# the active reviewer and every adapter's check_name.
+if [[ -z "$CONFIG" ]]; then
+  CONFIG="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.github/pr-reviewer.json"
+fi
+if [[ ! -r "$CONFIG" ]]; then
+  echo "PR-reviewer config not found: $CONFIG" >&2
+  echo "Create .github/pr-reviewer.json naming the active reviewer (see resolve-pr-concerns references/reviewers/), or pass --config PATH." >&2
   exit 64
+fi
+if ! ACTIVE_CHECK=$(jq -er '.reviewers[.active].check_name | select(type == "string" and length > 0)' "$CONFIG" 2>/dev/null); then
+  echo "PR-reviewer config $CONFIG has no check_name for its active reviewer (or is not valid JSON)." >&2
+  exit 64
+fi
+# Every adapter's check is an external reviewer (one per line) -- an inactive
+# adapter's bot may still be installed mid-cutover.
+REVIEWER_CHECKS=$(jq -r '.reviewers[].check_name // empty' "$CONFIG")
+# Active adapter fields for the post-settle "has the reviewer reviewed HEAD?" poll.
+REVIEWER_NAME=$(jq -r '.reviewers[.active].display_name // .active' "$CONFIG")
+REVIEWER_LOGINS=$(jq -c '.reviewers[.active].bot_logins // []' "$CONFIG")
+REVIEWED_SHA_PATTERN=$(jq -r '.reviewers[.active].reviewed_sha_pattern // empty' "$CONFIG")
+SUMMARY_IN_ISSUE_COMMENTS=$(jq -r '.reviewers[.active].summary_in_issue_comments // false' "$CONFIG")
+
+# Default expected-bots list: the active reviewer's check (the async reviewer
+# this skill triggers). Override or extend with --expected-bot.
+if [[ ${#EXPECTED_BOTS[@]} -eq 0 ]]; then
+  EXPECTED_BOTS=("$ACTIVE_CHECK")
 fi
 
 repo_arg=()
 [[ -n "$REPO" ]] && repo_arg=(--repo "$REPO")
 
 # External bot checks that may legitimately stay "pending" forever if not
-# triggered. We stop waiting on these after BOT_WINDOW_SEC and report them
-# as "no-review" rather than blocking the merge decision.
-EXTERNAL_BOTS_RE='^(Cursor Bugbot|.*[Cc]opilot.*)$'
+# triggered: any configured reviewer's check (exact name) or Copilot. We stop
+# waiting on these after BOT_WINDOW_SEC and report them as "no-review" rather
+# than blocking the merge decision.
+COPILOT_RE='^.*[Cc]opilot.*$'
+is_external_bot() {
+  grep -Fxq -- "$1" <<< "$REVIEWER_CHECKS" && return 0
+  [[ "$1" =~ $COPILOT_RE ]]
+}
 
 start_ts=$(date +%s)
 deadline=$(( start_ts + TIMEOUT_MIN * 60 ))
@@ -94,12 +129,12 @@ while :; do
     pending=$(echo "$json" | jq -r '[.[] | select(.bucket == "pending") | .name] | join("\n")')
     all_names=$(echo "$json" | jq -r '[.[].name] | join("\n")')
 
-    # Filter pending list: anything matching EXTERNAL_BOTS_RE is "soft pending"
+    # Filter pending list: any external reviewer bot's check is "soft pending"
     soft_pending=""
     hard_pending=""
     while IFS= read -r name; do
       [[ -z "$name" ]] && continue
-      if [[ "$name" =~ $EXTERNAL_BOTS_RE ]]; then
+      if is_external_bot "$name"; then
         soft_pending+="$name"$'\n'
       else
         hard_pending+="$name"$'\n'
@@ -161,29 +196,55 @@ for bot in "${EXPECTED_BOTS[@]}"; do
   fi
 done
 
-# Bugbot reports findings as REVIEW COMMENTS, not a failing check (its check goes
-# to "skipping" even when it left findings), and the review comment can land a few
-# seconds AFTER the check settles. So once checks are green, give Bugbot a short
-# window to post its review of the HEAD commit, then surface any UNRESOLVED findings.
+# Reviewer bots report findings as REVIEW COMMENTS, not a failing check (a check can
+# read "skipping" even when the review left findings), and the review can land a few
+# seconds AFTER the check settles. So once checks are green, give the configured
+# reviewer a short window to post its review of the HEAD commit, then surface any
+# UNRESOLVED findings.
 # We use the GraphQL reviewThreads `isResolved` flag as the source of truth — NOT a
 # comment's `commit_id` (GitHub re-points resolved comments' commit_id to HEAD too,
 # which would over-report already-resolved threads). (Needs a repo arg for owner/repo.)
 if [[ -n "$REPO" ]]; then
   owner="${REPO%%/*}"
   name="${REPO##*/}"
-  short=$(gh pr view "$PR" "${repo_arg[@]}" --json headRefOid --jq '.headRefOid[0:7]' 2>/dev/null || echo "")
+  head=$(gh pr view "$PR" "${repo_arg[@]}" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
   gql='query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login} path line body}}}}}}}'
   unresolved_count() {
     gh api graphql -f query="$gql" -F o="$owner" -F n="$name" -F p="$PR" \
       --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length' 2>/dev/null || echo 0
   }
-  # Wait for Bugbot's review of HEAD to appear, then let unresolved findings settle
-  # (count stable across one interval) so late-landing inline findings aren't missed.
+  # Count items authored by a reviewer login that vouch for HEAD: REST reviews carry
+  # commit_id; otherwise the adapter's reviewed_sha_pattern (one capture group) may
+  # name the reviewed SHA in the body. Reads the REST endpoint, not
+  # `gh pr view --json reviews`, whose commit id can be null for some reviewers.
+  # shellcheck disable=SC2016  # $vars below are jq variables, not shell
+  on_head_jq='[add // [] | .[]
+      | select(.user.login as $l | $logins | index($l))
+      | select($head != "" and (
+          (.commit_id // "") == $head
+          or ($pat != "" and ([(.body // "") | match($pat; "gi") | .captures[0].string
+                               | select(. != null and length >= 7)]
+                              | any(. as $s | $head | startswith($s))))))] | length'
+  reviewed_head_count() {
+    local n c=0
+    n=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate 2>/dev/null \
+      | jq -s --argjson logins "$REVIEWER_LOGINS" --arg head "$head" \
+          --arg pat "$REVIEWED_SHA_PATTERN" "$on_head_jq" 2>/dev/null || echo 0)
+    # Some reviewers keep the verdict in an issue-comment they edit in place.
+    if [[ "$SUMMARY_IN_ISSUE_COMMENTS" == "true" ]]; then
+      c=$(gh api "repos/$REPO/issues/$PR/comments" --paginate 2>/dev/null \
+        | jq -s --argjson logins "$REVIEWER_LOGINS" --arg head "$head" \
+            --arg pat "$REVIEWED_SHA_PATTERN" "$on_head_jq" 2>/dev/null || echo 0)
+    fi
+    echo $(( ${n:-0} + ${c:-0} ))
+  }
+  # Wait for the reviewer's review of HEAD to appear, then let unresolved findings
+  # settle (count stable across one interval) so late-landing inline findings
+  # aren't missed.
   prev_count=-1
   settled=0
   for _ in $(seq 1 12); do  # up to ~3min
-    reviewed=$(gh pr view "$PR" "${repo_arg[@]}" --json reviews \
-      --jq "[.reviews[] | select(.author.login==\"cursor\") | select(.body|test(\"for commit $short\"))] | length" 2>/dev/null || echo 0)
+    reviewed=$(reviewed_head_count)
     count=$(unresolved_count)
     if [[ "${reviewed:-0}" -gt 0 && "${count:-0}" == "$prev_count" ]]; then
       settled=1
@@ -192,7 +253,7 @@ if [[ -n "$REPO" ]]; then
     prev_count="${count:-0}"
     sleep 15
   done
-  [[ "$settled" -eq 0 ]] && echo "  (note: Bugbot review may still be settling — re-check if it just landed)" >&2
+  [[ "$settled" -eq 0 ]] && echo "  (note: ${REVIEWER_NAME}'s review may still be settling — re-check if it just landed)" >&2
   echo "UNRESOLVED REVIEW FINDINGS:"
   # Capture stdout and the gh exit code SEPARATELY so a failed query (network/auth)
   # is reported as an error — never silently read as "none unresolved", which on a
