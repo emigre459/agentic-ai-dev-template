@@ -1,39 +1,51 @@
 ---
 name: resolve-pr-concerns
-description: Use whenever there is an open PR on the current branch and the user wants to drive it to merge-ready. Triggers on /resolve-pr-concerns, "address PR comments", "check PR feedback", "any bugbot findings?", "are we ready to merge?", "what's left on the PR?". Also invoke automatically as the wrap-up step after pushing changes that opened or updated a PR — reviewing bot feedback (Cursor Bugbot, GitHub Copilot review, etc.), inline reviewer comments (humans), and any dependabot/Renovate/CI dependency PRs that could fold in.
+description: Use whenever there is an open PR on the current branch and the user wants to drive it to merge-ready. Triggers on /resolve-pr-concerns, "address PR comments", "check PR feedback", "any reviewer findings?", "are we ready to merge?", "what's left on the PR?". Also invoke automatically as the wrap-up step after pushing changes that opened or updated a PR — reviewing bot feedback (the configured PR reviewer from .github/pr-reviewer.json, GitHub Copilot review, etc.), inline reviewer comments (humans), and any dependabot/Renovate/CI dependency PRs that could fold in.
 ---
 
 # Resolve PR Concerns
 
 ## Overview
 
-Reactive, project-aware orchestrator that closes the loop on an open PR before it's merged. Enumerates everything pending — bugbot/automated review findings, inline human reviewer comments, dependabot or other dependency-bump PRs against the base branch, failing CI checks — classifies each item, drives it to resolution (with the user's input where needed), and ensures the latest commit gets a fresh automated review once the work is done — relying on Bugbot's auto-on-push where that's enabled (detected in Step 1a), or an explicit `bugbot run` otherwise, so the redundant comment is skipped when the push already triggers a review.
+Reactive, project-aware orchestrator that closes the loop on an open PR before it's merged. Enumerates everything pending — automated reviewer findings, inline human reviewer comments, dependabot or other dependency-bump PRs against the base branch, failing CI checks — classifies each item, drives it to resolution (with the user's input where needed), and ensures the latest commit gets a fresh automated review once the work is done — relying on the configured reviewer's auto-on-push where that's enabled (detected in Step 1a), or an explicit trigger comment otherwise, so the redundant comment is skipped when the push already triggers a review.
 
-This skill exists because PRs accumulate signal from multiple sources (bots, humans, dependency systems) and shipping requires noticing and addressing all of them — silently merging while a bugbot finding sits unread is a failure mode worth a workflow guard.
+This skill exists because PRs accumulate signal from multiple sources (bots, humans, dependency systems) and shipping requires noticing and addressing all of them — silently merging while a reviewer finding sits unread is a failure mode worth a workflow guard.
 
 **Delegations:**
 - Evaluation discipline for every concern → `superpowers:receiving-code-review` (verify against codebase, no performative agreement, push back when wrong, YAGNI checks, GitHub thread replies); after a fix lands, close its inline thread with a reply + resolve (Step 4d)
 - Per-fix discipline → `superpowers:test-driven-development` (RED → Verify-RED → GREEN → Verify-GREEN; iron law)
-- Non-obvious root causes (CI failure that isn't lint/test, bugbot finding that's symptom not cause) → `superpowers:systematic-debugging` before patching
+- Non-obvious root causes (CI failure that isn't lint/test, reviewer finding that's symptom not cause) → `superpowers:systematic-debugging` before patching
 - Independent fixes in parallel (gated, capped at 4) → `superpowers:dispatching-parallel-agents` + `superpowers:using-git-worktrees`
 - Optional pre-pass when no bots are configured → `superpowers:requesting-code-review` to dispatch a fresh reviewer subagent against the PR's SHA range
 - Status-summary fresh-evidence backstop → `superpowers:verification-before-completion`
 
 **Project-knowledge core (what this skill owns and is unique for):**
-- Cursor Bugbot / Copilot / dependabot / renovate enumeration commands
+- Configured-reviewer / Copilot / dependabot / renovate enumeration commands
 - Loop guards (iteration counter, fingerprint-based oscillation detection)
 - CI-failure triage: OIDC App-token / `pull_request_target` workflow trap, fork-secrets unavailability, flaky external API treatment
-- `bugbot run` re-trigger as the mandatory closing step
+- Reviewer re-trigger (trigger comment, when the mode needs one) as the mandatory closing step
 - `wait_for_pr_checks.sh` orchestration with terminal-state polling
 - Final user-facing status summary
 
 **Companion user-facing slash commands** (locked, user-typed only): `pr-check` skill wraps `make pr_check` (lint + tests); `run-tests` skill wraps `make tests`. This skill calls the same `make pr_check` command directly via Bash; the slash commands are equivalent manual entry points for the user.
 
+## The configured reviewer
+
+The automated PR reviewer is **not hardcoded**: `.github/pr-reviewer.json` names it (`active`) and declares its adapter. Read the values once per session:
+
+```bash
+jq -r '.reviewers[.active] | "reviewer=\(.display_name) check=\(.check_name) trigger=\(.trigger_comment) logins=\(.bot_logins|join(",")) self_resolves=\(.self_resolves_threads)"' .github/pr-reviewer.json
+```
+
+Throughout this skill, **the reviewer** is that adapter; **the reviewer's check** is its `check_name`; **the trigger comment** is its `trigger_comment`; **reviewer logins** are its `bot_logins`. The adapter's other fields tell you how to read a verdict: `summary_marker` (substring identifying its summary review; `null` = any review by `bot_logins`), `clean_pattern` / `findings_pattern` (case-insensitive regexes on the summary body — pass, or N findings), `reviewed_sha_pattern` (where the reviewed SHA lives when `commit_id` doesn't carry it), and `summary_in_issue_comments` (whether the verdict may live in an issue-comment the bot edits in place). **Before interpreting a review, read the adapter's quirks in `references/reviewers/<active>.md`** (skill-root-relative) — trigger modes, where the reviewed SHA lives, and known login / `commit_id` traps. Keep a note of the values for the session so you don't re-read the config on every pass.
+
+Swapping reviewers is a config edit (`active`), never a rewrite of this skill. To add a reviewer, add an adapter entry to the config, a `references/reviewers/<key>.md` notes file, and a `Bash(gh pr comment * <trigger_comment>*)` allow entry in `.claude/settings.json`.
+
 ## When to invoke
 
 - **Always invoke after pushing a commit that opened or updated a PR.** Even if the user hasn't explicitly asked — a fresh push often draws fresh bot feedback within seconds, and you want to surface anything new before the user moves on.
 - The user asks about PR status, feedback, comments, or merge-readiness.
-- The user mentions a bugbot/Copilot/dependabot/renovate notification.
+- The user mentions a reviewer-bot/Copilot/dependabot/renovate notification.
 
 ## Loop guards
 
@@ -74,7 +86,7 @@ digraph resolve_pr_concerns {
     "Same fingerprints as last pass?" [shape=diamond];
     "Oscillation — surface to user" [shape=doublecircle];
     "Concerns?" [shape=diamond];
-    "Comment 'bugbot run' on PR" [shape=box];
+    "Post trigger comment if manual mode" [shape=box];
     "Wait for checks (wait_for_pr_checks.sh)" [shape=box];
     "Status summary (verification-before-completion)" [shape=doublecircle];
     "Classify each concern\n(superpowers:receiving-code-review)" [shape=box];
@@ -99,8 +111,8 @@ digraph resolve_pr_concerns {
     "Enumerate concerns" -> "Fingerprint concerns" -> "Same fingerprints as last pass?";
     "Same fingerprints as last pass?" -> "Oscillation — surface to user" [label="yes"];
     "Same fingerprints as last pass?" -> "Concerns?" [label="no"];
-    "Concerns?" -> "Comment 'bugbot run' on PR" [label="none"];
-    "Comment 'bugbot run' on PR" -> "Wait for checks (wait_for_pr_checks.sh)" -> "Status summary (verification-before-completion)";
+    "Concerns?" -> "Post trigger comment if manual mode" [label="none"];
+    "Post trigger comment if manual mode" -> "Wait for checks (wait_for_pr_checks.sh)" -> "Status summary (verification-before-completion)";
     "Concerns?" -> "Classify each concern\n(superpowers:receiving-code-review)" [label="some"];
     "Classify each concern\n(superpowers:receiving-code-review)" -> "Parallel-mode gate: 2-4 simple,\ndir-disjoint, bounded, no rearch?";
     "Parallel-mode gate: 2-4 simple,\ndir-disjoint, bounded, no rearch?" -> "AskUserQuestion: parallel?" [label="yes"];
@@ -127,30 +139,35 @@ If no PR is open, stop — nothing to do.
 
 If multiple PRs are open from this branch (rare): work the most recently updated one and tell the user.
 
-### Step 1a. Detect Bugbot trigger mode — decide whether `bugbot run` comments are needed
+### Step 1a. Detect the reviewer's trigger mode — decide whether trigger comments are needed
 
-Cursor Bugbot's trigger mode is a per-repo Cursor setting: **auto-on-push** (reviews every push automatically) or **manual** (reviews only on a `bugbot run` / `cursor review` comment). When auto-on-push is enabled, commenting `bugbot run` after each push is a **redundant double-trigger** — skip it.
+The reviewer's trigger mode is usually a per-repo setting on the vendor's side: **auto-on-push** (reviews every push automatically) or **manual** (reviews only when its `trigger_comment` is posted). Some reviewers also drop to manual after N reviewed commits — the notes file says which. When auto-on-push is enabled, posting the trigger comment after each push is a **redundant double-trigger** — skip it.
 
-At PR start, determine the mode once and **flag it for the session** (e.g. note `BUGBOT_AUTORUN=enabled|manual|absent`):
+At PR start, determine the mode once and **flag it for the session** (e.g. note `REVIEWER_AUTORUN=enabled|manual|absent`):
 
 ```bash
-# Is a "Cursor Bugbot" check present on the PR, and did the latest push get a
-# review without a `bugbot run` comment triggering it?
-gh pr checks <num> --repo <owner>/<repo> --json name,bucket | jq -r '.[] | select(.name|test("Cursor Bugbot")) | .name + " " + .bucket'
-gh pr view <num> --repo <owner>/<repo> --json reviews \
-  --jq '[.reviews[] | select(.author.login=="cursor")] | last | (.body|capture("for commit (?<c>[0-9a-f]{7})").c)'
-gh api repos/<owner>/<repo>/issues/<num>/comments --jq '[.[] | select(.body|test("^bugbot run"))] | length'
+# Is the reviewer's check present on the PR, which heads did it review, and how
+# many trigger comments preceded them? (Values come from the config, never typed in.)
+CFG=.github/pr-reviewer.json
+gh pr checks <num> --repo <owner>/<repo> --json name,bucket \
+  | jq -r --arg check "$(jq -r '.reviewers[.active].check_name' "$CFG")" '.[] | select(.name == $check) | .name + " " + .bucket'
+gh api repos/<owner>/<repo>/pulls/<num>/reviews --paginate \
+  | jq -s --argjson logins "$(jq -c '.reviewers[.active].bot_logins' "$CFG")" \
+      '[add // [] | .[] | select(.user.login as $l | $logins | index($l)) | {commit_id, submitted_at}]'
+gh api repos/<owner>/<repo>/issues/<num>/comments --paginate \
+  | jq -s --arg trigger "$(jq -r '.reviewers[.active].trigger_comment' "$CFG")" \
+      '[add // [] | .[] | select(.body | startswith($trigger)) | .created_at]'
 ```
 
-- If a `Cursor Bugbot` check exists / a recent push got a `cursor` review whose commit was **not** preceded by a `bugbot run` comment → **auto-on-push** → set `BUGBOT_AUTORUN=enabled` and **skip** the explicit `bugbot run` step (Step 5) for the rest of the session; after each push, just wait for the auto-review.
-- If Bugbot reviews only ever appear right after a `bugbot run` comment → **manual** → keep using `bugbot run`.
-- If no `Cursor Bugbot` check ever appears and no review lands → Bugbot may not be installed/enabled (see Step 1b).
+- If the reviewer's check exists / a recent push got a review by a reviewer login that was **not** preceded by a trigger comment → **auto-on-push** → set `REVIEWER_AUTORUN=enabled` and **skip** the explicit trigger comment (Step 5) for the rest of the session; after each push, just wait for the auto-review.
+- If reviews only ever appear right after a trigger comment → **manual** → keep posting the trigger comment.
+- If the reviewer's check never appears and no review lands → the reviewer may not be installed/enabled (see Step 1b and the notes file's install steps).
 
-Surface the detected mode to the user in one line ("Bugbot auto-runs on push here — I won't post redundant `bugbot run` comments").
+Surface the detected mode to the user in one line ("The reviewer auto-runs on push here — I won't post redundant trigger comments"). If reviews stop arriving mid-PR in `enabled` mode, re-detect: the reviewer may have paused auto-review.
 
 ### Step 1b (optional). Pre-pass code review when no bots are configured
 
-If the repo has no automated PR reviewers configured (no Cursor Bugbot, no Copilot review, no equivalent), invoke `superpowers:requesting-code-review` to dispatch a fresh reviewer subagent against the PR's SHA range before enumerating. Skip this when the repo already has bot review configured — only relevant for repos lacking one.
+If the repo has no automated PR reviewers configured (Step 1a found the configured reviewer `absent`, no Copilot review, no equivalent), invoke `superpowers:requesting-code-review` to dispatch a fresh reviewer subagent against the PR's SHA range before enumerating. Skip this when the repo already has bot review configured — only relevant for repos lacking one.
 
 ## Step 2: Enumerate concerns
 
@@ -162,7 +179,9 @@ Pull every signal that could block merge:
 gh pr view <num> --repo <owner>/<repo> --json reviews
 ```
 
-Look at each review's `author.login` and `body`. Bugbot, Copilot, and similar bots leave a top-level summary review.
+Look at each review's `author.login` and `body`. The configured reviewer, Copilot, and similar bots leave a top-level summary review.
+
+> **Reading the reviewer's result — don't trust its status check alone.** The verdict and findings live in the **review** + **inline review comments**, which can be decoupled from the check's state (a check reading `skipping` / `neutral` while a review with findings exists has been observed in practice). Match reviews on **every** login in `bot_logins` (REST and GraphQL can report the same bot under different logins), identify the summary by `summary_marker` / the verdict patterns, and don't assume `commit_id` names the reviewed SHA — some endpoints return it `null`; the notes file says where the SHA lives. If `summary_in_issue_comments` is `true`, the verdict may be in an issue-comment the bot edits in place (2c) — judge that by its `updated_at`. Always enumerate 2a **and** 2b before concluding the reviewer is clean.
 
 ### 2b. Inline review comments
 
@@ -171,7 +190,7 @@ gh api repos/<owner>/<repo>/pulls/<num>/comments \
   --jq '.[] | {author: .user.login, body: .body, path: .path, line: .line, commit: .commit_id}'
 ```
 
-These are the file/line-anchored findings — bugbot puts its specific bug reports here, and human reviewers leave their comments here too.
+These are the file/line-anchored findings — the reviewer puts its specific bug reports here, and human reviewers leave their comments here too.
 
 ### 2c. Issue-style PR comments
 
@@ -256,13 +275,13 @@ Examples:
 - "Typo in this docstring — verified not load-bearing, fixing it"
 - "actions/checkout 4→6 — diff is mechanical, applying"
 - "Loop variable shadows outer name — renaming inner one"
-- A bugbot finding with a clear, isolated patch and confidence-level high
+- A reviewer finding with a clear, isolated patch and confidence-level high
 
 **Complex** = needs a judgment call, the user might disagree with the proposed fix, or the issue surfaces a design question. **Use `AskUserQuestion`** to interview before acting.
 
 Examples:
 - "Reviewer suggests refactoring this module — proposes splitting into two; depends on user's intended boundary"
-- "Bugbot flags a race condition — fix could be a lock, a redesign, or 'won't fix'"
+- "The reviewer flags a race condition — fix could be a lock, a redesign, or 'won't fix'"
 - "Dependency bump that could break runtime behavior (major-version, or large diff)"
 - A reviewer's comment that disagrees with the design intent of the PR
 
@@ -315,7 +334,7 @@ Use `superpowers:dispatching-parallel-agents` with `superpowers:using-git-worktr
 For each concern, in order:
 
 1. Apply `superpowers:test-driven-development` discipline: write a failing test capturing the bug or expected behavior, watch it fail for the right reason, write the minimal fix, watch it pass.
-2. If the root cause is non-obvious (CI failure that isn't lint/test, bugbot finding that's a symptom not the cause, behavior that contradicts your reading of the code), invoke `superpowers:systematic-debugging` before patching.
+2. If the root cause is non-obvious (CI failure that isn't lint/test, reviewer finding that's a symptom not the cause, behavior that contradicts your reading of the code), invoke `superpowers:systematic-debugging` before patching.
 3. Run `make pr_check` after each fix. Commit with a focused message referencing the source (bot, bug ID, dependabot PR number).
 4. Group related fixes into a single commit when they're truly related; keep unrelated fixes in separate commits.
 
@@ -323,7 +342,7 @@ After all serial fixes land, run `make pr_check` once more on the full set, then
 
 ### 4d. Close the loop on every fixed inline thread (both modes)
 
-A fix that only shows up in the pushed diff leaves the reviewer's thread dangling as if unaddressed — the audit trail reviewers actually read lives **on the PR thread**, not in your chat summary. So after the fix commit for an **inline** finding (bugbot or human) is pushed, close its thread in two steps:
+A fix that only shows up in the pushed diff leaves the reviewer's thread dangling as if unaddressed — the audit trail reviewers actually read lives **on the PR thread**, not in your chat summary. So after the fix commit for an **inline** finding (reviewer bot or human) is pushed, close its thread in two steps:
 
 1. **Reply on the thread** with the fix and the commit SHA that made it — via the replies endpoint, not a top-level PR comment:
    ```bash
@@ -346,20 +365,22 @@ A fix that only shows up in the pushed diff leaves the reviewer's thread danglin
      -F threadId=<PRRT_...>
    ```
 
-Do this **per fixed inline finding**, as the last action for that finding. It applies to both serial (4c) and parallel (4b) modes — in parallel mode the orchestrator owns the reply-and-resolve after cherry-picking, since it holds the final SHAs. Do **not**, however, comment `bugbot run` here to re-trigger a review — that's Step 5's conditional trigger (see the trigger modes there and the `bugbot-auto-review` shared rule). Reply-and-resolve closes the *existing* threads; triggering a *fresh* review is separate.
+Do this **per fixed inline finding**, as the last action for that finding. It applies to both serial (4c) and parallel (4b) modes — in parallel mode the orchestrator owns the reply-and-resolve after cherry-picking, since it holds the final SHAs. Do **not**, however, post the trigger comment here to re-trigger a review — that's Step 5's conditional trigger (see the trigger modes there and the `pr-reviewer-auto-trigger` shared rule). Reply-and-resolve closes the *existing* threads; triggering a *fresh* review is separate.
+
+If the adapter sets `self_resolves_threads: true`, the reviewer may already have resolved its own addressed thread by the time you reply — still reply with the SHA, and don't re-open it. Resolve threads **one at a time** as above; never post a reviewer's resolve-all / approve command to shortcut this (the notes file names them) — it clears threads nobody has addressed.
 
 ## Step 5: Ensure a fresh review of the latest commit
 
-After all concerns are resolved and pushed, Cursor Bugbot must re-review the latest commit — silently relying on the previous review is unsafe; new fixes can introduce new issues. **How** depends on the trigger mode detected in Step 1a:
+After all concerns are resolved and pushed, the configured reviewer must re-review the latest commit — silently relying on the previous review is unsafe; new fixes can introduce new issues. **How** depends on the trigger mode detected in Step 1a:
 
-- **`BUGBOT_AUTORUN=enabled` (auto-on-push):** the push you just made already triggered a fresh review. **Do NOT comment `bugbot run`** — it's a redundant double-trigger. Just proceed to Step 6 and wait for the auto-review to land.
-- **`BUGBOT_AUTORUN=manual`:** comment `bugbot run` so Bugbot re-reviews against the latest commit:
+- **`REVIEWER_AUTORUN=enabled` (auto-on-push):** the push you just made already triggered a fresh review. **Do NOT post the trigger comment** — it's a redundant double-trigger. Just proceed to Step 6 and wait for the auto-review to land.
+- **`REVIEWER_AUTORUN=manual`:** post the trigger comment so the reviewer re-reviews against the latest commit. Use the **literal** `trigger_comment` value (from the preamble's `jq` read), typed into the command — not a `$(jq …)` substitution — so it matches the `.claude/settings.json` allow-list entry for that trigger:
 
   ```bash
-  gh pr comment <num> --repo <owner>/<repo> --body "bugbot run"
+  gh pr comment <num> --repo <owner>/<repo> --body "<trigger_comment>"
   ```
 
-- **`BUGBOT_AUTORUN=absent`** (no Bugbot installed/enabled): there's nothing to re-trigger; rely on the Step 1b pre-pass review instead, and tell the user Bugbot isn't enabled on the repo.
+- **`REVIEWER_AUTORUN=absent`** (reviewer not installed/enabled): there's nothing to re-trigger; rely on the Step 1b pre-pass review instead, and tell the user the configured reviewer isn't enabled on the repo (the notes file has its install steps).
 
 ## Step 6: Wait for every check to settle
 
@@ -369,11 +390,12 @@ A PR isn't done while CI or bot reviews are still pending. Use the bundled helpe
 bash <skill-dir>/scripts/wait_for_pr_checks.sh <pr-number> <owner>/<repo>
 ```
 
-It polls `gh pr checks` until every required check has reached a terminal state (pass / fail / cancel / skipping). External bot reviews (Cursor Bugbot, Copilot, etc.) are treated as "soft pending" — the helper waits up to ten minutes for them, then surfaces them as `no-review` rather than blocking forever. Exit codes:
+It polls `gh pr checks` until every required check has reached a terminal state (pass / fail / cancel / skipping). External bot reviews (every configured reviewer's check from `.github/pr-reviewer.json`, plus Copilot) are treated as "soft pending" — the helper waits up to ten minutes for them, then surfaces them as `no-review` rather than blocking forever. It reads the config from the repo root by default; pass `--config PATH` to point elsewhere. Exit codes:
 
 - `0` — all required checks passed; the PR is mergeable from a CI standpoint.
 - `1` — one or more checks failed/cancelled; loop back to Step 2 and treat the failure as a new concern.
 - `2` — timed out (default 20 minutes). Surface to the user; they decide whether to wait longer or investigate.
+- `64` — usage error, an explicit `--config` that doesn't exist, or an invalid `.github/pr-reviewer.json`; fix the config. (A repo with **no** reviewer config is fine — the helper notes it and waits on CI only, per Step 1b.)
 
 If new bot findings landed during the wait, loop back to Step 1 and address them. Only when this helper exits 0 **and** there are no new comments to address is the job done.
 
@@ -387,9 +409,9 @@ gh pr checks <num> --repo <owner>/<repo>
 ```
 
 End with a short status summary:
-- What was addressed (one bullet per concern, with the source — bugbot/reviewer/dependabot — and whether it was fixed, pushed back on, or closed as YAGNI).
+- What was addressed (one bullet per concern, with the source — reviewer bot/human reviewer/dependabot — and whether it was fixed, pushed back on, or closed as YAGNI).
 - What's still outstanding (if anything).
-- Whether `bugbot run` was triggered and what to expect next.
+- Whether the reviewer's trigger comment was posted (or auto-run was relied on) and what to expect next.
 - Current `mergeStateStatus` from the fresh `gh pr view` call. **Never call a PR merge-ready while `mergeStateStatus` is `BEHIND`** — that's an unresolved gating concern (Step 2f), not a footnote. "Green checks but behind base" means CI verified stale code; update the branch and re-verify first.
 
 ## Red flags — stop and reassess
@@ -405,6 +427,7 @@ End with a short status summary:
 - About to let bughunters push their own work — orchestrator owns the single serial push as the integration gate.
 - About to squash parallel commits at integration — cherry-pick preserves per-concern atomicity that justified parallelizing in the first place.
 - About to claim "all addressed" without fresh `gh pr view` / `gh pr checks` output — `superpowers:verification-before-completion` violation.
+- Naming a reviewer vendor, check name, login, or trigger string in this skill (or a rule) instead of reading `.github/pr-reviewer.json` — vendor detail belongs in the config or `references/reviewers/<key>.md`, so swapping reviewers stays a config edit.
 
 ## Common mistakes
 
@@ -412,7 +435,7 @@ End with a short status summary:
 |---------|-----|
 | Treating every concern as simple → aggressive auto-fixes diverging from user intent | Default to AskUserQuestion when there's any judgment involved; apply `superpowers:receiving-code-review` discipline first |
 | Implementing reviewer suggestions without verifying they're correct for the codebase | Wrap every concern in `superpowers:receiving-code-review`'s verify-before-implement pass — including the "simple" ones |
-| Skipping `bugbot run` re-trigger after fixes | It's the last step — never skip; new code → new review |
+| Skipping the reviewer re-trigger after fixes | It's the last step — never skip; new code → new review (auto-run or the trigger comment, per Step 1a) |
 | Folding in a major-version dependency bump without checking the diff | Always run `gh pr diff` before applying a dep PR locally |
 | Treating a red CI check as "noise" without reading the log | Run `gh run view --log-failed` on every failure; classify infra vs code; fix or escalate |
 | Bumping a workflow file that uses OIDC → App token (claude-code-review, claude) inside a PR | Revert that workflow change from the PR; ask the user to land it on the default branch directly |

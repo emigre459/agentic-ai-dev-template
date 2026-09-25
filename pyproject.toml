@@ -34,7 +34,24 @@ convention = "numpy"
 
 [tool.mypy]
 python_version = "3.13"
-files = ["scripts", "tests"]
+# Cross-module type-checking best practice (learned in gridium-agent, issue #1430).
+# This template type-checks scripts/ + tests/ only. When you add a first-party
+# package under src/<name>/, you MUST also (1) uncomment "src" in `files` below
+# and (2) keep mypy_path set (add explicit_package_bases = true too if tests/
+# lacks __init__.py). Otherwise mypy names your modules `src.<name>.*`,
+# first-party `from <name> import X` imports fall through to the untyped installed
+# distribution, the global `ignore_missing_imports` silences them, and every
+# cross-module import resolves to `Any` while mypy still prints "Success" -- i.e.
+# it silently checks no module boundary. As the project matures, prefer scoping
+# `ignore_missing_imports` per-module (via [[tool.mypy.overrides]]) over the
+# global flag, and add a `src/<name>/py.typed` marker LAST -- once the tree is
+# type-clean -- as the downstream "this package is type-safe" guarantee.
+files = [
+    "scripts",
+    "tests",
+    # "src",  # uncomment when you add your package under src/<name>/
+]
+mypy_path = ["src"]
 ignore_missing_imports = true
 show_error_codes = true
 disallow_untyped_defs = true

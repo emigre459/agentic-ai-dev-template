@@ -28,7 +28,9 @@
       "Bash(git add *)",
       "Bash(git commit *)",
       "Bash(gh issue view *)",
-      "Bash(gh pr view *)"
+      "Bash(gh pr view *)",
+      "Bash(gh pr comment * bugbot run*)",
+      "Bash(gh pr comment * @coderabbitai review*)"
     ]
   }
 }
