@@ -395,7 +395,7 @@ It polls `gh pr checks` until every required check has reached a terminal state 
 - `0` — all required checks passed; the PR is mergeable from a CI standpoint.
 - `1` — one or more checks failed/cancelled; loop back to Step 2 and treat the failure as a new concern.
 - `2` — timed out (default 20 minutes). Surface to the user; they decide whether to wait longer or investigate.
-- `64` — usage error, or a missing / invalid `.github/pr-reviewer.json`; fix the config (or pass `--config`).
+- `64` — usage error, an explicit `--config` that doesn't exist, or an invalid `.github/pr-reviewer.json`; fix the config. (A repo with **no** reviewer config is fine — the helper notes it and waits on CI only, per Step 1b.)
 
 If new bot findings landed during the wait, loop back to Step 1 and address them. Only when this helper exits 0 **and** there are no new comments to address is the job done.
 

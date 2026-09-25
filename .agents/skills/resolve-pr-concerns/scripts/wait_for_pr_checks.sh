@@ -24,13 +24,14 @@
 #     --expected-bot NAME (repeatable) to keep the soft-wait window open
 #     for bots that haven't appeared in the check list yet. Default
 #     expected list is the active reviewer's check_name from the config.
-#   - A missing/unreadable config, or an active reviewer with no check_name,
-#     exits 64 before any gh call (fail hard, not a silent default).
+#   - An explicit --config that is missing, or any config that is invalid /
+#     has no check_name for its active reviewer, exits 64 before any gh call.
+#     An absent DEFAULT config means "no reviewer configured": CI-only wait.
 #   - Exit codes:
 #       0 — all required checks passed
 #       1 — one or more checks failed (or cancelled)
 #       2 — timed out before settling
-#      64 — usage error, or a missing/invalid reviewer config
+#      64 — usage error, a missing explicit --config, or an invalid config
 #
 # Designed for the resolve-pr-concerns skill — not a general-purpose tool.
 # Keep the dependencies to gh+jq+coreutils so it works on any dev machine.
@@ -53,7 +54,7 @@ while [[ $# -gt 0 ]]; do
     --expected-bot) EXPECTED_BOTS+=("$2"); shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,36p' "$0"; exit 0 ;;
+      sed -n '2,37p' "$0"; exit 0 ;;
     *)
       if [[ -z "$PR" ]]; then PR="$1"
       elif [[ -z "$REPO" ]]; then REPO="$1"
@@ -69,36 +70,52 @@ if [[ -z "$PR" ]]; then
 fi
 
 # The PR reviewer is configured, never hardcoded: .github/pr-reviewer.json names
-# the active reviewer and every adapter's check_name.
+# the active reviewer and every adapter's check_name. An explicit --config must
+# exist; an absent DEFAULT config means the repo has no reviewer configured
+# (resolve-pr-concerns Step 1b) -- settle CI with no expected reviewer bot.
+ACTIVE_CHECK=""
+REVIEWER_CHECKS=""
+# Active adapter fields for the post-settle "has the reviewer reviewed HEAD?"
+# poll; the defaults (no logins) skip that wait when no reviewer is configured.
+REVIEWER_NAME="the reviewer"
+REVIEWER_LOGINS="[]"
+REVIEWED_SHA_PATTERN=""
+SUMMARY_IN_ISSUE_COMMENTS="false"
+CONFIG_EXPLICIT=1
 if [[ -z "$CONFIG" ]]; then
+  CONFIG_EXPLICIT=0
   CONFIG="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.github/pr-reviewer.json"
 fi
-if [[ ! -r "$CONFIG" ]]; then
+if [[ ! -e "$CONFIG" && $CONFIG_EXPLICIT -eq 0 ]]; then
+  echo "NOTE: no PR reviewer configured ($CONFIG absent) -- waiting on CI only (plus Copilot, and any --expected-bot)." >&2
+elif [[ ! -r "$CONFIG" ]]; then
   echo "PR-reviewer config not found: $CONFIG" >&2
   echo "Create .github/pr-reviewer.json naming the active reviewer (see resolve-pr-concerns references/reviewers/), or pass --config PATH." >&2
   exit 64
+else
+  if ! ACTIVE_CHECK=$(jq -er '.reviewers[.active].check_name | select(type == "string" and length > 0)' "$CONFIG" 2>/dev/null); then
+    echo "PR-reviewer config $CONFIG has no check_name for its active reviewer (or is not valid JSON)." >&2
+    exit 64
+  fi
+  # Every adapter's check is an external reviewer (one per line) -- an inactive
+  # adapter's bot may still be installed mid-cutover.
+  REVIEWER_CHECKS=$(jq -r '.reviewers[].check_name // empty' "$CONFIG")
+  REVIEWER_NAME=$(jq -r '.reviewers[.active].display_name // .active' "$CONFIG")
+  REVIEWER_LOGINS=$(jq -c '.reviewers[.active].bot_logins // []' "$CONFIG")
+  REVIEWED_SHA_PATTERN=$(jq -r '.reviewers[.active].reviewed_sha_pattern // empty' "$CONFIG")
+  SUMMARY_IN_ISSUE_COMMENTS=$(jq -r '.reviewers[.active].summary_in_issue_comments // false' "$CONFIG")
 fi
-if ! ACTIVE_CHECK=$(jq -er '.reviewers[.active].check_name | select(type == "string" and length > 0)' "$CONFIG" 2>/dev/null); then
-  echo "PR-reviewer config $CONFIG has no check_name for its active reviewer (or is not valid JSON)." >&2
-  exit 64
-fi
-# Every adapter's check is an external reviewer (one per line) -- an inactive
-# adapter's bot may still be installed mid-cutover.
-REVIEWER_CHECKS=$(jq -r '.reviewers[].check_name // empty' "$CONFIG")
-# Active adapter fields for the post-settle "has the reviewer reviewed HEAD?" poll.
-REVIEWER_NAME=$(jq -r '.reviewers[.active].display_name // .active' "$CONFIG")
-REVIEWER_LOGINS=$(jq -c '.reviewers[.active].bot_logins // []' "$CONFIG")
-REVIEWED_SHA_PATTERN=$(jq -r '.reviewers[.active].reviewed_sha_pattern // empty' "$CONFIG")
-SUMMARY_IN_ISSUE_COMMENTS=$(jq -r '.reviewers[.active].summary_in_issue_comments // false' "$CONFIG")
 
 # Default expected-bots list: the active reviewer's check (the async reviewer
 # this skill triggers). Override or extend with --expected-bot.
-if [[ ${#EXPECTED_BOTS[@]} -eq 0 ]]; then
+if [[ ${#EXPECTED_BOTS[@]} -eq 0 && -n "$ACTIVE_CHECK" ]]; then
   EXPECTED_BOTS=("$ACTIVE_CHECK")
 fi
 
 repo_arg=()
 [[ -n "$REPO" ]] && repo_arg=(--repo "$REPO")
+# Every array expansion below uses ${arr[@]+"${arr[@]}"}: under `set -u`, bash
+# < 4.4 (macOS /bin/bash 3.2) treats an EMPTY array's "${arr[@]}" as unbound.
 
 # External bot checks that may legitimately stay "pending" forever if not
 # triggered: any configured reviewer's check (exact name) or Copilot. We stop
@@ -117,7 +134,7 @@ echo "Waiting for PR #${PR} checks to settle (timeout: ${TIMEOUT_MIN}m, poll: ${
 
 while :; do
   # gh pr checks --json gives bucket={pass|fail|pending|cancel|skipping}
-  json=$(gh pr checks "$PR" "${repo_arg[@]}" --json name,bucket,state,link 2>/dev/null || echo "[]")
+  json=$(gh pr checks "$PR" ${repo_arg[@]+"${repo_arg[@]}"} --json name,bucket,state,link 2>/dev/null || echo "[]")
 
   if [[ "$json" == "[]" || -z "$json" ]]; then
     echo "  (no checks reported yet — waiting)" >&2
@@ -146,7 +163,7 @@ while :; do
     # as additional soft-pending entries so the script doesn't race past
     # an async reviewer that just hadn't registered when we first polled.
     missing_expected=""
-    for bot in "${EXPECTED_BOTS[@]}"; do
+    for bot in ${EXPECTED_BOTS[@]+"${EXPECTED_BOTS[@]}"}; do
       if ! grep -Fxq "$bot" <<< "$all_names"; then
         missing_expected+="$bot (not yet registered)"$'\n'
       fi
@@ -174,7 +191,7 @@ while :; do
 
   if [[ $(date +%s) -ge $deadline ]]; then
     echo "TIMEOUT after ${TIMEOUT_MIN}m. Latest:" >&2
-    gh pr checks "$PR" "${repo_arg[@]}" >&2 || true
+    gh pr checks "$PR" ${repo_arg[@]+"${repo_arg[@]}"} >&2 || true
     exit 2
   fi
 
@@ -184,13 +201,13 @@ done
 # Final report — print full table to stdout so the caller can grep, plus
 # a structured summary to stderr.
 echo "FINAL CHECK RESULTS:"
-gh pr checks "$PR" "${repo_arg[@]}" || true
+gh pr checks "$PR" ${repo_arg[@]+"${repo_arg[@]}"} || true
 
 # Surface any expected external bots that never registered a check, so
 # callers don't silently assume they were "no-review" when they may have
 # just been slow to boot.
-final_names=$(gh pr checks "$PR" "${repo_arg[@]}" --json name --jq '.[].name' 2>/dev/null || echo "")
-for bot in "${EXPECTED_BOTS[@]}"; do
+final_names=$(gh pr checks "$PR" ${repo_arg[@]+"${repo_arg[@]}"} --json name --jq '.[].name' 2>/dev/null || echo "")
+for bot in ${EXPECTED_BOTS[@]+"${EXPECTED_BOTS[@]}"}; do
   if ! grep -Fxq "$bot" <<< "$final_names"; then
     echo "NOTE: expected bot '$bot' did not register a check within ${BOT_WINDOW_SEC}s — treating as no-review." >&2
   fi
@@ -207,7 +224,7 @@ done
 if [[ -n "$REPO" ]]; then
   owner="${REPO%%/*}"
   name="${REPO##*/}"
-  head=$(gh pr view "$PR" "${repo_arg[@]}" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
+  head=$(gh pr view "$PR" ${repo_arg[@]+"${repo_arg[@]}"} --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
   gql='query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login} path line body}}}}}}}'
   unresolved_count() {
     gh api graphql -f query="$gql" -F o="$owner" -F n="$name" -F p="$PR" \
@@ -244,7 +261,8 @@ if [[ -n "$REPO" ]]; then
   prev_count=-1
   settled=0
   for _ in $(seq 1 12); do  # up to ~3min
-    reviewed=$(reviewed_head_count)
+    # No reviewer configured -> nothing to wait for; just let the count settle.
+    if [[ "$REVIEWER_LOGINS" == "[]" ]]; then reviewed=1; else reviewed=$(reviewed_head_count); fi
     count=$(unresolved_count)
     if [[ "${reviewed:-0}" -gt 0 && "${count:-0}" == "$prev_count" ]]; then
       settled=1
@@ -272,7 +290,7 @@ if [[ -n "$REPO" ]]; then
 fi
 
 # Exit code reflects pass/fail at the "required" check level.
-fails=$(gh pr checks "$PR" "${repo_arg[@]}" --json name,bucket --jq '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | length')
+fails=$(gh pr checks "$PR" ${repo_arg[@]+"${repo_arg[@]}"} --json name,bucket --jq '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | length')
 if [[ "${fails:-0}" -gt 0 ]]; then
   echo "$fails check(s) failed or were cancelled. PR is NOT mergeable." >&2
   exit 1

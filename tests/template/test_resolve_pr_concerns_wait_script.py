@@ -5,7 +5,8 @@ The script names no PR reviewer: its default expected bot and its soft-pending
 the real script against a stub ``gh`` on ``PATH`` that serves canned check JSON
 (and applies ``--jq`` with real ``jq``), with ``--timeout-min 0`` so every run
 evaluates exactly one poll and exits before sleeping. No ``<owner>/<repo>`` arg
-is passed, so the post-settle review-thread poll (which needs one) is skipped.
+is passed, so the post-settle review-thread poll (which needs one) is skipped --
+and the ``repo_arg`` array stays empty, which the bash 3.2 test relies on.
 """
 
 from __future__ import annotations
@@ -54,7 +55,11 @@ def _config(tmp_path: Path, active: str = "coderabbit", **drop: bool) -> Path:
 
 
 def _run(
-    tmp_path: Path, checks: list[dict[str, str]], config: Path, *extra: str
+    tmp_path: Path,
+    checks: list[dict[str, str]],
+    config: Path | None,
+    *extra: str,
+    bash: str = "bash",
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -66,20 +71,15 @@ def _run(
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "FAKE_CHECKS": json.dumps(checks),
     }
+    config_args = [] if config is None else ["--config", str(config)]
+    # cwd = tmp_path (not a git repo), so the default config path is
+    # <tmp_path>/.github/pr-reviewer.json -- absent unless a test writes it.
     return subprocess.run(  # nosec B603 B607 -- fixed argv, stub gh, no shell
-        [
-            "bash",
-            str(_SCRIPT),
-            "1",
-            "--config",
-            str(config),
-            "--timeout-min",
-            "0",
-            *extra,
-        ],
+        [bash, str(_SCRIPT), "1", *config_args, "--timeout-min", "0", *extra],
         capture_output=True,
         text=True,
         env=env,
+        cwd=tmp_path,
         timeout=30,
     )
 
@@ -91,10 +91,40 @@ def _pending(name: str) -> dict[str, str]:
     return {"name": name, "bucket": "pending", "state": "PENDING", "link": ""}
 
 
-def test_missing_config_fails_hard(tmp_path: Path) -> None:
+def test_missing_explicit_config_fails_hard(tmp_path: Path) -> None:
+    """An explicit --config that doesn't exist is a typo -- fail, don't guess."""
     result = _run(tmp_path, [LINT_PASS], tmp_path / "absent.json")
     assert result.returncode == 64
     assert "pr-reviewer" in result.stderr
+
+
+def test_repo_without_a_reviewer_config_still_settles(tmp_path: Path) -> None:
+    """resolve-pr-concerns Step 1b supports repos with no reviewer configured.
+
+    With no default config the script must still settle CI (no expected reviewer
+    bot), and say so, rather than exit before polling anything.
+    """
+    result = _run(tmp_path, [LINT_PASS], None, "--bot-window-sec", "600")
+    assert result.returncode == 0, result.stderr
+    assert "no PR reviewer configured" in result.stderr
+    assert "not yet registered" not in result.stderr
+
+
+def test_default_config_is_used_when_present(tmp_path: Path) -> None:
+    (tmp_path / ".github").mkdir()
+    config = json.loads(_CONFIG.read_text())
+    config["active"] = "coderabbit"
+    (tmp_path / ".github" / "pr-reviewer.json").write_text(json.dumps(config))
+    result = _run(tmp_path, [LINT_PASS], None, "--bot-window-sec", "600")
+    assert result.returncode == 2
+    assert "CodeRabbit (not yet registered)" in result.stderr
+
+
+def test_invalid_default_config_fails_hard(tmp_path: Path) -> None:
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "pr-reviewer.json").write_text("{not json")
+    result = _run(tmp_path, [LINT_PASS], None)
+    assert result.returncode == 64
 
 
 def test_active_reviewer_without_check_name_fails_hard(tmp_path: Path) -> None:
@@ -157,3 +187,26 @@ def test_expected_bot_flag_overrides_the_config_default(tmp_path: Path) -> None:
     )
     assert "Some Other Bot (not yet registered)" in result.stderr
     assert "CodeRabbit (not yet registered)" not in result.stderr
+
+
+def _is_old_bash(path: str) -> bool:
+    if not Path(path).exists():
+        return False
+    out = subprocess.run(  # nosec B603 -- fixed argv, local bash, no shell
+        [path, "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True
+    ).stdout.strip()
+    return out.isdigit() and int(out) < 4
+
+
+@pytest.mark.skipif(
+    not _is_old_bash("/bin/bash"), reason="needs a bash < 4 at /bin/bash (macOS)"
+)
+def test_empty_arrays_survive_set_u_on_bash_3(tmp_path: Path) -> None:
+    """No repo arg + no reviewer config leaves both arrays empty.
+
+    Under `set -u`, bash 3.2 (macOS /bin/bash) treats an empty "${arr[@]}" as an
+    unbound variable, so a bare expansion crashes before it polls anything.
+    """
+    result = _run(tmp_path, [LINT_PASS], None, bash="/bin/bash")
+    assert result.returncode == 0, result.stderr
+    assert "unbound variable" not in result.stderr
