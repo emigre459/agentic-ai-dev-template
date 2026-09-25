@@ -49,6 +49,11 @@ CONFIG_EXPLICIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --timeout-min|--bot-window-sec|--poll-sec|--expected-bot|--config)
+      # Under `set -u` a trailing value flag would crash on an unbound $2.
+      if [[ $# -lt 2 ]]; then echo "$1 needs a value" >&2; exit 64; fi ;;
+  esac
+  case "$1" in
     --timeout-min) TIMEOUT_MIN="$2"; shift 2 ;;
     --bot-window-sec) BOT_WINDOW_SEC="$2"; shift 2 ;;
     --poll-sec) POLL_SEC="$2"; shift 2 ;;

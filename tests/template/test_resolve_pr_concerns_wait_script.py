@@ -216,3 +216,16 @@ def test_explicitly_empty_config_fails_hard(tmp_path: Path) -> None:
     """`--config ""` is an explicit (broken) value, not a request for the default."""
     result = _run(tmp_path, [LINT_PASS], None, "--config", "")
     assert result.returncode == 64
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--config", "--timeout-min", "--bot-window-sec", "--poll-sec", "--expected-bot"],
+)
+def test_a_value_flag_without_its_value_is_a_usage_error(
+    tmp_path: Path, flag: str
+) -> None:
+    """A trailing value flag must exit 64, not crash on an unbound $2 under set -u."""
+    result = _run(tmp_path, [LINT_PASS], None, flag)
+    assert result.returncode == 64
+    assert f"{flag} needs a value" in result.stderr
