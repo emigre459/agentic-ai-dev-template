@@ -9,6 +9,7 @@ the diff, and — unless ``--yes`` — asks for confirmation before applying. Id
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import subprocess
 import sys
@@ -49,6 +50,38 @@ def load_desired(settings_dir: Path) -> Desired:
         (settings_dir / "security-settings.json").read_text(encoding="utf-8")
     )
     return Desired(ruleset=ruleset, merge=merge, security=security)
+
+
+def ruleset_for_phase(ruleset: dict, phase: str) -> dict:
+    """Return the ruleset safe for the requested initialization phase.
+
+    Parameters
+    ----------
+    ruleset
+        Canonical final ruleset loaded from disk.
+    phase
+        ``bootstrap`` defers required CI contexts; ``final`` keeps every rule.
+
+    Returns
+    -------
+    dict
+        A deep copy suitable for reconciliation.
+
+    Raises
+    ------
+    ValueError
+        If ``phase`` is not supported.
+    """
+    if phase not in {"bootstrap", "final"}:
+        raise ValueError(f"unknown settings phase: {phase!r}")
+    phased = copy.deepcopy(ruleset)
+    if phase == "bootstrap":
+        phased["rules"] = [
+            rule
+            for rule in phased.get("rules", [])
+            if rule.get("type") != "required_status_checks"
+        ]
+    return phased
 
 
 def find_main_ruleset(existing: list[dict]) -> dict | None:
@@ -115,6 +148,7 @@ def plan_actions(
     desired_ruleset: dict,
     desired_merge: dict,
     desired_security: dict,
+    forbidden_rule_types: set[str] | None = None,
 ) -> list[tuple]:
     """Compute the minimal set of apply actions.
 
@@ -126,7 +160,10 @@ def plan_actions(
     main = find_main_ruleset(current_rulesets)
     if main is None:
         actions.append(("ruleset", "POST", None))
-    elif not ruleset_matches(desired_ruleset, main):
+    elif not ruleset_matches(desired_ruleset, main) or any(
+        rule.get("type") in (forbidden_rule_types or set())
+        for rule in main.get("rules", [])
+    ):
         actions.append(("ruleset", "PUT", main["id"]))
     if not merge_settings_match(desired_merge, current_merge):
         actions.append(("merge", "PATCH", None))
@@ -135,20 +172,43 @@ def plan_actions(
     return actions
 
 
+def _run_gh(
+    args: list[str],
+    runner: Callable[..., Any] = subprocess.run,
+    **kwargs: Any,
+) -> Any:
+    """Run GitHub CLI and translate failures into actionable messages."""
+    try:
+        return runner(
+            ["gh", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            **kwargs,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "GitHub CLI `gh` was not found. Install it, ensure it is on PATH, "
+            "then run `gh auth login`."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "No error detail returned.").strip()
+        permission_hint = ""
+        if any(token in detail for token in ("HTTP 403", "HTTP 404", "accessible")):
+            permission_hint = (
+                " Confirm that the target repository is correct and the active "
+                "GitHub account has administrator permission."
+            )
+        raise RuntimeError(
+            f"GitHub command `gh {' '.join(args)}` failed. "
+            f"GitHub said: {detail}.{permission_hint}"
+        ) from exc
+
+
 def _gh_json(args: list[str], runner: Callable[..., Any] = subprocess.run) -> Any:
     """Run a `gh` command and parse its stdout as JSON."""
-    proc = runner(["gh", *args], capture_output=True, text=True, check=True)
+    proc = _run_gh(args, runner)
     return json.loads(proc.stdout) if proc.stdout.strip() else None
-
-
-def _current_repo(runner: Callable[..., Any] = subprocess.run) -> str:
-    proc = runner(
-        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return str(proc.stdout).strip()
 
 
 def _current_rulesets(
@@ -173,33 +233,84 @@ def _current_rulesets(
     ]
 
 
+def _apply_actions(
+    actions: list[tuple],
+    repo: str,
+    desired: Desired,
+    desired_ruleset: dict,
+    runner: Callable[..., Any],
+) -> None:
+    """Apply a confirmed settings plan to the explicit repository target."""
+    for kind, method, ident in actions:
+        if kind == "ruleset":
+            endpoint = f"repos/{repo}/rulesets"
+            if method == "PUT":
+                endpoint += f"/{ident}"
+            _run_gh(
+                ["api", "--method", method, endpoint, "--input", "-"],
+                runner,
+                input=json.dumps(desired_ruleset),
+            )
+        elif kind == "merge":
+            _run_gh(
+                ["api", "--method", "PATCH", f"repos/{repo}", "--input", "-"],
+                runner,
+                input=json.dumps(desired.merge),
+            )
+        elif kind == "security":
+            _run_gh(
+                ["api", "--method", "PATCH", f"repos/{repo}", "--input", "-"],
+                runner,
+                input=json.dumps(desired.security),
+            )
+
+
 def main(
     argv: list[str] | None = None,
     runner: Callable[..., Any] = subprocess.run,
 ) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--repo",
+        required=True,
+        help="explicit GitHub target in owner/repository form",
+    )
+    parser.add_argument(
+        "--phase",
+        choices=("bootstrap", "final"),
+        default="final",
+        help="bootstrap defers required CI checks; final applies every rule",
+    )
     parser.add_argument("--yes", action="store_true", help="apply without confirmation")
     parser.add_argument("--settings-dir", default=str(REPO_SETTINGS_DIR))
     args = parser.parse_args(argv)
 
     desired = load_desired(Path(args.settings_dir))
-    repo = _current_repo(runner)
-    current_rulesets = _current_rulesets(repo, runner)
-    current_merge = _gh_json(["api", f"repos/{repo}"], runner) or {}
+    repo = str(args.repo)
+    desired_ruleset = ruleset_for_phase(desired.ruleset, args.phase)
+    try:
+        current_rulesets = _current_rulesets(repo, runner)
+        current_merge = _gh_json(["api", f"repos/{repo}"], runner) or {}
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
     actions = plan_actions(
         current_rulesets,
         current_merge,
-        desired.ruleset,
+        desired_ruleset,
         desired.merge,
         desired.security,
+        forbidden_rule_types=(
+            {"required_status_checks"} if args.phase == "bootstrap" else None
+        ),
     )
     if not actions:
         print(f"{repo}: settings already aligned — no changes.")
         return 0
 
-    print(f"{repo}: planned changes:")
+    print(f"{repo}: planned {args.phase} changes:")
     for kind, method, ident in actions:
         print(f"  - {kind}: {method}" + (f" (id={ident})" if ident else ""))
 
@@ -209,63 +320,18 @@ def main(
             print("Aborted.")
             return 1
 
-    for kind, method, ident in actions:
-        if kind == "ruleset" and method == "POST":
-            runner(
-                [
-                    "gh",
-                    "api",
-                    "--method",
-                    "POST",
-                    f"repos/{repo}/rulesets",
-                    "--input",
-                    "-",
-                ],
-                input=json.dumps(desired.ruleset),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        elif kind == "ruleset" and method == "PUT":
-            runner(
-                [
-                    "gh",
-                    "api",
-                    "--method",
-                    "PUT",
-                    f"repos/{repo}/rulesets/{ident}",
-                    "--input",
-                    "-",
-                ],
-                input=json.dumps(desired.ruleset),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        elif kind == "merge":
-            # Send a typed JSON body (like the ruleset paths) rather than
-            # `-f key=value` form fields: `gh api -f` sends every value as a
-            # string, but the repo PATCH endpoint expects JSON booleans for
-            # allow_squash_merge / delete_branch_on_merge / etc.
-            runner(
-                ["gh", "api", "--method", "PATCH", f"repos/{repo}", "--input", "-"],
-                input=json.dumps(desired.merge),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        elif kind == "security":
-            # Same repo PATCH endpoint as "merge" — partial-update semantics mean
-            # this only touches security_and_analysis.dependabot_security_updates,
-            # leaving secret scanning etc. untouched.
-            runner(
-                ["gh", "api", "--method", "PATCH", f"repos/{repo}", "--input", "-"],
-                input=json.dumps(desired.security),
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-    print("Applied.")
+    try:
+        _apply_actions(actions, repo, desired, desired_ruleset, runner)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    print(f"Applied {args.phase} settings to {repo}.")
+    if args.phase == "bootstrap":
+        print(
+            "Required CI checks are deferred until the setup PR merges. "
+            "After merge, run `make finalize_repo_settings TARGET_REPO="
+            f"{repo}`."
+        )
     return 0
 
 

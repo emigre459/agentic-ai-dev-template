@@ -1,1 +1,1 @@
-"""Template machinery scripts (apply_repo_settings, init_template)."""
+"""Template initialization and repository-settings tooling."""

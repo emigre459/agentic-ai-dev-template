@@ -1,6 +1,9 @@
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from scripts.apply_repo_settings import (
     find_main_ruleset,
@@ -10,6 +13,8 @@ from scripts.apply_repo_settings import (
     plan_actions,
     load_desired,
     _current_rulesets,
+    _gh_json,
+    ruleset_for_phase,
 )
 
 REPO_SETTINGS = Path(__file__).resolve().parents[2] / ".github" / "repo-settings"
@@ -82,7 +87,7 @@ def test_ruleset_matches_false_when_rules_differ() -> None:
 def test_ruleset_matches_true_when_current_has_api_defaults() -> None:
     # GitHub returns rules/conditions with extra default-populated fields our
     # sanitized ruleset.json omits — subset matching must still consider it aligned.
-    desired = {
+    desired: dict = {
         "name": "main",
         "enforcement": "active",
         "rules": [
@@ -237,3 +242,74 @@ def test_plan_actions_all_noop_when_aligned() -> None:
         desired_security=_ALIGNED_SECURITY,
     )
     assert actions == []
+
+
+def test_bootstrap_plan_removes_preexisting_required_checks() -> None:
+    """Do not leave a first PR blocked when a copied ruleset already has CI gates."""
+    bootstrap = {"name": "main", "rules": [{"type": "pull_request"}]}
+    current = {
+        "id": 7,
+        "name": "main",
+        "rules": [
+            {"type": "pull_request"},
+            {"type": "required_status_checks"},
+        ],
+    }
+
+    actions = plan_actions(
+        current_rulesets=[current],
+        current_merge={"allow_squash_merge": True, **_ALIGNED_SECURITY},
+        desired_ruleset=bootstrap,
+        desired_merge={"allow_squash_merge": True},
+        desired_security=_ALIGNED_SECURITY,
+        forbidden_rule_types={"required_status_checks"},
+    )
+
+    assert actions == [("ruleset", "PUT", 7)]
+
+
+def test_bootstrap_phase_defers_required_status_checks() -> None:
+    """Keep the first PR mergeable until its CI workflow reaches main."""
+    desired: dict = {
+        "name": "main",
+        "rules": [
+            {"type": "pull_request", "parameters": {}},
+            {"type": "required_status_checks", "parameters": {}},
+        ],
+    }
+
+    bootstrap = ruleset_for_phase(desired, "bootstrap")
+    final = ruleset_for_phase(desired, "final")
+
+    assert [rule["type"] for rule in bootstrap["rules"]] == ["pull_request"]
+    assert [rule["type"] for rule in final["rules"]] == [
+        "pull_request",
+        "required_status_checks",
+    ]
+    assert desired["rules"][1]["type"] == "required_status_checks"
+
+
+def test_gh_json_reports_github_error_in_plain_language() -> None:
+    """Expose GitHub's useful stderr instead of a raw Python traceback."""
+
+    def failing_runner(*args: object, **kwargs: object) -> object:
+        """Raise the same error subprocess.run raises for a rejected API call."""
+        raise subprocess.CalledProcessError(
+            1,
+            ["gh", "api", "repos/acme/repo/rulesets"],
+            stderr="gh: Resource not accessible by integration (HTTP 403)",
+        )
+
+    with pytest.raises(RuntimeError, match="Resource not accessible.*administrator"):
+        _gh_json(["api", "repos/acme/repo/rulesets"], failing_runner)
+
+
+def test_gh_json_reports_missing_cli_in_plain_language() -> None:
+    """Tell the operator how to install/authenticate gh when it is unavailable."""
+
+    def missing_runner(*args: object, **kwargs: object) -> object:
+        """Raise the error subprocess.run emits when gh is not on PATH."""
+        raise FileNotFoundError("gh")
+
+    with pytest.raises(RuntimeError, match="GitHub CLI.*gh auth login"):
+        _gh_json(["api", "repos/acme/repo"], missing_runner)
