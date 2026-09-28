@@ -873,3 +873,20 @@ def test_an_incremental_command_without_a_reply_yet_blocks_the_rescue() -> None:
         _comment(_NOT_COMPLETED, "2026-09-28T10:00:12Z", "2026-09-28T10:09:00Z"),
     ]
     assert _outcome(comments, [_INCREMENTAL_REVIEW]) == "pending"
+
+
+def test_a_full_review_aborted_by_a_push_is_failed_not_pending() -> None:
+    """A push during the full review aborts it ("Head commit changed").
+
+    No review posts, so it must read `failed` (wait, retry once) rather than sit at
+    `pending` forever.
+    """
+    aborted = _REPLY + (
+        "<details>\n<summary>⚠️ Action not completed</summary>\n\n"
+        "Head commit changed.\n\n</details>"
+    )
+    comments = [
+        _command("2026-09-28T18:16:56Z"),
+        _comment(aborted, "2026-09-28T18:17:05Z", "2026-09-28T18:20:01Z"),
+    ]
+    assert _outcome(comments) == "failed"

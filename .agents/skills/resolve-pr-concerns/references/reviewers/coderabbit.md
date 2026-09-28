@@ -34,6 +34,7 @@ prose names no vendor; read this file before interpreting a review when
   | `✅ Action performed` / `Full review finished.` | `finished` |
   | `⚠️ Action not completed` / `Deferred architecture/priority summary could not be published.` | `finished` if a CodeRabbit review posted between the request and the reply's last edit (the findings landed; only the summary failed), else `pending` |
   | `❌ Action failed` / `Review failed.` | `failed` (no review ran; the reply was edited seconds after it was created) |
+  | `⚠️ Action not completed` / `Head commit changed.` | `failed`: a push during the full review aborted it, so retry once the head is final | observed on a CodeRabbit trial |
   | `Review finished.` + the incremental note | never a full review |
 
 - **A failed full review: wait, retry once, escalate.** Failures are rare and their

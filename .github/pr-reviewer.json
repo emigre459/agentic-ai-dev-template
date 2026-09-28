@@ -32,7 +32,7 @@
       "final_review_comment": "@coderabbitai full review",
       "command_reply_marker": "<!-- This is an auto-generated reply by CodeRabbit -->",
       "final_review_done_pattern": "\\bFull review finished\\b",
-      "final_review_failed_pattern": "(?s)^(?!.*incremental review system).*\\bReview failed\\b",
+      "final_review_failed_pattern": "(?s)^(?!.*incremental review system).*\\b(?:Review failed|Head commit changed)\\b",
       "final_review_partial_pattern": "(?s)^(?!.*incremental review system).*\\bAction not completed\\b"
     }
   }
