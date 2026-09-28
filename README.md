@@ -60,8 +60,9 @@ THEN run, in order:
   PR/merge preferences and security settings but deliberately defers the new
   required CI checks until the workflow exists on `main`. It prints the planned
   operations and asks for confirmation. If the shell cannot answer, show the plan
-  to the user, confirm through the interview tool, then rerun the script with
-  `--yes`; never skip confirmation.
+  to the user, confirm through the interview tool, then rerun as
+  `python3 scripts/apply_repo_settings.py --repo "$TARGET_REPO" --phase bootstrap --yes`;
+  never skip confirmation.
 - Review `git status`, `git diff --stat`, and `git diff --name-status`. Confirm the
   changes are only legitimate initialization output, then stage and commit:
   `git add -A && git commit -m "chore: initialize from agentic-ai-dev-template"`.
@@ -75,7 +76,8 @@ THEN run, in order:
   body. Tell the user to review and squash-merge it.
 - AFTER the setup PR merges, update local `main` and run
   `make finalize_repo_settings TARGET_REPO="$TARGET_REPO"`. Show the final plan
-  and honor its confirmation prompt. This second phase enables the required
+  and honor its confirmation prompt (same `--yes` fallback, with `--phase final`
+  and only after the user confirms). This second phase enables the required
   `lint`, `tests`, and `security` checks now that the CI workflow exists on main.
 - Tell the user that automated PR review (Cursor Bugbot) may need to be enabled
   on this new repo — it is configured per-repo, not inherited from the template.
