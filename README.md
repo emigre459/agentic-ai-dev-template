@@ -67,7 +67,11 @@ THEN run, in order:
     2. Enable the repo on the Cursor side:
        https://cursor.com/dashboard/bugbot/installation
   Once enabled, Bugbot reviews automatically on each push (no `bugbot run`
-  comment needed).
+  comment needed). To give it the repo's noise filters, copy
+  `.github/review-guidelines.md` to `.cursor/BUGBOT.md`. Once reviews arrive,
+  the user can add the vendor-neutral `review-gate` status to the `main`
+  ruleset's required checks — never the reviewer's own check (see
+  `.agents/skills/resolve-pr-concerns/references/reviewers/`).
 
 Do not invent settings or skip the confirmation prompts.
 ```

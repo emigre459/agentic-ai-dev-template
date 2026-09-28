@@ -1,5 +1,5 @@
 ---
-description: How the configured PR reviewer (.github/pr-reviewer.json) is triggered on PRs, and how that interacts with the explicit trigger comment in resolve-pr-concerns — detect the trigger mode, then post the literal trigger comment only when it's needed.
+description: How the configured PR reviewer (.github/pr-reviewer.json) is triggered on PRs, and how that interacts with the explicit trigger comment in resolve-pr-concerns — detect the trigger mode, post the literal trigger comment only when it's needed, then its final-review comment once. The review gate is the vendor-neutral review-gate status, never the vendor's own check.
 alwaysApply: true
 ---
 
@@ -38,3 +38,17 @@ and act accordingly:
 
 Don't blindly post the trigger comment "to be safe" — on an auto-on-push repo that
 double-triggers every round. Confirm the mode first, then skip or send accordingly.
+
+**Then the final full review, once, in either mode.** If the adapter's
+`final_review_comment` is non-null, post it once every finding on the head is
+fixed or answered (verdict `pass`, or `findings` you have replied to), and never
+again for coverage — no push triggers it. On a failure, wait 20+ minutes and post it once
+more, then escalate. `reviewer_state.py` reports `final_review_outcome`;
+`resolve-pr-concerns` Step 5a has the details.
+
+**What counts as reviewed.** The reviewer's own `check_name` status is not evidence:
+it can pass on a head it skipped or was rate-limited on. The vendor-neutral
+`review-gate` status (posted by `.github/workflows/review-gate.yml`) is green only
+when the reviewer has reviewed the current head **and** finished its final full
+review. Require `review-gate` in the `main` ruleset once a reviewer is installed —
+never the vendor's check.

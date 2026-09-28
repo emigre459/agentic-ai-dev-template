@@ -295,9 +295,18 @@ if [[ -n "$REPO" ]]; then
 fi
 
 # Exit code reflects pass/fail at the "required" check level.
-fails=$(gh pr checks "$PR" ${repo_arg[@]+"${repo_arg[@]}"} --json name,bucket --jq '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | length')
+# The review-gate workflow cancels its superseded runs (concurrency); its verdict
+# is the `review-gate` status, so a cancelled run of that job is noise.
+REVIEW_GATE_JOB="compute review gate status"
+check_buckets=$(gh pr checks "$PR" ${repo_arg[@]+"${repo_arg[@]}"} --json name,bucket 2>/dev/null || echo "[]")
+fails=$(jq --arg job "$REVIEW_GATE_JOB" '[.[] | select(.bucket == "fail" or (.bucket == "cancel" and .name != $job))] | length' <<< "$check_buckets")
 if [[ "${fails:-0}" -gt 0 ]]; then
   echo "$fails check(s) failed or were cancelled. PR is NOT mergeable." >&2
+  exit 1
+fi
+# ...but only when a run that did finish posted a passing `review-gate` status.
+if jq -e --arg job "$REVIEW_GATE_JOB" 'any(.[]; .name == $job and .bucket == "cancel") and (any(.[]; .name == "review-gate" and .bucket == "pass") | not)' <<< "$check_buckets" >/dev/null; then
+  echo "The review-gate run was cancelled and no passing review-gate status exists. PR is NOT mergeable." >&2
   exit 1
 fi
 
