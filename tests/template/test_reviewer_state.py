@@ -820,3 +820,46 @@ def test_loader_requires_the_partial_pattern_with_the_others(tmp_path: Path) -> 
 
 def test_the_full_reply_is_read_even_with_no_review_in_the_incremental_window() -> None:
     assert _outcome(_interleaved(_FULL_DONE)) == "finished"
+
+
+# Hardening from CodeRabbit's review of the template port (observed on a CodeRabbit review).
+
+
+def test_a_dismissed_clean_review_does_not_count() -> None:
+    """A withdrawn review is not a verdict: `pull_request_review` fires on `dismissed`."""
+    dismissed = {
+        **_review(f"{MARKER}\nBugbot found no new issues."),
+        "state": "DISMISSED",
+    }
+    assert review_verdict([dismissed], SHA, BUGBOT) == ("none", 0)
+
+
+def test_a_dismissed_review_never_rescues_a_partial_full_review() -> None:
+    comments = [
+        _command("2026-09-27T17:13:15Z"),
+        _comment(_NOT_COMPLETED, "2026-09-27T17:13:23Z", "2026-09-27T17:23:20Z"),
+    ]
+    review = {
+        **_rabbit(
+            "**Actionable comments posted: 1**", submitted="2026-09-27T17:21:02Z"
+        ),
+        "state": "DISMISSED",
+    }
+    assert _outcome(comments, [review]) == "pending"
+
+
+def test_an_interleaved_incremental_review_does_not_rescue_a_partial_full_review() -> (
+    None
+):
+    """The review in the window may belong to an incremental command, not the full one.
+
+    With another command's reply in the window, the review can't be attributed to the
+    full review, so the partial reply stays `pending` (errs on blocking).
+    """
+    comments = [
+        _command("2026-09-28T10:00:04Z"),
+        _command("2026-09-28T10:00:06Z", body="@coderabbitai review"),
+        _comment(_INCREMENTAL_DONE, "2026-09-28T10:00:09Z", "2026-09-28T10:03:00Z"),
+        _comment(_NOT_COMPLETED, "2026-09-28T10:00:12Z", "2026-09-28T10:09:00Z"),
+    ]
+    assert _outcome(comments, [_INCREMENTAL_REVIEW]) == "pending"

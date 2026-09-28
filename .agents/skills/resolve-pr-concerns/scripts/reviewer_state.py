@@ -254,6 +254,11 @@ def _on_head(
     return head_sha.lower().startswith(match.group(1).lower())
 
 
+def _live(review: Mapping[str, Any]) -> bool:
+    """Return whether a review still stands: a dismissed review is not a verdict."""
+    return str(review.get("state") or "").upper() != "DISMISSED"
+
+
 def review_verdict(
     reviews: Iterable[Mapping[str, Any]],
     head_sha: str | None,
@@ -268,6 +273,7 @@ def review_verdict(
         r
         for r in reviews
         if (r.get("user") or {}).get("login") in adapter.bot_logins
+        and _live(r)
         and _is_summary(r.get("body") or "", adapter)
         and _on_head(r, head_sha, adapter)
     ]
@@ -348,7 +354,11 @@ def _classify(
     if any(done.search(b) for b in bodies):
         return "finished"
     # "Action not completed": the review can post while only its summary fails, so a
-    # verdict-bearing review between the request and that reply's last edit counts.
+    # verdict-bearing review between the request and that reply's last edit counts --
+    # unless another command's reply shares the window, since that review may be the
+    # other command's (errs on blocking: the outcome stays pending).
+    if any(not partial.search(b) for b in bodies):
+        replies = []
     for reply in replies:
         if not partial.search(reply.get("body") or ""):
             continue
@@ -356,6 +366,7 @@ def _classify(
         for review in reviews:
             if (
                 ((review.get("user") or {}).get("login")) in adapter.bot_logins
+                and _live(review)
                 and _is_summary(review.get("body") or "", adapter)
                 and start <= (review.get("submitted_at") or "") <= edited
             ):
