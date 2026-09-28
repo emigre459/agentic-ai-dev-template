@@ -890,3 +890,16 @@ def test_a_full_review_aborted_by_a_push_is_failed_not_pending() -> None:
         _comment(aborted, "2026-09-28T18:17:05Z", "2026-09-28T18:20:01Z"),
     ]
     assert _outcome(comments) == "failed"
+
+
+def test_a_full_review_aborted_by_a_base_or_head_change_is_failed() -> None:
+    """The same abort, worded "Pull request base or head changed"."""
+    aborted = _REPLY + (
+        "<details>\n<summary>⚠️ Action not completed</summary>\n\n"
+        "Pull request base or head changed.\n\n</details>"
+    )
+    comments = [
+        _command("2026-09-28T18:37:12Z"),
+        _comment(aborted, "2026-09-28T18:37:22Z", "2026-09-28T18:45:02Z"),
+    ]
+    assert _outcome(comments) == "failed"

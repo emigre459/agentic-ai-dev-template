@@ -405,7 +405,7 @@ If the adapter's `final_review_comment` is non-null, the PR needs **one** final 
   ```bash
   gh pr comment <num> --repo <owner>/<repo> --body "<final_review_comment>"
   ```
-- `pending` → it is running; poll `reviewer_state.py`.
+- `pending` → it is running; poll `reviewer_state.py`, and **don't push until it finishes** — a push aborts it (the notes file lists the abort wording), which reads as `failed`.
 - `finished` → fix its findings like any others and re-validate them with **incremental** reviews (the trigger comment, or auto-on-push). **Never post a second full review for coverage**: repeated full reviews don't converge, they only sample more, and each spends the reviewer's review quota.
 - `failed` → **wait at least 20 minutes, post it once more, and if that also fails, hand it to a human** with both reply links. Never retry immediately (the adapter notes record what is known about failures).
 - `not_required` → the reviewer has no final full review; nothing to do.

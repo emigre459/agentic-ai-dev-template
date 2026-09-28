@@ -35,8 +35,12 @@ prose names no vendor; read this file before interpreting a review when
   | `⚠️ Action not completed` / `Deferred architecture/priority summary could not be published.` | `finished` if a CodeRabbit review posted between the request and the reply's last edit (the findings landed; only the summary failed), else `pending` |
   | `❌ Action failed` / `Review failed.` | `failed` (no review ran; the reply was edited seconds after it was created) |
   | `⚠️ Action not completed` / `Head commit changed.` | `failed`: a push during the full review aborted it, so retry once the head is final | observed on a CodeRabbit trial |
+  | `⚠️ Action not completed` / `Pull request base or head changed.` | `failed`: the same abort (a push, or `main` moving under it) | observed on a CodeRabbit trial |
   | `Review finished.` + the incremental note | never a full review |
 
+- **Don't push while a full review is running.** A push aborts it ("Head commit changed" /
+  "Pull request base or head changed") and spends a review for nothing; batch the fixes
+  and push after it finishes.
 - **A failed full review: wait, retry once, escalate.** Failures are rare and their
   cause is undocumented (CodeRabbit's docs say only "an error occurred, please try
   again later"). It is **not the rate limit**: a rate-limited request gets a
