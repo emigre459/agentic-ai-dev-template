@@ -863,3 +863,13 @@ def test_an_interleaved_incremental_review_does_not_rescue_a_partial_full_review
         _comment(_NOT_COMPLETED, "2026-09-28T10:00:12Z", "2026-09-28T10:09:00Z"),
     ]
     assert _outcome(comments, [_INCREMENTAL_REVIEW]) == "pending"
+
+
+def test_an_incremental_command_without_a_reply_yet_blocks_the_rescue() -> None:
+    """The incremental command itself, not just its reply, makes the window ambiguous."""
+    comments = [
+        _command("2026-09-28T10:00:04Z"),
+        _command("2026-09-28T10:00:06Z", body="@coderabbitai review"),
+        _comment(_NOT_COMPLETED, "2026-09-28T10:00:12Z", "2026-09-28T10:09:00Z"),
+    ]
+    assert _outcome(comments, [_INCREMENTAL_REVIEW]) == "pending"

@@ -355,9 +355,15 @@ def _classify(
         return "finished"
     # "Action not completed": the review can post while only its summary fails, so a
     # verdict-bearing review between the request and that reply's last edit counts --
-    # unless another command's reply shares the window, since that review may be the
-    # other command's (errs on blocking: the outcome stays pending).
-    if any(not partial.search(b) for b in bodies):
+    # unless an incremental command (or another command's reply) shares the window,
+    # since that review may be the other command's (errs on blocking: stays pending).
+    incremental = any(
+        start <= (c.get("created_at") or "")
+        and (end is None or (c.get("created_at") or "") < end)
+        and (c.get("body") or "").strip() == adapter.trigger_comment
+        for c in comments
+    )
+    if incremental or any(not partial.search(b) for b in bodies):
         replies = []
     for reply in replies:
         if not partial.search(reply.get("body") or ""):
