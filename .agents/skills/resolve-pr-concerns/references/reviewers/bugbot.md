@@ -5,6 +5,19 @@ names no vendor; read this file before interpreting a review when
 `.active == "bugbot"`. Config fields (check name, trigger, logins, marker,
 verdict patterns) live in the config — this file covers what a field can't say.
 
+> **Before switching to (or back to) Bugbot, read this caveat:** require the
+> vendor-neutral `review-gate` status in the `main` ruleset (it follows `active`, so
+> nothing else needs to change), and **never make the `Cursor Bugbot` check itself
+> required.** Bugbot can't post its check on merge-group commits, so a required
+> Bugbot check wedges a merge queue; keeping it required would mean dropping the
+> merge queue and requiring up-to-date branches instead, which brings back manual
+> catch-up merges. Also restore the noise filters: copy
+> `.github/review-guidelines.md` to `.cursor/BUGBOT.md` (see "Config" below).
+>
+> **No final full review.** Bugbot's scope (incremental vs comprehensive) is set in
+> the Bugbot admin UI, and no comment asks for a full review, so its five
+> final-review fields are `null` and the gate requires none.
+
 ## Installing and triggering
 
 - Bugbot reviews nothing until it is **installed** (the Cursor GitHub App,
@@ -47,9 +60,13 @@ verdict patterns) live in the config — this file covers what a field can't say
 
 ## Threads
 
-- `self_resolves_threads: false` — Bugbot does not resolve its own threads once a
-  later push addresses them; `resolve-pr-concerns` Step 4d closes them.
+- `self_resolves_threads: true` — Bugbot resolves its own addressed threads once a
+  later push fixes them (observed on real PRs). `resolve-pr-concerns` Step 4d still
+  replies with the fix SHA; if the bot already resolved the thread, don't re-open it.
 
 ## Config
 
-- Noise filters: `.cursor/BUGBOT.md` (categories of finding to skip).
+- Noise filters: Bugbot reads `.cursor/BUGBOT.md`, which this template does not
+  ship (it keeps no vendor directory). The filters live in the vendor-neutral
+  `.github/review-guidelines.md`; to wire them in, restore them as
+  `.cursor/BUGBOT.md` (a copy of that file).

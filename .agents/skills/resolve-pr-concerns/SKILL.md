@@ -23,7 +23,8 @@ This skill exists because PRs accumulate signal from multiple sources (bots, hum
 - Configured-reviewer / Copilot / dependabot / renovate enumeration commands
 - Loop guards (iteration counter, fingerprint-based oscillation detection)
 - CI-failure triage: OIDC App-token / `pull_request_target` workflow trap, fork-secrets unavailability, flaky external API treatment
-- Reviewer re-trigger (trigger comment, when the mode needs one) as the mandatory closing step
+- Reviewer re-trigger (trigger comment, when the mode needs one) as the mandatory closing step, then one final full review (the adapter's `final_review_comment`, Step 5a)
+- What counts as reviewed: `reviewer_state.py`'s verdict on the current head (and the vendor-neutral `review-gate` status it feeds), never the vendor's own check
 - `wait_for_pr_checks.sh` orchestration with terminal-state polling
 - Final user-facing status summary
 
@@ -34,10 +35,18 @@ This skill exists because PRs accumulate signal from multiple sources (bots, hum
 The automated PR reviewer is **not hardcoded**: `.github/pr-reviewer.json` names it (`active`) and declares its adapter. Read the values once per session:
 
 ```bash
-jq -r '.reviewers[.active] | "reviewer=\(.display_name) check=\(.check_name) trigger=\(.trigger_comment) logins=\(.bot_logins|join(",")) self_resolves=\(.self_resolves_threads)"' .github/pr-reviewer.json
+jq -r '.reviewers[.active] | "reviewer=\(.display_name) check=\(.check_name) trigger=\(.trigger_comment) final=\(.final_review_comment) logins=\(.bot_logins|join(",")) self_resolves=\(.self_resolves_threads)"' .github/pr-reviewer.json
 ```
 
-Throughout this skill, **the reviewer** is that adapter; **the reviewer's check** is its `check_name`; **the trigger comment** is its `trigger_comment`; **reviewer logins** are its `bot_logins`. The adapter's other fields tell you how to read a verdict: `summary_marker` (substring identifying its summary review; `null` = any review by `bot_logins`), `clean_pattern` / `findings_pattern` (case-insensitive regexes on the summary body — pass, or N findings), `reviewed_sha_pattern` (where the reviewed SHA lives when `commit_id` doesn't carry it), and `summary_in_issue_comments` (whether the verdict may live in an issue-comment the bot edits in place). **Before interpreting a review, read the adapter's quirks in `references/reviewers/<active>.md`** (skill-root-relative) — trigger modes, where the reviewed SHA lives, and known login / `commit_id` traps. Keep a note of the values for the session so you don't re-read the config on every pass.
+Throughout this skill, **the reviewer** is that adapter; **the reviewer's check** is its `check_name` — the vendor's own status, which can pass on heads it never reviewed, so it is **not** evidence of a review; **`review-gate`** is the vendor-neutral status that is (posted by `.github/workflows/review-gate.yml`; require it, never the vendor's check, in the `main` ruleset). **The trigger comment** is its `trigger_comment` (an incremental review); **the final-review comment** is its `final_review_comment` (one full review per PR; `null` = the reviewer has none); **reviewer logins** are its `bot_logins`. The adapter's other fields tell you how to read a verdict: `summary_marker` (substring identifying its summary review; `null` = any review by `bot_logins`), `clean_pattern` / `findings_pattern` (case-insensitive regexes on the summary body — pass, or N findings), `reviewed_sha_pattern` (where the reviewed SHA lives when `commit_id` doesn't carry it), and `summary_in_issue_comments` (whether the verdict may live in an issue-comment the bot edits in place). **Before interpreting a review, read the adapter's quirks in `references/reviewers/<active>.md`** (skill-root-relative) — trigger modes, where the reviewed SHA lives, and known login / `commit_id` traps. Keep a note of the values for the session so you don't re-read the config on every pass.
+
+For a one-call authoritative verdict + open findings + final-review state on the current head, run the bundled script (stdlib-only; run it from the repo root):
+
+```bash
+python3 <skill-dir>/scripts/reviewer_state.py --repo <owner>/<repo> --pr <num>
+```
+
+It prints `head_sha`, `verdict` (`pass` / `findings` / `none` — `none` means the reviewer has not reviewed this head), `open_findings`, `needs_trigger`, `merge_state_status`, `final_review_comment`, and `final_review_outcome` (Step 5a). Prefer it to hand-assembling the 2a–2c reads when you only need the verdict.
 
 Swapping reviewers is a config edit (`active`), never a rewrite of this skill. To add a reviewer, add an adapter entry to the config, a `references/reviewers/<key>.md` notes file, and a `Bash(gh pr comment * <trigger_comment>*)` allow entry in `.claude/settings.json`.
 
@@ -87,6 +96,7 @@ digraph resolve_pr_concerns {
     "Oscillation — surface to user" [shape=doublecircle];
     "Concerns?" [shape=diamond];
     "Post trigger comment if manual mode" [shape=box];
+    "Final full review, once (Step 5a)" [shape=box];
     "Wait for checks (wait_for_pr_checks.sh)" [shape=box];
     "Status summary (verification-before-completion)" [shape=doublecircle];
     "Classify each concern\n(superpowers:receiving-code-review)" [shape=box];
@@ -112,7 +122,7 @@ digraph resolve_pr_concerns {
     "Same fingerprints as last pass?" -> "Oscillation — surface to user" [label="yes"];
     "Same fingerprints as last pass?" -> "Concerns?" [label="no"];
     "Concerns?" -> "Post trigger comment if manual mode" [label="none"];
-    "Post trigger comment if manual mode" -> "Wait for checks (wait_for_pr_checks.sh)" -> "Status summary (verification-before-completion)";
+    "Post trigger comment if manual mode" -> "Final full review, once (Step 5a)" -> "Wait for checks (wait_for_pr_checks.sh)" -> "Status summary (verification-before-completion)";
     "Concerns?" -> "Classify each concern\n(superpowers:receiving-code-review)" [label="some"];
     "Classify each concern\n(superpowers:receiving-code-review)" -> "Parallel-mode gate: 2-4 simple,\ndir-disjoint, bounded, no rearch?";
     "Parallel-mode gate: 2-4 simple,\ndir-disjoint, bounded, no rearch?" -> "AskUserQuestion: parallel?" [label="yes"];
@@ -159,9 +169,10 @@ gh api repos/<owner>/<repo>/issues/<num>/comments --paginate \
       '[add // [] | .[] | select(.body | startswith($trigger)) | .created_at]'
 ```
 
-- If the reviewer's check exists / a recent push got a review by a reviewer login that was **not** preceded by a trigger comment → **auto-on-push** → set `REVIEWER_AUTORUN=enabled` and **skip** the explicit trigger comment (Step 5) for the rest of the session; after each push, just wait for the auto-review.
+- If a recent push got a review by a reviewer login that was **not** preceded by a trigger comment → **auto-on-push** → set `REVIEWER_AUTORUN=enabled` and **skip** the explicit trigger comment (Step 5) for the rest of the session; after each push, just wait for the auto-review.
 - If reviews only ever appear right after a trigger comment → **manual** → keep posting the trigger comment.
 - If the reviewer's check never appears and no review lands → the reviewer may not be installed/enabled (see Step 1b and the notes file's install steps).
+- The reviewer's check merely being present is **not** evidence of auto-on-push: a vendor check can register at once as "Review skipped" and pass (the notes file says when). Judge the mode by reviews, not by the check.
 
 Surface the detected mode to the user in one line ("The reviewer auto-runs on push here — I won't post redundant trigger comments"). If reviews stop arriving mid-PR in `enabled` mode, re-detect: the reviewer may have paused auto-review.
 
@@ -237,13 +248,15 @@ gh pr diff <num> --repo <owner>/<repo>
 
 These don't block your PR directly, but folding small mechanical bumps in is often easier than carrying parallel PRs.
 
-### 2f. Branch behind base — GATING, never optional
+### 2f. Blocking merge state (BEHIND / CONFLICTING / DIRTY) — GATING, never optional
 
 ```bash
-gh pr view <num> --repo <owner>/<repo> --json mergeStateStatus,baseRefName
+gh pr view <num> --repo <owner>/<repo> --json mergeable,mergeStateStatus,baseRefName
 ```
 
-**A branch that is behind its base is a blocking concern, not an FYI.** If `mergeStateStatus` is `BEHIND` (or the branch otherwise lacks the latest base commits), you MUST update it before the PR can be called merge-ready — CI and bot reviews on a stale branch verify code that isn't what will actually land. Do **not** describe this as "optional," "at your discretion," or "the merge button can handle it."
+**A blocking merge state is a gating concern, not an FYI.** If GitHub reports `mergeStateStatus` `BEHIND`, `mergeable` `CONFLICTING`, or `mergeStateStatus` `DIRTY`, you MUST update the branch before the PR can be called merge-ready — CI and bot reviews on a stale branch verify code that isn't what will actually land, and GitHub runs no `pull_request` CI at all while a PR conflicts with its base. Do **not** describe this as "optional," "at your discretion," or "the merge button can handle it."
+
+GitHub reports `BEHIND` **only while the ruleset requires branches to be up to date** (strict status checks). If the repo uses a **merge queue** instead, that requirement is off: a PR behind its base reads `CLEAN`, and that is fine — the queue tests the PR combined with the latest base — so do **not** merge the base in just because the branch is behind. Merge it in only when GitHub itself reports `BEHIND`, `CONFLICTING` or `DIRTY`.
 
 Resolve it like any other concern:
 
@@ -254,7 +267,7 @@ git merge origin/<base> --no-edit     # resolve conflicts if any
 git push
 ```
 
-Then **loop back** — the push re-runs CI and you re-trigger the automated reviewer (Step 5) so the green checks + clean review reflect the post-merge state. Only a branch current with its base (`mergeStateStatus` not `BEHIND`) and green **on that merged state** is merge-ready. If a merge conflict needs human judgment, surface it; otherwise resolve it yourself.
+Then **loop back** — the push re-runs CI and you re-trigger the automated reviewer (Step 5) so the green checks + clean review reflect the post-merge state: the sync changed the head SHA, so the prior review is stale and `review-gate` is unsatisfied on the new head until the reviewer re-reviews it. Only a branch GitHub doesn't report as `BEHIND` / `DIRTY` / `CONFLICTING`, green **on that state** — including a reviewer verdict on the current head — is merge-ready. If a merge conflict needs human judgment, surface it; otherwise resolve it yourself.
 
 ## Step 3: Classify each concern (with `superpowers:receiving-code-review` discipline)
 
@@ -382,9 +395,26 @@ After all concerns are resolved and pushed, the configured reviewer must re-revi
 
 - **`REVIEWER_AUTORUN=absent`** (reviewer not installed/enabled): there's nothing to re-trigger; rely on the Step 1b pre-pass review instead, and tell the user the configured reviewer isn't enabled on the repo (the notes file has its install steps).
 
+**Confirm a review actually started.** After the push (auto-on-push) or the trigger comment (manual), watch ~30 seconds for review activity on the new head: a reviewer review of it (`reviewer_state.py`'s `verdict` leaves `none`), or an in-progress signal the notes file describes. **The reviewer's check merely registering is not evidence that a review started** — a vendor check can register at once as "Review skipped" and pass (the notes file says when). If nothing started in `enabled` mode, the reviewer may have paused auto-review: re-detect (Step 1a) and post the trigger comment.
+
+## Step 5a: The final full review — once per PR, after the incremental loop is clean
+
+If the adapter's `final_review_comment` is non-null, the PR needs **one** final full review before it is merge-ready. It re-reviews the whole diff, and it catches what incremental reviews of small fix commits miss (on a trial, the closing full review found the run's most important bug). No push triggers it, in either trigger mode. `reviewer_state.py` reports it as `final_review_outcome`:
+
+- `not_requested` → once the incremental loop has nothing left to act on — the verdict on the head is `pass`, or every finding on it has been fixed or answered on its thread (a pushback leaves the verdict at `findings` for good) — post the literal `final_review_comment` as a top-level comment (it is allow-listed in `.claude/settings.json`):
+  ```bash
+  gh pr comment <num> --repo <owner>/<repo> --body "<final_review_comment>"
+  ```
+- `pending` → it is running; poll `reviewer_state.py`, and **don't push until it finishes** — a push aborts it (the notes file lists the abort wording), which reads as `failed`.
+- `finished` → fix its findings like any others and re-validate them with **incremental** reviews (the trigger comment, or auto-on-push). **Never post a second full review for coverage**: repeated full reviews don't converge, they only sample more, and each spends the reviewer's review quota.
+- `failed` → **wait at least 20 minutes, post it once more, and if that also fails, hand it to a human** with both reply links. Never retry immediately (the adapter notes record what is known about failures).
+- `not_required` → the reviewer has no final full review; nothing to do.
+
+Posting it early does no harm (it still counts), but the incremental loop is cheaper, so finish that first.
+
 ## Step 6: Wait for every check to settle
 
-A PR isn't done while CI or bot reviews are still pending. Use the bundled helper:
+A PR isn't done while CI or bot reviews are still pending. **Run this settle only once the reviewer has nothing left for you on the final head** — a verdict on it, and every finding fixed or answered (a pushback leaves the verdict at `findings` for good), plus, if the adapter has one, the final full review `finished` (Step 5a). Between reviewer rounds, poll `reviewer_state.py` instead: this helper waits on the whole suite, which is exactly what you don't want mid-loop. Use the bundled helper:
 
 ```bash
 bash <skill-dir>/scripts/wait_for_pr_checks.sh <pr-number> <owner>/<repo>
@@ -393,7 +423,7 @@ bash <skill-dir>/scripts/wait_for_pr_checks.sh <pr-number> <owner>/<repo>
 It polls `gh pr checks` until every required check has reached a terminal state (pass / fail / cancel / skipping). External bot reviews (every configured reviewer's check from `.github/pr-reviewer.json`, plus Copilot) are treated as "soft pending" — the helper waits up to ten minutes for them, then surfaces them as `no-review` rather than blocking forever. It reads the config from the repo root by default; pass `--config PATH` to point elsewhere. Exit codes:
 
 - `0` — all required checks passed; the PR is mergeable from a CI standpoint.
-- `1` — one or more checks failed/cancelled; loop back to Step 2 and treat the failure as a new concern.
+- `1` — one or more checks failed/cancelled; loop back to Step 2 and treat the failure as a new concern. (A cancelled run of the review-gate workflow's `compute review gate status` job is superseded-run noise and doesn't count — unless no passing `review-gate` status exists.)
 - `2` — timed out (default 20 minutes). Surface to the user; they decide whether to wait longer or investigate.
 - `64` — usage error, an explicit `--config` that doesn't exist, or an invalid `.github/pr-reviewer.json`; fix the config. (A repo with **no** reviewer config is fine — the helper notes it and waits on CI only, per Step 1b.)
 
@@ -412,11 +442,15 @@ End with a short status summary:
 - What was addressed (one bullet per concern, with the source — reviewer bot/human reviewer/dependabot — and whether it was fixed, pushed back on, or closed as YAGNI).
 - What's still outstanding (if anything).
 - Whether the reviewer's trigger comment was posted (or auto-run was relied on) and what to expect next.
-- Current `mergeStateStatus` from the fresh `gh pr view` call. **Never call a PR merge-ready while `mergeStateStatus` is `BEHIND`** — that's an unresolved gating concern (Step 2f), not a footnote. "Green checks but behind base" means CI verified stale code; update the branch and re-verify first.
+- Current `mergeStateStatus` from the fresh `gh pr view` call. **Never call a PR merge-ready while GitHub reports `BEHIND`, `CONFLICTING` or `DIRTY`** — that's an unresolved gating concern (Step 2f), not a footnote. "Green checks but behind base" means CI verified stale code; update the branch and re-verify first. (With a merge queue, a PR behind its base reads `CLEAN` and is fine.)
+- **The reviewer has reviewed the current head and its final full review is done.** Read `reviewer_state.py`: `verdict` is `pass` / `findings` on `head_sha`, `open_findings` is empty (every finding fixed or answered), and `final_review_outcome` is `finished` or `not_required`. If the ruleset requires it, the `review-gate` status shows the same thing and must be green. **The reviewer's own check is not evidence** — it can pass on a head it skipped or was rate-limited on. A missing review or final review is a gating concern exactly like a `BEHIND` branch; report it explicitly, never as a footnote.
+- **Who merges.** This skill drives the PR to merge-ready and **stops**; merging is the user's call. With a merge queue on, merging means "Merge when ready", which enqueues the PR and lets the queue test it against the latest base.
 
 ## Red flags — stop and reassess
 
 - Describing a `BEHIND` branch as merge-ready, or framing "update the branch from base" as optional / the merger's call — it is a **gating** Step-2f concern: merge base in, re-run CI + the automated reviewer on the merged state, then re-assess.
+- Posting the final-review comment a second time for more coverage, or re-posting it immediately after a failure — once per PR, and a failure waits 20+ minutes for one retry (Step 5a).
+- Calling a head reviewed because the reviewer's own check is green — that check can pass on a head it skipped. Read `reviewer_state.py` (or the `review-gate` status).
 - A concern shows up in a category you don't recognize (e.g. a third-party SAST bot you haven't seen) — surface it to the user, don't auto-classify.
 - The fix would conflict with the user's stated intent in the PR description — ask before changing direction.
 - Tests pass after a fix but the fix doesn't actually address the reviewer's concern (you treated the symptom, not the cause).
@@ -436,6 +470,7 @@ End with a short status summary:
 | Treating every concern as simple → aggressive auto-fixes diverging from user intent | Default to AskUserQuestion when there's any judgment involved; apply `superpowers:receiving-code-review` discipline first |
 | Implementing reviewer suggestions without verifying they're correct for the codebase | Wrap every concern in `superpowers:receiving-code-review`'s verify-before-implement pass — including the "simple" ones |
 | Skipping the reviewer re-trigger after fixes | It's the last step — never skip; new code → new review (auto-run or the trigger comment, per Step 1a) |
+| Skipping the final full review because the incremental reviews are clean | Post the adapter's `final_review_comment` once (Step 5a); it re-reviews the whole diff |
 | Folding in a major-version dependency bump without checking the diff | Always run `gh pr diff` before applying a dep PR locally |
 | Treating a red CI check as "noise" without reading the log | Run `gh run view --log-failed` on every failure; classify infra vs code; fix or escalate |
 | Bumping a workflow file that uses OIDC → App token (claude-code-review, claude) inside a PR | Revert that workflow change from the PR; ask the user to land it on the default branch directly |

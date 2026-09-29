@@ -13,9 +13,42 @@ prose names no vendor; read this file before interpreting a review when
 - Install the CodeRabbit GitHub App for the repo; per-repo behavior lives in
   `.coderabbit.yaml` at the repo root.
 - Trigger: a top-level PR comment `@coderabbitai review` (`trigger_comment`) —
-  an **incremental** review of commits since the last one. `@coderabbitai full
-  review` re-reviews from scratch; use it only when an incremental review is stale
-  or confused.
+  an **incremental** review of commits since the last one.
+  Reference: https://docs.coderabbit.ai/reference/review-commands
+- **Final full review** (`final_review_comment`): once incremental reviews are
+  clean, post `@coderabbitai full review` **once** per PR. It re-reviews the whole
+  diff, and on a CodeRabbit trial it found the most important bug of the run. Fix
+  its findings and re-validate them incrementally; never post a second one for
+  coverage (repeated full reviews don't converge, they just sample more, and each
+  spends quota).
+- **(observed)** **How a full review ends.** CodeRabbit replies to each command with
+  a comment starting `<!-- This is an auto-generated reply by CodeRabbit -->`
+  (`command_reply_marker`) and edits it in place when the review ends. An
+  incremental command's reply carries the same marker, so `reviewer_state.py` reads
+  every reply between a full-review request and the next one, and the failed /
+  partial patterns skip replies that carry the incremental note ("incremental
+  review system"):
+
+  | Reply | Outcome |
+  |---|---|
+  | `✅ Action performed` / `Full review finished.` | `finished` |
+  | `⚠️ Action not completed` / `Deferred architecture/priority summary could not be published.` | `finished` if a CodeRabbit review posted between the request and the reply's last edit (the findings landed; only the summary failed), else `pending` |
+  | `❌ Action failed` / `Review failed.` | `failed` (no review ran; the reply was edited seconds after it was created) |
+  | `⚠️ Action not completed` / `Head commit changed.` | `failed`: a push during the full review aborted it, so retry once the head is final | observed on a CodeRabbit trial |
+  | `⚠️ Action not completed` / `Pull request base or head changed.` | `failed`: the same abort (a push, or `main` moving under it) | observed on a CodeRabbit trial |
+  | `Review finished.` + the incremental note | never a full review |
+
+- **Don't push while a full review is running.** A push aborts it ("Head commit changed" /
+  "Pull request base or head changed") and spends a review for nothing; batch the fixes
+  and push after it finishes.
+- **A failed full review: wait, retry once, escalate.** Failures are rare and their
+  cause is undocumented (CodeRabbit's docs say only "an error occurred, please try
+  again later"). It is **not the rate limit**: a rate-limited request gets a
+  separate "Review rate limited" notice and a passing check, and doesn't consume
+  allowance. A retry about half an hour later succeeded (observed on a CodeRabbit
+  trial). So wait at least 20 minutes, re-post `@coderabbitai full review` once, and
+  hand a second failure to a human with both reply links. Never retry immediately.
+- `@coderabbitai rate limit` reports the remaining hourly allowance.
 - Auto-review and auto-incremental-review on push are on by default
   (`reviews.auto_review` in `.coderabbit.yaml`); it pauses after
   `auto_pause_after_reviewed_commits` (default 5) reviewed commits — after that,
@@ -27,6 +60,13 @@ prose names no vendor; read this file before interpreting a review when
 
 - **(observed)** Check name: `CodeRabbit` (a check run; legacy commit statuses are
   opt-in).
+- **(observed)** **A green `CodeRabbit` check does NOT mean the head was reviewed.**
+  On a push it doesn't review (auto-review off, a label gate, or a paused
+  auto-review), it posts `success` with "Review skipped: …", and a rate-limited push
+  gets a passing "Review rate limited" check on purpose. So never require the
+  `CodeRabbit` check: require the vendor-neutral `review-gate` status, which is
+  green only when `reviewer_state.py` has a verdict on the current head and the
+  final full review finished.
 - **(observed)** Logins: `coderabbitai[bot]` on REST reviews/comments,
   `coderabbitai` as the GraphQL thread author — both listed in `bot_logins`.
 - **(observed)** Findings: a review whose body starts
@@ -71,5 +111,36 @@ prose names no vendor; read this file before interpreting a review when
 
 ## Config
 
-- Repo config: `.coderabbit.yaml`. When switching to this adapter, port the noise
-  filters from the previous reviewer's config (e.g. `.cursor/BUGBOT.md`) into it.
+- Repo config: `.coderabbit.yaml` at the repo root (this template ships none).
+  Settings worth considering:
+  - **Trigger-only** — `reviews.auto_review.enabled: false` and
+    `reviews.auto_review.auto_incremental_review: false`, with no label gate. With
+    auto-review on it re-reviews every push, and its threads block merges through
+    the conversation-resolution rule. With it off, the ~30s start-check never sees an
+    automatic start, so the skill's comment mode is the normal path.
+  - `reviews.auto_review.base_branches: [".*"]` so it reviews PRs whose base isn't
+    the default branch (stacked PRs); without it those are skipped.
+- **Noise filters** live in the vendor-neutral `.github/review-guidelines.md`. Wire
+  them in one of two ways:
+  - copy its categories into `reviews.path_instructions` (one entry with
+    `path: "**"`); or
+  - point the code-guidelines knowledge base at the file. A guideline file applies
+    only to its own directory tree by default, so map it to the whole repo:
+    ```yaml
+    knowledge_base:
+      code_guidelines:
+        filePatterns:
+          - files: ".github/review-guidelines.md"
+            applyTo: "**"
+    ```
+    Don't also list the file's path in `path_instructions`: that reviews it as
+    changed code instead of reading it as guidelines.
+
+## Switching reviewers
+
+Switching reviewers is `"active": "<key>"` in `.github/pr-reviewer.json`, and
+nothing else: `review-gate` follows `active`. **Never make a vendor's own check a
+required status.** A vendor check that can't report on merge-group commits
+(Bugbot's can't) wedges a merge queue, and keeping it required would mean dropping
+the queue and requiring up-to-date branches instead. Switching to Bugbot also means
+restoring its noise-filter file (see `bugbot.md`).

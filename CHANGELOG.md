@@ -1,5 +1,10 @@
 # Changelog
 
+> **Frozen as of 2026-09-28.** This file is no longer updated: a changelog that every
+> PR edits is a frequent source of merge conflicts, and the `build-from-issue` skill
+> no longer has a changelog step. For what changed, read the merged PRs
+> (`gh pr list --state merged --base main`) or `git log --first-parent main`.
+
 ## 2026-07-28
 - feat: reconcile Dependabot automated security updates via `.github/repo-settings/security-settings.json` + `make apply_repo_settings` (previously only the `main` ruleset + PR-merge prefs were canonicalized), so repos seeded from this template get it by default — no interview question, same deterministic reconciliation as the existing settings
 - fix: rename lingering `agentic-ai-powered-repo` references (package name, issue/commit text) to `agentic-ai-dev-template`

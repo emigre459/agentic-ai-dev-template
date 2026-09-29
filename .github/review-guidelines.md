@@ -1,9 +1,14 @@
-# Cursor Bugbot — Noise Filters
+# PR review guidelines — noise filters
 
-This file lists categories of findings we explicitly do **not** want from Cursor
-Bugbot on PRs in this repo. Bugbot is valuable for catching real bugs — the goal
-here isn't to silence it, it's to keep the signal-to-noise ratio high so reviewers
-actually read every finding.
+This file lists categories of findings we explicitly do **not** want from the
+automated PR reviewer (whichever one `.github/pr-reviewer.json` names as `active`).
+The reviewer is valuable for catching real bugs — the goal here isn't to silence it,
+it's to keep the signal-to-noise ratio high so reviewers actually read every finding.
+
+It is vendor-neutral on purpose: no reviewer reads this path by itself. Each
+reviewer's notes file
+(`.agents/skills/resolve-pr-concerns/references/reviewers/<key>.md`) says how to
+wire it into that reviewer's own config.
 
 If a finding falls into one of the categories below, skip it. If you're unsure
 whether a finding qualifies, **default to reporting** — false negatives are worse
@@ -28,7 +33,7 @@ Skip "what if this is `None`/`undefined`?" findings when:
 Skip "extract a helper", "rename this variable", "prefer this idiom", "add a docstring
 to this private helper". Formatting and lint are already enforced by the project's
 formatter + linter (see `.agents/rules/`); issues those tools would catch don't need
-a separate Bugbot finding.
+a separate review finding.
 
 ### 3. Test-quality nags that aren't bugs
 
@@ -62,8 +67,8 @@ list". Cosmetic perf outside a genuine hot path isn't worth a finding.
 
 ### 8. Documentation-shape complaints about AGENTS.md / `.agents/rules/` / config
 
-Skip "this rule is vague" / "this rule contradicts another". Bugbot is for code, not
-policy. If you spot a genuine rule inconsistency, raise it in a separate human-facing
+Skip "this rule is vague" / "this rule contradicts another". The reviewer is for code,
+not policy. If you spot a genuine rule inconsistency, raise it in a separate human-facing
 comment rather than a code finding.
 
 ---
@@ -84,7 +89,7 @@ comment rather than a code finding.
 6. **Logic errors** — off-by-one, inverted condition, wrong operator, unhandled state.
 7. **Spurious / misplaced files and unexplained new directories** (repo hygiene). The
    HARD gate is CI (`tests/template/test_root_hygiene.py`: a repo-root file allowlist +
-   a no-tracked-file-is-gitignored invariant); Bugbot is the SECONDARY signal for the
+   a no-tracked-file-is-gitignored invariant); the reviewer is the SECONDARY signal for the
    fuzzier cases that gate can't express. Report:
    - **A new file at the repo root** that isn't one of the established root files
      (build/config, README, CHANGELOG, lockfiles) — root clutter from scratch handoffs
