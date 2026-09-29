@@ -93,6 +93,8 @@ def test_status_posts_on_the_sha_the_state_was_computed_for(monkeypatch: Any) ->
         lambda repo, pr, adapter: _state(head_sha=sha),
     )
     monkeypatch.setattr(review_gate, "_gh", posted.append)
+    current = iter([None, gate_status(_state(head_sha=sha))])
+    monkeypatch.setattr(review_gate, "_current_gate_status", lambda r, h: next(current))
     review_gate.post_for_pr(REPO, 7, reviewer_state.load_reviewer(key="coderabbit"))
     (args,) = posted
     assert f"repos/{REPO}/statuses/{sha}" in args
@@ -118,3 +120,101 @@ def test_merge_group_passes_through(monkeypatch: Any) -> None:
     (args,) = posted
     assert f"repos/{REPO}/statuses/{'b' * 40}" in args
     assert "state=success" in args and "context=review-gate" in args
+
+
+# Runs are never cancelled (a cancelled run puts a red X on every PR and on the default
+# branch). Instead a run posts only when the head's status differs from what it
+# computed, then re-reads and repeats until they match, so a stale overwrite by an
+# overlapping run is repaired by that same run.
+
+
+class _Head:
+    """A fake head: its newest review-gate status plus a scripted state sequence."""
+
+    def __init__(self, states: list[dict[str, Any]], current: Any = None) -> None:
+        self.states = iter(states)
+        self.last: dict[str, Any] = states[0]
+        self.current = current
+        self.posts: list[tuple[str, str]] = []
+
+    def collect(self, repo: str, pr: int, adapter: Any) -> dict[str, Any]:
+        self.last = next(self.states, self.last)
+        return self.last
+
+    def post(self, repo: str, sha: str, state: str, description: str) -> None:
+        self.posts.append((state, description))
+        self.current = (state, description)
+
+
+def _run(monkeypatch: Any, head: _Head) -> _Head:
+    monkeypatch.setattr(review_gate.reviewer_state, "collect_state", head.collect)
+    monkeypatch.setattr(review_gate, "_post", head.post)
+    monkeypatch.setattr(
+        review_gate, "_current_gate_status", lambda repo, sha: head.current
+    )
+    review_gate.post_for_pr(REPO, 7, reviewer_state.load_reviewer(key="coderabbit"))
+    return head
+
+
+def test_an_unchanged_status_is_not_posted_again(monkeypatch: Any) -> None:
+    """The sweep must not re-post (GitHub caps statuses at 1,000 per SHA+context)."""
+    current = gate_status(_state())
+    assert _run(monkeypatch, _Head([_state()], current=current)).posts == []
+
+
+def test_a_changed_status_is_posted_once(monkeypatch: Any) -> None:
+    head = _run(monkeypatch, _Head([_state()], current=None))
+    assert head.posts == [gate_status(_state())]
+
+
+def test_a_stale_overwrite_is_repaired_by_the_same_run(monkeypatch: Any) -> None:
+    """A read the old verdict, B already posted the new one; A must end on the new one."""
+    old, new = _state(verdict="none"), _state()
+    head = _run(monkeypatch, _Head([old, new], current=gate_status(new)))
+    assert head.posts == [gate_status(old), gate_status(new)]
+    assert head.current == gate_status(new)
+
+
+def test_a_state_that_never_settles_stops_after_a_few_posts(monkeypatch: Any) -> None:
+    flipping = [_state(verdict="none"), _state()] * 10
+    head = _run(monkeypatch, _Head(flipping, current=None))
+    assert len(head.posts) == review_gate._MAX_POSTS
+
+
+def test_the_sweep_posts_every_open_pr_and_isolates_failures(monkeypatch: Any) -> None:
+    done: list[int] = []
+
+    def _post_for_pr(repo: str, pr: int, adapter: Any) -> None:
+        if pr == 2:
+            raise RuntimeError("gh failed")
+        done.append(pr)
+
+    monkeypatch.setattr(review_gate, "_open_prs", lambda repo: [1, 2, 3])
+    monkeypatch.setattr(review_gate, "post_for_pr", _post_for_pr)
+    with pytest.raises(SystemExit, match="1 of 3"):
+        review_gate.post_for_all_open_prs(REPO, reviewer_state.load_reviewer())
+    assert done == [1, 3]
+
+
+def test_the_current_status_is_the_newest_for_the_context(monkeypatch: Any) -> None:
+    listed = (
+        '[{"context": "ci", "state": "success", "description": "x"},'
+        ' {"context": "review-gate", "state": "pending", "description": "newest"},'
+        ' {"context": "review-gate", "state": "failure", "description": "older"}]'
+    )
+    monkeypatch.setattr(review_gate, "_gh_output", lambda args: listed)
+    assert review_gate._current_gate_status(REPO, "a" * 40) == ("pending", "newest")
+
+
+def test_the_sweep_lists_every_open_pr_without_a_cap(monkeypatch: Any) -> None:
+    """A fixed `--limit` would silently skip PRs past it."""
+    calls: list[list[str]] = []
+
+    def _out(args: list[str]) -> str:
+        calls.append(args)
+        return "11\n12\n13\n"
+
+    monkeypatch.setattr(review_gate, "_gh_output", _out)
+    assert review_gate._open_prs(REPO) == [11, 12, 13]
+    (args,) = calls
+    assert "--paginate" in args and not any(a.startswith("--limit") for a in args)

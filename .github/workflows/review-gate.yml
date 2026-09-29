@@ -29,8 +29,11 @@ on:
   workflow_dispatch:
     inputs:
       pr:
-        description: PR number to recompute the gate for (backfill)
-        required: true
+        description: PR number to recompute (empty = every open PR)
+        required: false
+  # Heals any status a rare overlap left stale (runs are never cancelled).
+  schedule:
+    - cron: "*/30 * * * *"
 
 permissions:
   contents: read
@@ -38,9 +41,10 @@ permissions:
   issues: read
   statuses: write
 
-concurrency:
-  group: review-gate-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr || github.sha }}
-  cancel-in-progress: true
+# No `concurrency`: a cancelled run shows as a failed check on the PR (and on the
+# default branch, where issue_comment runs attach), which trains people to ignore red.
+# Overlapping runs are safe instead: review_gate.py posts only when the head's status
+# differs from what it computed, then re-reads until they match.
 
 jobs:
   compute:
@@ -70,6 +74,8 @@ jobs:
           fi
           if [ "$EVENT" = "merge_group" ]; then
             python3 "$script" --repo "$GITHUB_REPOSITORY" --merge-group-sha "$GROUP_SHA"
+          elif [ -z "$PR" ]; then
+            python3 "$script" --repo "$GITHUB_REPOSITORY" --all-open
           else
             python3 "$script" --repo "$GITHUB_REPOSITORY" --pr "$PR"
           fi

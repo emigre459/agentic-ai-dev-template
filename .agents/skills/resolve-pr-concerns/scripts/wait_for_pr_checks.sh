@@ -295,8 +295,9 @@ if [[ -n "$REPO" ]]; then
 fi
 
 # Exit code reflects pass/fail at the "required" check level.
-# The review-gate workflow cancels its superseded runs (concurrency); its verdict
-# is the `review-gate` status, so a cancelled run of that job is noise.
+# The review-gate workflow used to cancel superseded runs; it no longer does, but
+# heads pushed before that change still carry cancelled runs of this job. Its
+# verdict is the `review-gate` status, so a cancelled run of that job is noise.
 REVIEW_GATE_JOB="compute review gate status"
 check_buckets=$(gh pr checks "$PR" ${repo_arg[@]+"${repo_arg[@]}"} --json name,bucket 2>/dev/null || echo "[]")
 fails=$(jq --arg job "$REVIEW_GATE_JOB" '[.[] | select(.bucket == "fail" or (.bucket == "cancel" and .name != $job))] | length' <<< "$check_buckets")

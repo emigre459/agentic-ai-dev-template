@@ -40,6 +40,7 @@ def test_review_gate_triggers_and_permissions() -> None:
         "pull_request_review",
         "merge_group",
         "workflow_dispatch",
+        "schedule",
     }
     assert wf["on"]["issue_comment"] == {"types": ["created", "edited"]}
     assert wf["permissions"] == {
@@ -102,3 +103,20 @@ def test_a_default_branch_without_the_script_skips_instead_of_failing() -> None:
     (step,) = [s for s in _gate_job()["steps"] if "run" in s]
     assert '[ ! -f "$script" ]' in step["run"]
     assert "exit 0" in step["run"]
+
+
+def test_runs_are_never_cancelled() -> None:
+    """No run of the gate is ever cancelled.
+
+    Cancelled runs show as failed checks on every PR and on the default branch
+    (where issue_comment runs attach), which trains people to ignore red. Ordering
+    safety lives in review_gate.py instead (post only on change, repair until stable).
+    """
+    wf = _load("review-gate.yml")
+    assert "concurrency" not in wf
+    assert all("concurrency" not in job for job in wf["jobs"].values())
+
+
+def test_a_periodic_sweep_heals_any_stale_status() -> None:
+    (entry,) = _load("review-gate.yml")["on"]["schedule"]
+    assert entry["cron"].split()[0].startswith("*/")
