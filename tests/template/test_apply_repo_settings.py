@@ -2,6 +2,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NoReturn
 
 import pytest
 
@@ -292,7 +293,7 @@ def test_bootstrap_phase_defers_required_status_checks() -> None:
 def test_gh_json_reports_github_error_in_plain_language() -> None:
     """Expose GitHub's useful stderr instead of a raw Python traceback."""
 
-    def failing_runner(*args: object, **kwargs: object) -> object:
+    def failing_runner(*args: object, **kwargs: object) -> NoReturn:
         """Raise the same error subprocess.run raises for a rejected API call."""
         raise subprocess.CalledProcessError(
             1,
@@ -307,7 +308,7 @@ def test_gh_json_reports_github_error_in_plain_language() -> None:
 def test_gh_json_reports_missing_cli_in_plain_language() -> None:
     """Tell the operator how to install/authenticate gh when it is unavailable."""
 
-    def missing_runner(*args: object, **kwargs: object) -> object:
+    def missing_runner(*args: object, **kwargs: object) -> NoReturn:
         """Raise the error subprocess.run emits when gh is not on PATH."""
         raise FileNotFoundError("gh")
 

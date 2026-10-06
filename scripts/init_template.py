@@ -16,7 +16,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    # Type-only: this file runs as a plain script, where `scripts.` isn't importable.
+    from scripts.apply_repo_settings import CommandResult
 
 STACKS = ("python", "react")
 
@@ -83,7 +87,7 @@ def _other(stack: str) -> str:
 
 def ensure_clean_worktree(
     root: Path | str,
-    runner: Callable[..., object] = subprocess.run,
+    runner: Callable[..., CommandResult] = subprocess.run,
 ) -> None:
     """Refuse initialization when the repository contains existing local work.
 
@@ -116,7 +120,7 @@ def ensure_clean_worktree(
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "No error detail returned.").strip()
         raise RuntimeError(f"`git status` failed: {detail}") from exc
-    changed = str(getattr(result, "stdout", "")).strip()
+    changed = result.stdout.strip()
     if changed:
         raise RuntimeError(
             "Refusing to initialize because the repository has existing local "

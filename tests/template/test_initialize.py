@@ -1,5 +1,6 @@
 import subprocess
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -221,7 +222,7 @@ def test_ensure_clean_worktree_accepts_clean_repo(tmp_path: Path) -> None:
 def test_ensure_clean_worktree_reports_missing_git(tmp_path: Path) -> None:
     """Turn a missing Git executable into an actionable initialization error."""
 
-    def missing_git_runner(*args: object, **kwargs: object) -> object:
+    def missing_git_runner(*args: object, **kwargs: object) -> NoReturn:
         raise FileNotFoundError("git")
 
     with pytest.raises(RuntimeError, match="Git is not installed"):
@@ -231,7 +232,7 @@ def test_ensure_clean_worktree_reports_missing_git(tmp_path: Path) -> None:
 def test_ensure_clean_worktree_reports_git_status_failure(tmp_path: Path) -> None:
     """Preserve Git's diagnostic without leaking a subprocess traceback."""
 
-    def failing_git_runner(*args: object, **kwargs: object) -> object:
+    def failing_git_runner(*args: object, **kwargs: object) -> NoReturn:
         raise subprocess.CalledProcessError(
             128,
             ["git", "status"],

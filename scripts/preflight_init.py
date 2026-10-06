@@ -11,9 +11,18 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
+from scripts.apply_repo_settings import CommandResult
 from scripts.init_template import ensure_clean_worktree
+
+
+class PreflightResult(TypedDict):
+    """Identity confirmed by a passing preflight, echoed back to the user."""
+
+    account: str
+    repo: str
+    stack: str
 
 
 def repo_from_remote(url: str) -> str:
@@ -46,9 +55,9 @@ def repo_from_remote(url: str) -> str:
 
 def _run(
     args: list[str],
-    runner: Callable[..., Any],
+    runner: Callable[..., CommandResult],
     root: Path,
-) -> Any:
+) -> CommandResult:
     """Run one preflight command with a concise failure message."""
     try:
         return runner(
@@ -67,9 +76,9 @@ def run_preflight(
     root: Path | str,
     repo: str,
     stack: str,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Callable[..., CommandResult] = subprocess.run,
     which: Callable[[str], str | None] = shutil.which,
-) -> dict[str, str]:
+) -> PreflightResult:
     """Validate tools, local state, target identity, and GitHub permissions.
 
     Parameters
@@ -87,7 +96,7 @@ def run_preflight(
 
     Returns
     -------
-    dict[str, str]
+    PreflightResult
         Confirmed account, repository, and stack.
 
     Raises

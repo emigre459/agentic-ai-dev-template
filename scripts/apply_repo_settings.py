@@ -16,7 +16,29 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:
+    # Aliases live here because this stdlib-only script may run under an older
+    # system python3, where a runtime ``int | None`` inside an alias would fail.
+    from typing import TypeAlias
+
+    # A decoded GitHub JSON object. Values are mixed (strings, booleans, lists,
+    # nested objects), so ``dict[str, str]`` would be wrong; keys are always str.
+    JsonObject: TypeAlias = dict[str, Any]
+    # One planned change: (setting kind, HTTP method, ruleset id for a PUT).
+    Action: TypeAlias = tuple[
+        Literal["ruleset", "merge", "security"],
+        Literal["POST", "PUT", "PATCH"],
+        int | None,
+    ]
+
+
+class CommandResult(Protocol):
+    """The part of a finished ``gh`` process this script reads."""
+
+    stdout: str
+
 
 REPO_SETTINGS_DIR = Path(__file__).resolve().parent.parent / ".github" / "repo-settings"
 
@@ -35,9 +57,9 @@ _RULESET_KEYS = (
 class Desired:
     """The canonical settings loaded from disk."""
 
-    ruleset: dict
-    merge: dict
-    security: dict
+    ruleset: JsonObject
+    merge: JsonObject
+    security: JsonObject
 
 
 def load_desired(settings_dir: Path) -> Desired:
@@ -52,7 +74,9 @@ def load_desired(settings_dir: Path) -> Desired:
     return Desired(ruleset=ruleset, merge=merge, security=security)
 
 
-def ruleset_for_phase(ruleset: dict, phase: str) -> dict:
+def ruleset_for_phase(
+    ruleset: JsonObject, phase: Literal["bootstrap", "final"]
+) -> JsonObject:
     """Return the ruleset safe for the requested initialization phase.
 
     Parameters
@@ -64,7 +88,7 @@ def ruleset_for_phase(ruleset: dict, phase: str) -> dict:
 
     Returns
     -------
-    dict
+    JsonObject
         A deep copy suitable for reconciliation.
 
     Raises
@@ -84,7 +108,7 @@ def ruleset_for_phase(ruleset: dict, phase: str) -> dict:
     return phased
 
 
-def find_main_ruleset(existing: list[dict]) -> dict | None:
+def find_main_ruleset(existing: list[JsonObject]) -> JsonObject | None:
     """Return the ruleset named ``main`` from ``existing``, or None."""
     for rs in existing:
         if rs.get("name") == "main":
@@ -114,7 +138,7 @@ def _is_subset(desired: object, current: object) -> bool:
     return desired == current
 
 
-def ruleset_matches(desired: dict, current: dict) -> bool:
+def ruleset_matches(desired: JsonObject, current: JsonObject) -> bool:
     """Return True when ``current`` already satisfies ``desired`` on the asserted keys.
 
     Uses subset (not strict-equality) comparison so GitHub's API-default fields on
@@ -125,12 +149,12 @@ def ruleset_matches(desired: dict, current: dict) -> bool:
     )
 
 
-def merge_settings_match(desired: dict, current: dict) -> bool:
+def merge_settings_match(desired: JsonObject, current: JsonObject) -> bool:
     """Return True when every desired merge key already has the desired value."""
     return all(current.get(k) == v for k, v in desired.items())
 
 
-def security_settings_match(desired: dict, current_repo: dict) -> bool:
+def security_settings_match(desired: JsonObject, current_repo: JsonObject) -> bool:
     """Return True when the live repo's security config already satisfies desired.
 
     ``current_repo`` is the full `GET /repos/{owner}/{repo}` response (the same
@@ -143,20 +167,20 @@ def security_settings_match(desired: dict, current_repo: dict) -> bool:
 
 
 def plan_actions(
-    current_rulesets: list[dict],
-    current_merge: dict,
-    desired_ruleset: dict,
-    desired_merge: dict,
-    desired_security: dict,
+    current_rulesets: list[JsonObject],
+    current_merge: JsonObject,
+    desired_ruleset: JsonObject,
+    desired_merge: JsonObject,
+    desired_security: JsonObject,
     forbidden_rule_types: set[str] | None = None,
-) -> list[tuple]:
+) -> list[Action]:
     """Compute the minimal set of apply actions.
 
-    Returns a list of tuples: ``("ruleset", "POST"|"PUT", id_or_None)``,
+    Returns a list of ``Action`` tuples: ``("ruleset", "POST"|"PUT", id_or_None)``,
     ``("merge", "PATCH", None)``, and/or ``("security", "PATCH", None)``. Empty
     list means everything is already aligned.
     """
-    actions: list[tuple] = []
+    actions: list[Action] = []
     main = find_main_ruleset(current_rulesets)
     if main is None:
         actions.append(("ruleset", "POST", None))
@@ -174,9 +198,9 @@ def plan_actions(
 
 def _run_gh(
     args: list[str],
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Callable[..., CommandResult] = subprocess.run,
     **kwargs: Any,
-) -> Any:
+) -> CommandResult:
     """Run GitHub CLI and translate failures into actionable messages."""
     try:
         return runner(
@@ -205,15 +229,21 @@ def _run_gh(
         ) from exc
 
 
-def _gh_json(args: list[str], runner: Callable[..., Any] = subprocess.run) -> Any:
-    """Run a `gh` command and parse its stdout as JSON."""
+def _gh_json(
+    args: list[str], runner: Callable[..., CommandResult] = subprocess.run
+) -> Any:
+    """Run a `gh` command and parse its stdout as JSON.
+
+    Returns ``Any`` because the shape depends on the endpoint (an object for
+    ``repos/{repo}``, a list for ``.../rulesets``), or None for empty output.
+    """
     proc = _run_gh(args, runner)
     return json.loads(proc.stdout) if proc.stdout.strip() else None
 
 
 def _current_rulesets(
-    repo: str, runner: Callable[..., Any] = subprocess.run
-) -> list[dict]:
+    repo: str, runner: Callable[..., CommandResult] = subprocess.run
+) -> list[JsonObject]:
     """Fetch this repo's rulesets, with full detail for the ``main`` one.
 
     `GET /repos/{owner}/{repo}/rulesets` (the list endpoint) returns bare
@@ -234,11 +264,11 @@ def _current_rulesets(
 
 
 def _apply_actions(
-    actions: list[tuple],
+    actions: list[Action],
     repo: str,
     desired: Desired,
-    desired_ruleset: dict,
-    runner: Callable[..., Any],
+    desired_ruleset: JsonObject,
+    runner: Callable[..., CommandResult],
 ) -> None:
     """Apply a confirmed settings plan to the explicit repository target."""
     for kind, method, ident in actions:
@@ -267,7 +297,7 @@ def _apply_actions(
 
 def main(
     argv: list[str] | None = None,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Callable[..., CommandResult] = subprocess.run,
 ) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__)
