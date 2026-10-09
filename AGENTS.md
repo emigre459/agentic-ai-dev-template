@@ -58,6 +58,8 @@ Every change must pass `make pr_check` (lint + tests) before a PR is opened.
 | `make coverage` | Tests with an 80% coverage gate |
 | `make security` | Dependency / SAST scan |
 | `make pr_check` | `lint` + `tests` |
+| `make apply_repo_settings_bootstrap TARGET_REPO=owner/repo` | Apply setup-safe repository settings before the initialization PR |
+| `make finalize_repo_settings TARGET_REPO=owner/repo` | Enable final required CI checks after the initialization PR merges |
 | `make cc` | Launch Claude Code with this repo's settings |
 
 ## Skills
