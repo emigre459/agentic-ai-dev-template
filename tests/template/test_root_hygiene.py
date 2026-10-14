@@ -30,6 +30,7 @@ ALLOWED_ROOT_FILES = frozenset(
         "AGENTS.md",
         "CHANGELOG.md",
         "CLAUDE.md",
+        "LICENSE",  # GitHub license detection requires it at the root
         "Makefile",
         "README.md",
         "pyproject.toml",

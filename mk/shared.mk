@@ -9,6 +9,15 @@ help: ## Print available targets
 cc: ## Run Claude Code with useful config settings
 	@caffeinate -di claude --enable-auto-mode --remote-control
 
+.PHONY: apply_repo_settings_bootstrap
+apply_repo_settings_bootstrap: ## Apply setup-safe settings; defer new CI requirements until the setup PR merges
+	@test -n "$(TARGET_REPO)" || { echo "TARGET_REPO=owner/repository is required"; exit 2; }
+	@python3 $(REPO_ROOT)/scripts/apply_repo_settings.py --repo "$(TARGET_REPO)" --phase bootstrap
+
 .PHONY: apply_repo_settings
-apply_repo_settings: ## Reconcile this repo's main ruleset + PR-merge prefs with .github/repo-settings/ (diff + confirm)
-	@python3 $(REPO_ROOT)/scripts/apply_repo_settings.py
+apply_repo_settings: ## Reconcile the final main ruleset + PR/security settings after CI exists on main
+	@test -n "$(TARGET_REPO)" || { echo "TARGET_REPO=owner/repository is required"; exit 2; }
+	@python3 $(REPO_ROOT)/scripts/apply_repo_settings.py --repo "$(TARGET_REPO)" --phase final
+
+.PHONY: finalize_repo_settings
+finalize_repo_settings: apply_repo_settings ## Explicit post-merge alias for the final repository-settings pass
