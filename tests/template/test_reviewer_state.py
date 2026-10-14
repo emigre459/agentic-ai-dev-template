@@ -48,6 +48,10 @@ load_reviewer = reviewer_state.load_reviewer
 
 BUGBOT = load_reviewer(key="bugbot")
 CODERABBIT = load_reviewer(key="coderabbit")
+# The PR-trigger mechanics (needs_trigger on an unreviewed head) still serve a
+# reviewer with no local review; the CodeRabbit adapter reviews locally, so the
+# collect_state tests below drive a copy of it without one.
+CODERABBIT_PR = CODERABBIT._replace(local_review=None, local_preflight=None)
 
 MARKER = "<!-- BUGBOT_REVIEW -->"
 SHA = "abc123"
@@ -504,7 +508,7 @@ def test_coderabbit_clean_verdict_is_read_from_its_walkthrough_comment(
         "_gh_json",
         _fake_gh(reviews, [_walkthrough(_WALKTHROUGH_CLEAN)], calls),
     )
-    state = reviewer_state.collect_state("octo/example", 7, CODERABBIT)
+    state = reviewer_state.collect_state("octo/example", 7, CODERABBIT_PR)
     assert state["verdict"] == "pass"
     assert state["needs_trigger"] is False
 
@@ -518,7 +522,7 @@ def test_a_walkthrough_naming_an_older_head_does_not_vouch_for_the_new_one(
     monkeypatch.setattr(
         reviewer_state, "_gh_json", _fake_gh([], [_walkthrough(stale)], calls)
     )
-    state = reviewer_state.collect_state("octo/example", 7, CODERABBIT)
+    state = reviewer_state.collect_state("octo/example", 7, CODERABBIT_PR)
     assert state["verdict"] == "none"
     assert state["needs_trigger"] is True
 
@@ -718,7 +722,7 @@ def test_collect_state_reports_the_final_review(monkeypatch: Any) -> None:
         _comment(_FULL_DONE, "2026-09-25T04:30:08Z", "2026-09-25T04:40:00Z"),
     ]
     monkeypatch.setattr(reviewer_state, "_gh_json", _fake_gh([], comments, calls))
-    state = reviewer_state.collect_state("octo/example", 7, CODERABBIT)
+    state = reviewer_state.collect_state("octo/example", 7, CODERABBIT_PR)
     assert state["verdict"] == "pass"
     assert state["final_review_comment"] == "@coderabbitai full review"
     assert state["final_review_outcome"] == "finished"
@@ -735,7 +739,7 @@ def test_collect_state_needs_the_final_review_until_requested(
         "_gh_json",
         _fake_gh([], [_walkthrough(_WALKTHROUGH_CLEAN)], calls),
     )
-    state = reviewer_state.collect_state("octo/example", 7, CODERABBIT)
+    state = reviewer_state.collect_state("octo/example", 7, CODERABBIT_PR)
     assert state["final_review_outcome"] == "not_requested"
     assert state["needs_final_review"] is True
 
@@ -903,3 +907,370 @@ def test_a_full_review_aborted_by_a_base_or_head_change_is_failed() -> None:
         _comment(aborted, "2026-09-28T18:37:22Z", "2026-09-28T18:45:02Z"),
     ]
     assert _outcome(comments) == "failed"
+
+
+# --- The rate limit: a refused request is a wait, never a spent review ---------
+
+# Reply bodies as CodeRabbit posts them when it refuses a request for its rate
+# limit (observed): the incremental reply states no wait, the full-review one does.
+_RATE_LIMITED_INCREMENTAL = _REPLY + (
+    "<details>\n<summary>⚠️ Action not completed</summary>\n\nReview rate limited.\n\n"
+    "> Note: CodeRabbit is an incremental review system and does not re-review "
+    "already reviewed commits. This command is applicable only when automatic "
+    "reviews are paused.\n\n</details>"
+)
+_RATE_LIMITED_FULL = _REPLY + (
+    "<details>\n<summary>⚠️ Action not completed</summary>\n\nReview rate limited.\n\n"
+    "---\n\nYour included review limit is currently reached under our Fair Usage "
+    "Limits Policy. This review may still proceed through usage-based billing if "
+    "eligible. Your next included review will be available in 13 minutes.\n\n"
+    "</details>"
+)
+_TRIGGER = "@coderabbitai review"
+# A trigger refused for the rate limit, then a final-review request refused too.
+_REFUSED_PAIR = [
+    _command("2026-10-13T07:25:49Z", _TRIGGER),
+    _comment(_RATE_LIMITED_INCREMENTAL, "2026-10-13T07:25:58Z"),
+    _command("2026-10-13T07:26:53Z"),
+    _comment(_RATE_LIMITED_FULL, "2026-10-13T07:27:03Z"),
+]
+
+
+def test_coderabbit_declares_its_rate_limit_reply() -> None:
+    pattern = CODERABBIT.rate_limited_pattern
+    assert pattern is not None and pattern.search("Review rate limited.")
+    wait = CODERABBIT.rate_limit_wait_pattern
+    assert wait is not None
+    match = wait.search("Your next included review will be available in 13 minutes.")
+    assert match and match.group(1) == "13"
+    assert CODERABBIT.rate_limit_default_wait_minutes == 60
+    assert CODERABBIT.rate_limit_notice_marker == (
+        "<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->"
+    )
+
+
+def test_bugbot_has_no_rate_limit_reply() -> None:
+    assert BUGBOT.rate_limited_pattern is None
+    assert BUGBOT.rate_limit_wait_pattern is None
+    assert BUGBOT.rate_limit_default_wait_minutes is None
+    assert BUGBOT.rate_limit_notice_marker is None
+
+
+def test_a_refusal_that_states_its_wait_is_retried_after_it() -> None:
+    state = reviewer_state.rate_limit_state(_REFUSED_PAIR, CODERABBIT)
+    assert state == {
+        "refused": True,
+        "request": "final",
+        "replied_at": "2026-10-13T07:27:03Z",
+        "retry_after": "2026-10-13T07:40:03Z",
+        "wait_source": "reply",
+    }
+
+
+def test_a_refusal_with_no_stated_wait_waits_the_default() -> None:
+    state = reviewer_state.rate_limit_state(_REFUSED_PAIR[:2], CODERABBIT)
+    assert state["refused"] is True
+    assert state["request"] == "trigger"
+    assert state["retry_after"] == "2026-10-13T08:25:58Z"
+    assert state["wait_source"] == "default"
+
+
+def test_only_the_newest_request_can_be_refused() -> None:
+    """Re-posting the same request after the wait clears the refusal."""
+    comments = [*_REFUSED_PAIR, _command("2026-10-13T07:41:00Z")]
+    state = reviewer_state.rate_limit_state(comments, CODERABBIT)
+    assert state["refused"] is False
+    assert state["request"] == "final"
+    assert state["retry_after"] is None
+
+
+def test_no_request_means_nothing_refused() -> None:
+    assert reviewer_state.rate_limit_state([], CODERABBIT) == {
+        "refused": False,
+        "request": None,
+        "replied_at": None,
+        "retry_after": None,
+        "wait_source": None,
+    }
+
+
+def test_a_reviewer_without_a_refusal_pattern_is_never_refused() -> None:
+    comments = [
+        _command("2026-10-13T07:25:49Z", "bugbot run"),
+        _comment(_RATE_LIMITED_FULL, "2026-10-13T07:27:03Z"),
+    ]
+    state = reviewer_state.rate_limit_state(comments, BUGBOT)
+    assert state["refused"] is False
+    assert state["request"] == "trigger"
+
+
+def test_a_refused_full_review_is_never_rescued_by_a_review_in_its_window() -> None:
+    """A verdict-bearing review in the window belongs to some other request."""
+    reviews = [
+        _rabbit(
+            "**Actionable comments posted: 1**",
+            commit="abc",
+            submitted="2026-10-13T07:27:10Z",
+        )
+    ]
+    refused = _comment(
+        _RATE_LIMITED_FULL, "2026-10-13T07:27:03Z", "2026-10-13T07:27:15Z"
+    )
+    comments = [_command("2026-10-13T07:26:53Z"), refused]
+    assert _outcome(comments, reviews) == "pending"
+
+
+# The reviewer's rate-limit notice: posted when the PR opens and edited in place on
+# each refused attempt, it states the wait when the command reply doesn't.
+_NOTICE = (
+    "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n"
+    "<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->\n\n"
+    "> [!WARNING]\n> ## Review limit reached\n> \n"
+    "> **Next included review available in 57 minutes.**\n"
+)
+
+
+def test_a_refusal_with_no_stated_wait_reads_the_notice_edited_after_it() -> None:
+    comments = [
+        _comment(_NOTICE, "2026-10-13T17:05:05Z", "2026-10-13T17:06:07Z"),
+        _command("2026-10-13T17:05:52Z", _TRIGGER),
+        _comment(_RATE_LIMITED_INCREMENTAL, "2026-10-13T17:06:00Z"),
+    ]
+    state = reviewer_state.rate_limit_state(comments, CODERABBIT)
+    assert state["refused"] is True
+    assert state["retry_after"] == "2026-10-13T18:03:07Z"
+    assert state["wait_source"] == "notice"
+
+
+def test_a_notice_not_edited_since_the_request_is_stale() -> None:
+    """A notice left from an earlier attempt doesn't describe this request."""
+    comments = [
+        _comment(_NOTICE, "2026-10-13T17:05:05Z"),
+        _command("2026-10-13T17:05:52Z", _TRIGGER),
+        _comment(_RATE_LIMITED_INCREMENTAL, "2026-10-13T17:06:00Z"),
+    ]
+    state = reviewer_state.rate_limit_state(comments, CODERABBIT)
+    assert state["wait_source"] == "default"
+    assert state["retry_after"] == "2026-10-13T18:06:00Z"
+
+
+def test_collect_state_reports_the_refusal(monkeypatch: Any) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(reviewer_state, "_gh_json", _fake_gh([], _REFUSED_PAIR, calls))
+    state = reviewer_state.collect_state("octo/example", 7, CODERABBIT)
+    assert state["rate_limit"]["refused"] is True
+    assert state["rate_limit"]["request"] == "final"
+    assert state["rate_limit"]["retry_after"] == "2026-10-13T07:40:03Z"
+    # The refused final review never ran: still needed, still before it.
+    assert state["final_review_outcome"] == "pending"
+    assert state["local_review"]["phase"] == "before_final"
+
+
+# --- Loader: the rate-limit and local-review fields ---------------------------
+
+
+def _preflight(**overrides: Any) -> dict[str, Any]:
+    block: dict[str, Any] = {
+        "command": ["reviewer-cli", "usage"],
+        "state_path": "pool.state",
+        "available_states": ["available"],
+        "remaining_path": "pool.remaining",
+        "full_capacity_ms_path": "pool.fullMs",
+        "max_recheck_seconds": 300,
+        "auth_command": ["reviewer-cli", "whoami"],
+        "authenticated_path": "ok",
+        "remedies": {
+            "not_installed": "install it",
+            "not_authenticated": "log in",
+            "failed": "run the doctor",
+        },
+    }
+    block.update(overrides)
+    return block
+
+
+_LOCAL_REVIEW = {
+    "command": ["reviewer-cli", "review", "--base", "{base}"],
+    "event_type_path": "kind",
+    "finding_event": "issue",
+    "complete_event": "done",
+    "finding_fields": {
+        "severity": "level",
+        "path": "file",
+        "line": "line",
+        "title": "headline",
+        "body": "text",
+    },
+    "timeout_seconds": 900,
+}
+_MARKED = {
+    "final_review_comment": "@bot full review",
+    "command_reply_marker": "<!-- reply -->",
+    "final_review_done_pattern": "done",
+    "final_review_failed_pattern": "failed",
+    "final_review_partial_pattern": "partial",
+}
+
+
+def test_loader_reads_a_preflight_block(tmp_path: Path) -> None:
+    """The preflight gates local reviews, so it comes with a ``local_review``."""
+    adapter = load_reviewer(
+        _write(
+            tmp_path,
+            _config_with(
+                local_preflight=_preflight(), local_review=_LOCAL_REVIEW, **_MARKED
+            ),
+        )
+    )
+    assert adapter.local_preflight == reviewer_state.PreflightSpec(
+        command=("reviewer-cli", "usage"),
+        state_path="pool.state",
+        available_states=frozenset({"available"}),
+        remaining_path="pool.remaining",
+        full_capacity_ms_path="pool.fullMs",
+        max_recheck_seconds=300,
+        auth_command=("reviewer-cli", "whoami"),
+        authenticated_path="ok",
+        remedies={
+            "not_installed": "install it",
+            "not_authenticated": "log in",
+            "failed": "run the doctor",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "local_preflight",
+        "local_review",
+        "rate_limited_pattern",
+        "rate_limit_wait_pattern",
+        "rate_limit_default_wait_minutes",
+        "rate_limit_notice_marker",
+    ],
+)
+def test_loader_new_fields_must_be_present(tmp_path: Path, field: str) -> None:
+    config = _config_with()
+    del config["reviewers"]["x"][field]
+    with pytest.raises(ValueError, match=field):
+        load_reviewer(_write(tmp_path, config))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"command": []},
+        {"command": "reviewer-cli usage"},
+        {"command": ["reviewer-cli", ""]},
+        {"state_path": ""},
+        {"remaining_path": 3},
+        {"full_capacity_ms_path": None},
+        {"available_states": []},
+        {"available_states": "available"},
+        {"max_recheck_seconds": 0},
+        {"max_recheck_seconds": True},
+        {"surprise": 1},
+        {"auth_command": []},
+        {"authenticated_path": ""},
+        {"remedies": {"not_installed": "install it"}},
+        {"remedies": {"not_installed": "", "not_authenticated": "x", "failed": "y"}},
+        {"remedies": "install it"},
+    ],
+)
+def test_loader_rejects_a_bad_preflight_block(
+    tmp_path: Path, overrides: dict[str, Any]
+) -> None:
+    config = _config_with(
+        local_preflight=_preflight(**overrides), local_review=_LOCAL_REVIEW, **_MARKED
+    )
+    with pytest.raises(ValueError, match="local_preflight"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_rate_limited_pattern_needs_the_reply_marker(tmp_path: Path) -> None:
+    config = _config_with(
+        rate_limited_pattern="rate limited",
+        rate_limit_wait_pattern=r"in (\d+) minutes",
+        rate_limit_default_wait_minutes=60,
+    )
+    with pytest.raises(ValueError, match="command_reply_marker"):
+        load_reviewer(_write(tmp_path, config))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {"rate_limited_pattern": "rate limited"},
+            "rate_limit_default_wait_minutes",
+        ),
+        (
+            {
+                "rate_limited_pattern": "rate limited",
+                "rate_limit_wait_pattern": "in (\\d+) (minutes)",
+                "rate_limit_default_wait_minutes": 60,
+            },
+            "capture group",
+        ),
+        (
+            {
+                "rate_limited_pattern": "rate limited",
+                "rate_limit_wait_pattern": None,
+                "rate_limit_default_wait_minutes": 0,
+            },
+            "rate_limit_default_wait_minutes",
+        ),
+        (
+            {
+                "rate_limited_pattern": None,
+                "rate_limit_wait_pattern": "in (\\d+) minutes",
+                "rate_limit_default_wait_minutes": None,
+            },
+            "rate_limited_pattern",
+        ),
+        (
+            {
+                "rate_limited_pattern": None,
+                "rate_limit_wait_pattern": None,
+                "rate_limit_default_wait_minutes": 60,
+            },
+            "rate_limit_default_wait_minutes",
+        ),
+        (
+            {
+                "rate_limited_pattern": None,
+                "rate_limit_wait_pattern": None,
+                "rate_limit_default_wait_minutes": None,
+                "rate_limit_notice_marker": "<!-- limited -->",
+            },
+            "rate_limit_notice_marker",
+        ),
+    ],
+    ids=[
+        "no-default-wait",
+        "two-groups",
+        "zero-default",
+        "wait-without-pattern",
+        "default-without-pattern",
+        "notice-without-pattern",
+    ],
+)
+def test_loader_rejects_inconsistent_rate_limit_fields(
+    tmp_path: Path, overrides: dict[str, Any], message: str
+) -> None:
+    config = _config_with(**_MARKED, **overrides)
+    with pytest.raises(ValueError, match=message):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_accepts_a_refusal_with_no_stated_wait(tmp_path: Path) -> None:
+    config = _config_with(
+        **_MARKED,
+        rate_limited_pattern="rate limited",
+        rate_limit_wait_pattern=None,
+        rate_limit_default_wait_minutes=30,
+    )
+    adapter = load_reviewer(_write(tmp_path, config))
+    assert adapter.rate_limit_wait_pattern is None
+    assert adapter.rate_limit_default_wait_minutes == 30

@@ -58,6 +58,32 @@ verdict patterns) live in the config — this file covers what a field can't say
   `BUGBOT_BUG_ID` while the footer references an older SHA — that is the
   already-addressed finding, not a new one.
 
+- `rate_limited_pattern` and the rate-limit wait fields are `null`: Bugbot is
+  usage-billed with no included-review quota to wait out, so `reviewer_state.py`
+  never reports a refusal for it.
+
+## Local review: none yet
+
+`local_review` and `local_preflight` are `null`: Bugbot has no command-line review to
+wrap, so with Bugbot active, fix rounds stay PR rounds (`bugbot run`), and
+`review_preflight.py` reads `not_configured`. Checked in October 2026:
+
+- Cursor's **Agent Review** reviews local changes with Bugbot's rules, at a Quick or
+  Deep depth, but only inside the Cursor editor (the agent window, or the Source
+  Control tab): https://cursor.com/docs/agent/agent-review
+- The **Cursor CLI** (`agent`) is a general coding agent with no review or Bugbot
+  command (https://cursor.com/docs/cli/overview). Its
+  [headless "code review" example](https://cursor.com/docs/cli/headless) is a prompt
+  to a model, not Bugbot, so wiring it in would make this adapter misleading.
+- The Bugbot API's `/bugbot/review` is Enterprise-only and reviews a PR, not local
+  changes: https://cursor.com/docs/bugbot
+
+When Cursor ships a headless Agent Review, declare it here as `local_review` (its
+command with `{base}`, and how its output marks findings and completion) plus a
+`local_preflight` if it reports its allowance, and set the five final-review fields
+(a local reviewer's one PR request is its final full review); the skills need no
+change.
+
 ## Threads
 
 - `self_resolves_threads: true` — Bugbot resolves its own addressed threads once a

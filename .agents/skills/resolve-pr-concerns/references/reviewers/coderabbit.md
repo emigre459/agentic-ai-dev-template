@@ -12,15 +12,22 @@ prose names no vendor; read this file before interpreting a review when
 
 - Install the CodeRabbit GitHub App for the repo; per-repo behavior lives in
   `.coderabbit.yaml` at the repo root.
+- **Fix rounds run locally**: this adapter declares `local_review` (the CLI,
+  below), so agents never post the trigger on a PR; `reviewer_state.py` keeps
+  `needs_trigger` false. The PR's one request is the final full review. Set
+  `local_review` and `local_preflight` to `null` to go back to PR incremental
+  rounds (e.g. for a developer without the CLI).
 - Trigger: a top-level PR comment `@coderabbitai review` (`trigger_comment`) —
-  an **incremental** review of commits since the last one.
+  an **incremental** review of commits since the last one. Kept in the adapter for
+  a run with `local_review` set to null.
   Reference: https://docs.coderabbit.ai/reference/review-commands
-- **Final full review** (`final_review_comment`): once incremental reviews are
-  clean, post `@coderabbitai full review` **once** per PR. It re-reviews the whole
-  diff, and on a CodeRabbit trial it found the most important bug of the run. Fix
-  its findings and re-validate them incrementally; never post a second one for
-  coverage (repeated full reviews don't converge, they just sample more, and each
-  spends quota).
+- **Final full review** (`final_review_comment`): once the local rounds are clean,
+  post `@coderabbitai full review` **once** per PR. It re-reviews the whole diff,
+  and on a CodeRabbit trial it found the most important bug of the run. Fix its
+  findings, reply on each thread (CodeRabbit re-checks the fix in its reply, a chat
+  message on its own limit, not a review), and run one local round on the final
+  head; never post a second one for coverage (repeated full reviews don't converge,
+  they just sample more, and each spends quota).
 - **(observed)** **How a full review ends.** CodeRabbit replies to each command with
   a comment starting `<!-- This is an auto-generated reply by CodeRabbit -->`
   (`command_reply_marker`) and edits it in place when the review ends. An
@@ -48,13 +55,124 @@ prose names no vendor; read this file before interpreting a review when
   allowance. A retry about half an hour later succeeded (observed on a CodeRabbit
   trial). So wait at least 20 minutes, re-post `@coderabbitai full review` once, and
   hand a second failure to a human with both reply links. Never retry immediately.
-- `@coderabbitai rate limit` reports the remaining hourly allowance.
+- `@coderabbitai rate limit` reports the remaining hourly PR allowance, but it is a
+  PR comment. The local CLI can't answer it: its usage report covers the CLI's own
+  pool (below).
 - Auto-review and auto-incremental-review on push are on by default
   (`reviews.auto_review` in `.coderabbit.yaml`); it pauses after
   `auto_pause_after_reviewed_commits` (default 5) reviewed commits — after that,
   the trigger comment is required even in "automatic" mode, so re-detect the
   trigger mode if reviews stop arriving.
 - Commands must be **top-level** PR comments, not thread replies.
+
+## Rate limits, the local review and the allowance check
+
+- **(observed)** **Two allowances per developer, and nothing local can see the PR
+  one.** PR reviews (every `@coderabbitai review` / `full review`) and CLI reviews
+  draw on separate pools: "Reviews from the CLI and IDE extensions draw on separate
+  allowances" ([review usage dashboard](https://docs.coderabbit.ai/management/review-usage-dashboard)).
+  We have seen `coderabbit usage --agent` read 10 of 10 left seconds before a PR
+  request was refused. So `local_preflight` gates **local reviews** only; a PR
+  request is never preflighted, and its refusal reply (below) decides the wait.
+- **The PR pool shrinks with use** (Team plan, [rate limits](https://docs.coderabbit.ai/management/rate-limits)):
+
+  | Included PR reviews in the last 7 days | Refill rate |
+  |---|---|
+  | 0–39 | 8 per hour |
+  | 40–49 | 6 per hour |
+  | 50–59 | 4 per hour |
+  | 60–69 | 2 per hour |
+  | 70+ | 1 per hour, one at a time |
+
+  The slowdown "does not change trial, CLI, IDE, or self-hosted limits". It counts
+  per developer identity: agents post under the developer's login, so their
+  requests land in that developer's pool.
+- **Three counters; only one sets the rate** ([review usage dashboard](https://docs.coderabbit.ai/management/review-usage-dashboard)).
+  *Review events* count every attempt, including blocked ones and ones that
+  continued on credits; *included reviews* draw the hourly allowance; the *rolling
+  7-day activity* that sets the refill rate counts only included reviews. Blocked
+  attempts and paid (credit) continuations don't raise it. **(observed)** Opening a
+  PR doesn't either when auto-review is off: the 7-day count matched the explicit
+  requests that ran.
+- **(observed)** **How a team gets throttled.** After a trial with a higher limit
+  ends, a team that asks for several PR reviews per PR (an incremental review per
+  fix round plus the full review) climbs the table within days: we watched one
+  developer's 7-day count go from under 10 to 70 (1 per hour) in three days. The
+  count falls only as old reviews age out, and every burst pushes it back up, so
+  staying under 40 (8 per hour) takes fewer requests, not waiting. That is why fix
+  rounds run locally and each PR spends one PR review.
+- **Overage.** An over-limit review can continue on credits: $1 per credit, 4 files
+  per credit, i.e. $0.25 per reviewed file ([usage add-on](https://docs.coderabbit.ai/management/usage-based-addon)).
+  PR and CLI overage share one organization billing path and its monthly spending
+  cap (an admin sets it, or "Unlimited"); past the cap an over-limit request is
+  refused until the cap is raised or the month resets. The CLI spends credits only
+  with `--use-credits`, which `local_review` never passes.
+- **(observed)** **The local review** (`local_review`):
+  `coderabbit review --agent --deep --committed --base-commit <merge base>`.
+  - `--deep` is "the full pull request review policy". Replayed on a handful of
+    already-reviewed PRs, it found about as many issues as the PR full review but
+    mostly different ones (a small minority overlapped), while the default mode
+    missed issues the full review had caught. So local rounds use `--deep`, and the
+    PR keeps its one full review; neither replaces the other.
+  - Output is one JSON event per line: `review_context`, `heartbeat`, `finding`
+    (`severity`, `fileName`, `startLine`, `endLine`, `title`, `comment`,
+    `suggestions`), then `complete` (`findings`, `reviewedFiles`). A review takes
+    2–6 minutes and can take 15 (`timeout_seconds` 1200).
+  - Each run takes one review from the CLI's hourly pool (we read 10 per hour; the
+    docs' figure for Team may differ). The first usage reading after a run can lag.
+  - It reasons with CodeRabbit's index of the default branch, so reviewing an old
+    commit can flag code the default branch has since changed. On a branch cut from
+    the current default branch that doesn't arise.
+- **(observed)** **The allowance check is the CLI's usage report**
+  (`local_preflight`): `coderabbit usage --agent` prints one JSON line. With a full
+  pool (identifying values replaced):
+
+  ```json
+  {"type":"status","phase":"usage","status":"complete","organization":"<org>",
+   "includedReviews":{"state":"available","repository":"<owner>/<repo>",
+   "fullCapacityInMs":0,"limit":10,"remaining":10,"rollingWindowMs":3600000},
+   "billingPeriod":{"state":"available","scope":"user","usageBillingStatus":"active",
+   "user":"<login>","reviewsCount":12,"spendCents":0,
+   "resetsAt":"<ISO time>"}}
+  ```
+
+  `fullCapacityInMs` is the time until the WHOLE pool is back; one review frees
+  sooner, so the check re-runs every 5 minutes or less (`max_recheck_seconds`)
+  rather than sleeping it out. The empty-pool output hasn't been observed yet; if
+  its shape differs, fix the paths in `pr-reviewer.json`, not the scripts.
+  `billingPeriod.reviewsCount` counts PR and CLI reviews together.
+- **Setting up the CLI.** Install: https://docs.coderabbit.ai/cli#getting-started
+  (Homebrew works). Log in: `coderabbit auth login`; check with
+  `coderabbit auth status --agent` (`"authenticated": true`). Diagnose:
+  `coderabbit doctor`. Without it the check reads `unknown` and `local_review.py`
+  fails with the matching remedy.
+- **(observed)** **The refusal replies** (`rate_limited_pattern`), both under
+  `⚠️ Action not completed`:
+  - to `@coderabbitai review`: `Review rate limited.` plus the incremental note,
+    with no wait stated;
+  - to `@coderabbitai full review`: `Review rate limited.` plus "Your next included
+    review will be available in 13 minutes." (`rate_limit_wait_pattern`).
+
+  The full-review one also matches the partial ("not completed") pattern, so
+  `reviewer_state.py` never rescues a refused full review with a review that
+  happens to land in its window, and reports the refusal as `rate_limit.refused`.
+  Answering a refused incremental review with a full review only spends the quota
+  faster: the full review was refused too.
+- **(observed)** **The rate-limit notice** (`rate_limit_notice_marker`). When the
+  reply states no wait, the summary comment does: it carries
+  `<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->` and
+  "**Next included review available in N minutes.**", and CodeRabbit edits it in
+  place on each refused attempt (it is also posted when the PR opens). So
+  `reviewer_state.py` reads the wait from it only when it was edited at or after the
+  request, counting from the edit; the notice's wait matched the moment an earlier
+  review aged out of the hourly window. With neither, the adapter's 60-minute
+  default applies. (A re-post a couple of minutes before the stated wait was
+  refused.)
+- The review usage dashboard's Review log lists every PR attempt with its outcome,
+  files, refill rate and 7-day count: the only view of the PR pool (it needs a
+  login). Its IDE/CLI page has shown 0 reviews while CLI reviews had run.
+- A refused request still gets a passing "Review rate limited" `CodeRabbit` check;
+  never read that check (below).
 
 ## Detecting a result
 
@@ -64,9 +182,11 @@ prose names no vendor; read this file before interpreting a review when
   On a push it doesn't review (auto-review off, a label gate, or a paused
   auto-review), it posts `success` with "Review skipped: …", and a rate-limited push
   gets a passing "Review rate limited" check on purpose. So never require the
-  `CodeRabbit` check: require the vendor-neutral `review-gate` status, which is
-  green only when `reviewer_state.py` has a verdict on the current head and the
-  final full review finished.
+  `CodeRabbit` check: require the vendor-neutral `review-gate` status. Because this
+  adapter declares a local review, that status is green once the final full review
+  finished and every CodeRabbit thread is resolved (later fix commits are re-checked
+  locally and on the threads); with `local_review` null it also needs a verdict on
+  the current head.
 - **(observed)** Logins: `coderabbitai[bot]` on REST reviews/comments,
   `coderabbitai` as the GraphQL thread author — both listed in `bot_logins`.
 - **(observed)** Findings: a review whose body starts
@@ -117,7 +237,9 @@ prose names no vendor; read this file before interpreting a review when
     `reviews.auto_review.auto_incremental_review: false`, with no label gate. With
     auto-review on it re-reviews every push, and its threads block merges through
     the conversation-resolution rule. With it off, the ~30s start-check never sees an
-    automatic start, so the skill's comment mode is the normal path.
+    automatic start, so the skill's comment mode is the normal path. **Required with
+    `local_review`**: an automatic review spends a PR review on every push, which is
+    exactly what the local rounds avoid.
   - `reviews.auto_review.base_branches: [".*"]` so it reviews PRs whose base isn't
     the default branch (stacked PRs); without it those are skipped.
 - **Noise filters** live in the vendor-neutral `.github/review-guidelines.md`. Wire

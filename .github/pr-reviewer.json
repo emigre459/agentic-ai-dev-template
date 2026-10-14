@@ -1,5 +1,9 @@
 {
   "active": "bugbot",
+  "review_rounds": {
+    "max_local_before_final": 3,
+    "max_local_after_final": 3
+  },
   "reviewers": {
     "bugbot": {
       "display_name": "Cursor Bugbot",
@@ -16,7 +20,13 @@
       "command_reply_marker": null,
       "final_review_done_pattern": null,
       "final_review_failed_pattern": null,
-      "final_review_partial_pattern": null
+      "final_review_partial_pattern": null,
+      "rate_limited_pattern": null,
+      "rate_limit_wait_pattern": null,
+      "rate_limit_default_wait_minutes": null,
+      "rate_limit_notice_marker": null,
+      "local_preflight": null,
+      "local_review": null
     },
     "coderabbit": {
       "display_name": "CodeRabbit",
@@ -33,7 +43,40 @@
       "command_reply_marker": "<!-- This is an auto-generated reply by CodeRabbit -->",
       "final_review_done_pattern": "\\bFull review finished\\b",
       "final_review_failed_pattern": "(?s)^(?!.*incremental review system).*\\b(?:Review failed|Head commit changed|base or head changed)\\b",
-      "final_review_partial_pattern": "(?s)^(?!.*incremental review system).*\\bAction not completed\\b"
+      "final_review_partial_pattern": "(?s)^(?!.*incremental review system).*\\bAction not completed\\b",
+      "rate_limited_pattern": "\\bReview rate limited\\b",
+      "rate_limit_wait_pattern": "available in (\\d+) minutes?",
+      "rate_limit_default_wait_minutes": 60,
+      "rate_limit_notice_marker": "<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->",
+      "local_preflight": {
+        "command": ["coderabbit", "usage", "--agent"],
+        "state_path": "includedReviews.state",
+        "available_states": ["available"],
+        "remaining_path": "includedReviews.remaining",
+        "full_capacity_ms_path": "includedReviews.fullCapacityInMs",
+        "max_recheck_seconds": 300,
+        "auth_command": ["coderabbit", "auth", "status", "--agent"],
+        "authenticated_path": "authenticated",
+        "remedies": {
+          "not_installed": "Install the CodeRabbit CLI (https://docs.coderabbit.ai/cli#getting-started), then retry.",
+          "not_authenticated": "Log the CodeRabbit CLI in: run `coderabbit auth login`, then retry.",
+          "failed": "Run `coderabbit doctor` to diagnose the CodeRabbit CLI, then retry."
+        }
+      },
+      "local_review": {
+        "command": ["coderabbit", "review", "--agent", "--deep", "--committed", "--base-commit", "{base}"],
+        "event_type_path": "type",
+        "finding_event": "finding",
+        "complete_event": "complete",
+        "finding_fields": {
+          "severity": "severity",
+          "path": "fileName",
+          "line": "startLine",
+          "title": "title",
+          "body": "comment"
+        },
+        "timeout_seconds": 1200
+      }
     }
   }
 }
