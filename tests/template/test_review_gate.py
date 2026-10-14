@@ -218,3 +218,65 @@ def test_the_sweep_lists_every_open_pr_without_a_cap(monkeypatch: Any) -> None:
     assert review_gate._open_prs(REPO) == [11, 12, 13]
     (args,) = calls
     assert "--paginate" in args and not any(a.startswith("--limit") for a in args)
+
+
+# --- A locally reviewed PR is gated on its one final full review ---------------
+
+
+def _local(**over: Any) -> dict[str, Any]:
+    """Return the state of a PR whose head moved after its final full review."""
+    state = _state(
+        verdict="none",
+        local_review={"configured": True, "reviewed_head": True},
+        open_findings=[],
+    )
+    state.update(over)
+    return state
+
+
+def test_a_finished_full_review_with_every_thread_resolved_passes() -> None:
+    state, description = gate_status(_local())
+    assert state == "success"
+    assert "full review finished" in description
+    assert "local review on 0123456" in description
+
+
+def test_a_head_with_no_local_review_still_passes_but_says_so() -> None:
+    state, description = gate_status(
+        _local(local_review={"configured": True, "reviewed_head": False})
+    )
+    assert state == "success"
+    assert "no local review on 0123456" in description
+
+
+def test_an_open_reviewer_thread_holds_the_gate() -> None:
+    state, description = gate_status(_local(open_findings=[{"path": "a.py"}] * 2))
+    assert state == "failure"
+    assert "2 CodeRabbit thread(s) still open" in description
+
+
+def test_a_locally_reviewed_pr_is_asked_for_the_full_review_not_a_trigger() -> None:
+    state, description = gate_status(_local(final_review_outcome="not_requested"))
+    assert state == "failure"
+    assert "`@coderabbitai full review`" in description
+    assert "`@coderabbitai review`" not in description
+
+
+def test_a_running_full_review_on_a_locally_reviewed_pr_is_pending() -> None:
+    assert gate_status(_local(final_review_outcome="pending"))[0] == "pending"
+
+
+@pytest.mark.parametrize(
+    ("final", "text"), [("failed", "wait 20+ min"), ("surprise", "unrecognized")]
+)
+def test_a_failed_full_review_on_a_locally_reviewed_pr_fails(
+    final: str, text: str
+) -> None:
+    state, description = gate_status(_local(final_review_outcome=final))
+    assert state == "failure"
+    assert text in description
+
+
+def test_a_reviewer_without_a_local_review_still_needs_a_verdict_on_the_head() -> None:
+    state, _ = gate_status(_state(verdict="none", local_review={"configured": False}))
+    assert state == "failure"
