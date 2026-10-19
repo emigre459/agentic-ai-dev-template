@@ -1,0 +1,81 @@
+# Vendor-neutral review gate. Posts the `review-gate` commit status: green only
+# when the configured PR reviewer (.github/pr-reviewer.json) reviewed the current
+# head AND finished its final full review. Require `review-gate` in the main
+# ruleset once a reviewer is installed; never require the vendor's own check (it
+# can pass on heads it skipped, and some vendors can't report on merge-queue
+# commits). Always checks out and runs the default branch's copy of the script,
+# because it holds `statuses: write`.
+# Threat model: this stops an over-eager merge, not a deliberate insider. A
+# pull_request_review run uses this file as the PR has it, and any write-access user
+# can add a workflow on their own branch that posts the same status as the same
+# GitHub Actions app. Closing that needs a dedicated GitHub App whose key only
+# `main` can use.
+# The job is deliberately NOT named `review-gate`: its check run would share the
+# required context and pass whenever the job succeeds.
+# Guarded by tests/template/test_review_gate_workflow.py.
+name: review gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  # The reviewer edits its reply + walkthrough comments as a review runs.
+  issue_comment:
+    types: [created, edited]
+  # A reviewer whose verdict lives only in reviews (no issue comments).
+  pull_request_review:
+    types: [submitted, dismissed]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to recompute (empty = every open PR)
+        required: false
+  # Heals any status a rare overlap left stale (runs are never cancelled).
+  schedule:
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  statuses: write
+
+# No `concurrency`: a cancelled run shows as a failed check on the PR (and on the
+# default branch, where issue_comment runs attach), which trains people to ignore red.
+# Overlapping runs are safe instead: review_gate.py posts only when the head's status
+# differs from what it computed, then re-reads until they match.
+
+jobs:
+  compute:
+    name: compute review gate status
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Post the review-gate status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+          GROUP_SHA: ${{ github.event.merge_group.head_sha }}
+        # python3, not `uv run`: the script and reviewer_state.py are stdlib-only,
+        # so the gate runs without installing the project (no uv / deps step).
+        run: |
+          script=.agents/skills/resolve-pr-concerns/scripts/review_gate.py
+          if [ ! -f "$script" ]; then
+            # The default branch predates the gate (e.g. on the PR that adds it):
+            # post nothing. A missing required status still blocks the merge.
+            echo "::notice::$script is not on the default branch yet; skipping."
+            exit 0
+          fi
+          if [ "$EVENT" = "merge_group" ]; then
+            python3 "$script" --repo "$GITHUB_REPOSITORY" --merge-group-sha "$GROUP_SHA"
+          elif [ -z "$PR" ]; then
+            python3 "$script" --repo "$GITHUB_REPOSITORY" --all-open
+          else
+            python3 "$script" --repo "$GITHUB_REPOSITORY" --pr "$PR"
+          fi

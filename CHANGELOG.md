@@ -1,5 +1,10 @@
 # Changelog
 
+> **Frozen as of 2026-09-28.** This file is no longer updated: a changelog that every
+> PR edits is a frequent source of merge conflicts, and the `build-from-issue` skill
+> no longer has a changelog step. For what changed, read the merged PRs
+> (`gh pr list --state merged --base main`) or `git log --first-parent main`.
+
 ## 2026-08-09
 - fix: require an explicit GitHub target and add a non-mutating initialization preflight for tools, authentication, remotes, admin permission, Issues, and clean Git state
 - fix: split repository settings into bootstrap and final phases so the first PR is not blocked by CI checks whose workflow has not reached `main`

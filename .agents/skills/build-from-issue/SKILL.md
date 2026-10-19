@@ -7,7 +7,7 @@ description: Use when building a feature from a GitHub issue linked to the curre
 
 ## Overview
 
-Orchestrator skill for taking a GitHub issue (typically brief) all the way to a PR-ready feature. This skill owns the issue-specific glue (issue fetch, read-back, E2E run, acceptance-criteria audit, user acceptance, agent-doc + changelog updates, PR follow-up) and **delegates everything else to specialized superpowers skills**. Do not duplicate the delegated mechanics inline.
+Orchestrator skill for taking a GitHub issue (typically brief) all the way to a PR-ready feature. This skill owns the issue-specific glue (issue fetch, read-back, E2E run, acceptance-criteria audit, user acceptance, agent-doc updates, PR follow-up) and **delegates everything else to specialized superpowers skills**. Do not duplicate the delegated mechanics inline.
 
 **Delegations:**
 - Spec + plan creation → `superpowers:brainstorming` (which itself terminates by invoking `superpowers:writing-plans`)
@@ -48,7 +48,6 @@ digraph build_from_issue {
     "7b. Live-E2E handoff gate\n(hand user test kit OR justify skip)" [shape=box];
     "8. User acceptance (AskUserQuestion)" [shape=box];
     "9. Update AGENTS.md" [shape=box];
-    "10. changelog skill → CHANGELOG.md" [shape=box];
     "11. superpowers:finishing-a-development-branch" [shape=box];
     "PR was created?" [shape=diamond];
     "11b. Momentum hook\n(next card + Slack + kanban re-sync)" [shape=box];
@@ -84,7 +83,7 @@ digraph build_from_issue {
     "7b. Live-E2E handoff gate\n(hand user test kit OR justify skip)" -> "5. Execute plan" [label="live E2E failed → TDD RED"];
     "8. User acceptance (AskUserQuestion)" -> "5. Execute plan" [label="gaps"];
     "8. User acceptance (AskUserQuestion)" -> "9. Update AGENTS.md" [label="satisfied"];
-    "9. Update AGENTS.md" -> "10. changelog skill → CHANGELOG.md" -> "11. superpowers:finishing-a-development-branch" -> "PR was created?";
+    "9. Update AGENTS.md" -> "11. superpowers:finishing-a-development-branch" -> "PR was created?";
     "PR was created?" -> "11b. Momentum hook\n(next card + Slack + kanban re-sync)" [label="yes"];
     "11b. Momentum hook\n(next card + Slack + kanban re-sync)" -> "12. resolve-pr-concerns";
     "PR was created?" -> "Done" [label="no — merged/kept/discarded"];
@@ -356,13 +355,11 @@ Satisfied → continue.
 - Check for any other agent-facing docs in the repo (e.g., `CLAUDE.md`, or `.agents/skills/` — the canonical skills dir, read via the `.claude/skills` symlink in Claude Code) and update as relevant.
 - Keep updates factual and concise.
 
-## Step 10: Update Changelog
-
-Run the `changelog` skill to append the new work to `CHANGELOG.md`.
-
 ## Step 11: Finalize the Branch
 
-**Invoke `superpowers:finishing-a-development-branch`.** It verifies tests, presents the 4-option menu (merge locally / push + create PR / keep as-is / discard), creates the PR if chosen (using the repo's PR template), and handles worktree cleanup with provenance checks. Reference the issue in the PR body (`Closes #N`). If Step 7 surfaced any approved deviations, surface them in the PR body under a "Deviations from issue text" section so reviewers see intent.
+**Invoke `superpowers:finishing-a-development-branch`.** It verifies tests, presents the 4-option menu (merge locally / push + create PR / keep as-is / discard), creates the PR if chosen (using the repo's PR template), and handles worktree cleanup with provenance checks. Reference the issue in the PR body (`Closes #N`). If Step 7 surfaced any approved deviations, surface them in the PR body under a "Deviations from issue text" section so reviewers see intent. (There is no changelog step: a shared `CHANGELOG.md` edited by every PR is a frequent source of catch-up-merge conflicts, so the merged-PR history is the record of what changed.)
+
+**The agent's job ends at merge-ready, and merging is the user's call.** Merge-ready means pushed, PR open, CI green, the configured reviewer's verdict on the current head plus its final full review done (`resolve-pr-concerns` Step 5a; the vendor-neutral `review-gate` status shows both), conversation resolved, and GitHub not reporting `BEHIND` / `CONFLICTING` / `DIRTY`. If `main` uses a **merge queue**, the user merges with "Merge when ready", which enqueues the PR, and the queue tests it against the latest `main` — so finalize is "push + open PR + drive to merge-ready, then the user enqueues it."
 
 ## Step 11b: Momentum Hook — next card + Slack + kanban re-sync (runs whenever a PR was created)
 
@@ -376,9 +373,9 @@ Three quick actions the moment the PR exists, so momentum survives the review ga
 
 ## Step 12: PR Follow-Up
 
-If a PR was created in Step 11, run Step 11b (momentum hook) first, then invoke `resolve-pr-concerns`. A freshly opened PR draws bot reviews (the configured PR reviewer named in `.github/pr-reviewer.json`, Copilot, etc.) within seconds, and dependabot/renovate PRs against the same base branch may be foldable. That skill enumerates everything pending and drives it to merge-ready, including a final re-review of the latest commit after fixes land (auto-run, or the reviewer's configured trigger comment when the repo is in manual mode).
+If a PR was created in Step 11, run Step 11b (momentum hook) first, then invoke `resolve-pr-concerns`. A freshly opened PR draws bot reviews (the configured PR reviewer named in `.github/pr-reviewer.json`, Copilot, etc.) within seconds, and dependabot/renovate PRs against the same base branch may be foldable. That skill enumerates everything pending and drives it to merge-ready, including a final re-review of the latest commit after fixes land (auto-run, or the reviewer's configured trigger comment when the repo is in manual mode). After the incremental loop is clean it posts the adapter's `final_review_comment` once (the final full review; `resolve-pr-concerns` Step 5a).
 
-**Updating the branch from the base is GATING, never optional.** Driving the PR to merge-ready includes ensuring the branch is current with its base (`resolve-pr-concerns` Step 2f). If `mergeStateStatus` is `BEHIND`, merge the base in, re-run CI, and re-trigger the automated reviewer on the merged state — green checks on a stale branch verified code that won't actually land. Do not report the PR as merge-ready while the branch is behind its base.
+**A blocking merge state is GATING, never optional** (`resolve-pr-concerns` Step 2f). If GitHub reports `mergeStateStatus` `BEHIND` (the ruleset requires up-to-date branches), `CONFLICTING` or `DIRTY`, merge the base in, re-run CI, and re-trigger the automated reviewer on the merged state — green checks on a stale branch verified code that won't actually land. Do not report the PR as merge-ready in any of those states. With a merge queue on, a PR that is merely behind its base reads `CLEAN` and needs no catch-up merge: the queue tests the combined state.
 
 For individual reviewer comments — particularly any that seem unclear, technically questionable, or that you're tempted to agree with performatively — lean on `superpowers:receiving-code-review`.
 

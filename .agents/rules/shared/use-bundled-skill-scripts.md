@@ -5,8 +5,9 @@ alwaysApply: true
 
 # Use the skill's bundled script
 
-When a skill provides a bundled script (e.g. `changelog/scripts/changelog.py`,
-`resolve-pr-concerns/scripts/wait_for_pr_checks.sh`), **run it.** Don't substitute
+When a skill provides a bundled script (e.g.
+`resolve-pr-concerns/scripts/wait_for_pr_checks.sh`,
+`resolve-pr-concerns/scripts/reviewer_state.py`), **run it.** Don't substitute
 a manual git-log / shell-cobbled version.
 
 **Why:** The skill ships a tested script for a reason; a manual substitute is your
