@@ -5,8 +5,10 @@ The PR reviewer's own status check passes on heads it never reviewed (skipped or
 rate-limited pushes), so a ruleset should require this status instead. It is green
 only when the configured reviewer (``.github/pr-reviewer.json``) has a verdict on the
 current head AND its final full review finished -- the state ``reviewer_state``
-reports. Run by ``.github/workflows/review-gate.yml`` from the
-default branch; never from PR code.
+reports. A reviewer with a local review runs its fix rounds off the PR, so its gate
+is the final full review finished with every reviewer thread resolved, whatever the
+head. Run by ``.github/workflows/review-gate.yml`` from the default branch; never
+from PR code.
 """
 
 from __future__ import annotations
@@ -34,6 +36,8 @@ def _clip(text: str) -> str:
 
 def gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
     """Return (status state, description) for one PR's ``collect_state`` output."""
+    if (state.get("local_review") or {}).get("configured"):
+        return _local_gate_status(state)
     name, sha7 = state["reviewer_name"], state["head_sha"][:7]
     if state["verdict"] not in ("pass", "findings"):
         return "failure", _clip(
@@ -55,6 +59,50 @@ def gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
             f"post `{command}` once more"
         )
     return "failure", _clip(f"unrecognized final-review outcome: {final}")
+
+
+def _local_gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
+    """Gate a PR whose fix rounds ran locally on its one final full review.
+
+    Fixes pushed after the full review move the head, and are re-checked locally
+    and on the reviewer's threads rather than by another PR review (which would
+    spend the scarce PR quota). So the gate needs the full review finished and every
+    reviewer thread resolved, not a verdict on the current head.
+
+    Parameters
+    ----------
+    state : Mapping[str, Any]
+        Reviewer state as returned by ``reviewer_state.collect_state``.
+
+    Returns
+    -------
+    tuple[str, str]
+        The commit-status state and its clipped description.
+    """
+    name, sha7 = state["reviewer_name"], state["head_sha"][:7]
+    command = state.get("final_review_comment")
+    final = state["final_review_outcome"]
+    if final == "not_requested":
+        return "failure", _clip(f"{name}'s full review not run: post `{command}`")
+    if final == "pending":
+        return "pending", _clip(f"{name}'s full review is still running")
+    if final == "failed":
+        return "failure", _clip(
+            f"{name}'s full review failed: wait 20+ min, post `{command}` once more"
+        )
+    if final not in ("finished", "not_required"):
+        return "failure", _clip(f"unrecognized final-review outcome: {final}")
+    open_threads = len(state.get("open_findings") or [])
+    if open_threads:
+        return "failure", _clip(f"{open_threads} {name} thread(s) still open")
+    local = (
+        "local review"
+        if state["local_review"].get("reviewed_head")
+        else "no local review"
+    )
+    return "success", _clip(
+        f"{name}'s full review finished, threads resolved; {local} on {sha7}"
+    )
 
 
 def _gh(args: Sequence[str]) -> None:

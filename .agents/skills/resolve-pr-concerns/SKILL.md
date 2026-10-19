@@ -23,8 +23,9 @@ This skill exists because PRs accumulate signal from multiple sources (bots, hum
 - Configured-reviewer / Copilot / dependabot / renovate enumeration commands
 - Loop guards (iteration counter, fingerprint-based oscillation detection)
 - CI-failure triage: OIDC App-token / `pull_request_target` workflow trap, fork-secrets unavailability, flaky external API treatment
-- Reviewer re-trigger (trigger comment, when the mode needs one) as the mandatory closing step, then one final full review (the adapter's `final_review_comment`, Step 5a)
-- What counts as reviewed: `reviewer_state.py`'s verdict on the current head (and the vendor-neutral `review-gate` status it feeds), never the vendor's own check
+- Reviewer re-trigger (trigger comment, when the mode needs one) as the mandatory closing step, then one final full review (the adapter's `final_review_comment`, Step 5a). A reviewer that declares a **local review** (`local_review` in the adapter) runs its fix rounds on the developer's machine instead, and the PR's one review request is the final full review ("Local review rounds")
+- A refused review request (the reviewer's rate limit) is waited out and re-posted unchanged, never escalated ("Review requests and the rate limit")
+- What counts as reviewed: `reviewer_state.py`'s verdict on the current head (for a local reviewer: its finished full review with every reviewer thread resolved), and the vendor-neutral `review-gate` status it feeds, never the vendor's own check
 - `wait_for_pr_checks.sh` orchestration with terminal-state polling
 - Final user-facing status summary
 
@@ -46,9 +47,9 @@ For a one-call authoritative verdict + open findings + final-review state on the
 python3 <skill-dir>/scripts/reviewer_state.py --repo <owner>/<repo> --pr <num>
 ```
 
-It prints `head_sha`, `verdict` (`pass` / `findings` / `none` — `none` means the reviewer has not reviewed this head), `open_findings`, `needs_trigger`, `merge_state_status`, `final_review_comment`, and `final_review_outcome` (Step 5a). Prefer it to hand-assembling the 2a–2c reads when you only need the verdict.
+It prints `head_sha`, `verdict` (`pass` / `findings` / `none` — `none` means the reviewer has not reviewed this head), `open_findings`, `needs_trigger`, `merge_state_status`, `final_review_comment`, `final_review_outcome` (Step 5a), `rate_limit` (whether the newest review request was refused, and when to retry; "Review requests and the rate limit") and `local_review` (the local round budget, for a reviewer that declares one; "Local review rounds"). Prefer it to hand-assembling the 2a–2c reads when you only need the verdict.
 
-Swapping reviewers is a config edit (`active`), never a rewrite of this skill. To add a reviewer, add an adapter entry to the config, a `references/reviewers/<key>.md` notes file, and a `Bash(gh pr comment * <trigger_comment>*)` allow entry in `.claude/settings.json`.
+Swapping reviewers is a config edit (`active`), never a rewrite of this skill. To add a reviewer, add an adapter entry to the config, a `references/reviewers/<key>.md` notes file, and a `Bash(gh pr comment * <trigger_comment>*)` allow entry in `.claude/settings.json` (plus one per `local_preflight` command, if it declares one).
 
 ## When to invoke
 
@@ -74,6 +75,41 @@ previous_concern_fingerprints = {}   # set of (source, file, line, body-hash) tu
 4. If the fingerprint set shrank (some resolved, some still present): update `previous_concern_fingerprints` to the current set and continue.
 
 A parallel-mode iteration counts as **one** outer iteration regardless of how many bughunters were dispatched — fingerprint comparison happens at enumeration, not per-bughunter.
+
+## Local review rounds and the rate limit
+
+### Local review rounds (when the adapter declares `local_review`)
+
+A PR review request spends the developer's PR quota, which is small and, with some reviewers, shrinks further with sustained use (the notes file has the numbers). A reviewer whose adapter declares `local_review` can review the committed changes on the developer's machine against a **separate** allowance, so its fix rounds run there and the PR gets **one** review request: the final full review. Each local round is recorded as a plain PR comment with a hidden marker; it mentions nobody, so it is not a review request, and `reviewer_state.py` budgets the rounds from those records (`local_review`: `phase`, `before_final` / `after_final` `{used, cap}`, `allowed`, `reviewed_head`). Such a reviewer must not also review every push on its own (that spends a PR review per push); the notes file says how to switch its auto-review off.
+
+1. **Open the PR as a draft**, so the round records have somewhere to go. Push the head.
+2. **Run a local round** from the PR's worktree:
+   ```bash
+   python3 <skill-dir>/scripts/local_review.py --repo <owner>/<repo> --pr <num>
+   ```
+   It refuses a head that isn't pushed, a head it already reviewed and a spent budget; it checks the local allowance with `review_preflight.py` first; then it reviews the head against its merge base with the PR's base branch, records the round on the PR, and prints the findings.
+3. **Fix the findings** with the same discipline as any reviewer finding (Step 3: verify each one, push back on wrong ones; a local finding has no thread, so state a pushback in the commit message or the PR description). Push, and run the next round. Stop when a round reports no findings worth fixing, or the budget is spent.
+4. **Mark the PR ready and post the final full review** (Step 5a). Fix its findings, reply on each thread with the fix SHA (Step 4d; the reviewer re-checks a fix in its thread reply, which is not a review request), push, and run **one** local round on the final head (the after-final budget).
+
+`local_review.py` prints `status`:
+
+- `reviewed` → act on `findings`, then push and run again.
+- `already_reviewed` → this head has a round; push new commits first.
+- `exhausted` → the local allowance is spent, shared by every session on the developer's account. Wait `recheck_after_seconds` (a scheduled wake-up or a background wait, never a busy loop) and run the SAME command again.
+- `budget_spent` → this phase's rounds (`review_rounds.max_local_before_final` / `max_local_after_final` in `.github/pr-reviewer.json`, default 3 each) are used. Before the final review, post it; after it, stop pushing fixes and answer each remaining finding (push back, or file a follow-up issue and link it); a finding you judge must block the merge goes to the user with a request to raise the cap. Never run past the cap silently.
+- `head_mismatch` → push your commits (or check out the PR branch), then run again.
+- `failed` → the review command, git or GitHub failed; tell the user its `remedy` (install the CLI, log it in, or run its doctor) and retry once. A second failure goes to the user. If the result carries `record_body`, the round ran but recording it failed: post `record_body` as a PR comment by hand instead of re-running (a re-run spends another review on the same head).
+- `not_configured` → the reviewer has no local review: use PR review rounds (Step 5).
+
+`review-gate` for such a PR is green once the final full review finished and every reviewer thread is resolved, even though later fix commits moved the head: those are re-checked locally and on the threads, not by another PR review.
+
+### Review requests and the rate limit
+
+Every PR review request (the trigger comment, or the final-review comment) spends one review from the developer's PR quota, which refills over a rolling window. A request made with none left is refused, and answering a refusal with a different request (say, a full review after a refused incremental one) only spends the quota faster and gets refused too. **No local check can see the PR quota**: `review_preflight.py` reads the local review's allowance, a separate pool from the PR quota (it can read "plenty left" while the PR quota refuses the next request), so it gates local rounds, never PR requests. The reviewer's reply decides:
+
+After any request, if `reviewer_state.py` reports `rate_limit.refused: true`, the request was refused and never ran: it doesn't count as the final review, and it doesn't start the after-final phase. Wait until `rate_limit.retry_after` (the wait the reply stated, the wait in the rate-limit notice the reviewer edits on the PR, or the adapter's default when neither states one; `wait_source` says which), then re-post the SAME request (`rate_limit.request`). Never re-post earlier. **Never escalate a refused request**: never answer a refused incremental review with a full review, or post anything else instead; each request is one more review against the same quota.
+
+To check the local allowance on its own (e.g. before a batch of local rounds), run `python3 <skill-dir>/scripts/review_preflight.py`: `available` / `not_configured` → go; `exhausted` (exit 75) → wait `recheck_after_seconds`; `unknown` → tell the user its `remedy`.
 
 ## Workflow
 
@@ -172,6 +208,7 @@ gh api repos/<owner>/<repo>/issues/<num>/comments --paginate \
 - If a recent push got a review by a reviewer login that was **not** preceded by a trigger comment → **auto-on-push** → set `REVIEWER_AUTORUN=enabled` and **skip** the explicit trigger comment (Step 5) for the rest of the session; after each push, just wait for the auto-review.
 - If reviews only ever appear right after a trigger comment → **manual** → keep posting the trigger comment.
 - If the reviewer's check never appears and no review lands → the reviewer may not be installed/enabled (see Step 1b and the notes file's install steps).
+- If `reviewer_state.py` reports `local_review.configured: true` → the reviewer reviews locally: no trigger comments at all; run the fix rounds with `local_review.py` ("Local review rounds"). Auto-on-push should be off for it (each automatic review spends a PR review); if it isn't, tell the user (the notes file says how to switch it off).
 - The reviewer's check merely being present is **not** evidence of auto-on-push: a vendor check can register at once as "Review skipped" and pass (the notes file says when). Judge the mode by reviews, not by the check.
 
 Surface the detected mode to the user in one line ("The reviewer auto-runs on push here — I won't post redundant trigger comments"). If reviews stop arriving mid-PR in `enabled` mode, re-detect: the reviewer may have paused auto-review.
@@ -378,11 +415,13 @@ A fix that only shows up in the pushed diff leaves the reviewer's thread danglin
      -F threadId=<PRRT_...>
    ```
 
-Do this **per fixed inline finding**, as the last action for that finding. It applies to both serial (4c) and parallel (4b) modes — in parallel mode the orchestrator owns the reply-and-resolve after cherry-picking, since it holds the final SHAs. Do **not**, however, post the trigger comment here to re-trigger a review — that's Step 5's conditional trigger (see the trigger modes there and the `pr-reviewer-auto-trigger` shared rule). Reply-and-resolve closes the *existing* threads; triggering a *fresh* review is separate.
+Do this **per fixed inline finding**, as the last action for that finding. It applies to both serial (4c) and parallel (4b) modes — in parallel mode the orchestrator owns the reply-and-resolve after cherry-picking, since it holds the final SHAs. Do **not**, however, post the trigger comment here to re-trigger a review — that's Step 5's conditional trigger (see the trigger modes there and the `pr-reviewer-auto-trigger` shared rule). Reply-and-resolve closes the *existing* threads; triggering a *fresh* review is separate. For a reviewer with a local review, the re-validation of a fix is the reviewer's own reply on its thread plus a local round on the new head ("Local review rounds"), never a PR trigger.
 
 If the adapter sets `self_resolves_threads: true`, the reviewer may already have resolved its own addressed thread by the time you reply — still reply with the SHA, and don't re-open it. Resolve threads **one at a time** as above; never post a reviewer's resolve-all / approve command to shortcut this (the notes file names them) — it clears threads nobody has addressed.
 
 ## Step 5: Ensure a fresh review of the latest commit
+
+**A reviewer with a local review skips this step** (`local_review.configured: true`, `needs_trigger` always `false`): its rounds run locally ("Local review rounds") and the PR's one request is the final full review (Step 5a).
 
 After all concerns are resolved and pushed, the configured reviewer must re-review the latest commit — silently relying on the previous review is unsafe; new fixes can introduce new issues. **How** depends on the trigger mode detected in Step 1a:
 
@@ -393,6 +432,8 @@ After all concerns are resolved and pushed, the configured reviewer must re-revi
   gh pr comment <num> --repo <owner>/<repo> --body "<trigger_comment>"
   ```
 
+  If the reply refuses it for the rate limit (`rate_limit.refused`), it never ran: wait until `rate_limit.retry_after` and post the same trigger again ("Review requests and the rate limit"). Never post the final full review instead.
+
 - **`REVIEWER_AUTORUN=absent`** (reviewer not installed/enabled): there's nothing to re-trigger; rely on the Step 1b pre-pass review instead, and tell the user the configured reviewer isn't enabled on the repo (the notes file has its install steps).
 
 **Confirm a review actually started.** After the push (auto-on-push) or the trigger comment (manual), watch ~30 seconds for review activity on the new head: a reviewer review of it (`reviewer_state.py`'s `verdict` leaves `none`), or an in-progress signal the notes file describes. **The reviewer's check merely registering is not evidence that a review started** — a vendor check can register at once as "Review skipped" and pass (the notes file says when). If nothing started in `enabled` mode, the reviewer may have paused auto-review: re-detect (Step 1a) and post the trigger comment.
@@ -401,12 +442,13 @@ After all concerns are resolved and pushed, the configured reviewer must re-revi
 
 If the adapter's `final_review_comment` is non-null, the PR needs **one** final full review before it is merge-ready. It re-reviews the whole diff, and it catches what incremental reviews of small fix commits miss (on a trial, the closing full review found the run's most important bug). No push triggers it, in either trigger mode. `reviewer_state.py` reports it as `final_review_outcome`:
 
-- `not_requested` → once the incremental loop has nothing left to act on — the verdict on the head is `pass`, or every finding on it has been fixed or answered on its thread (a pushback leaves the verdict at `findings` for good) — post the literal `final_review_comment` as a top-level comment (it is allow-listed in `.claude/settings.json`):
+- `not_requested` → once the incremental loop (or, for a local reviewer, the local rounds) has nothing left to act on — the verdict on the head is `pass`, or every finding on it has been fixed or answered on its thread (a pushback leaves the verdict at `findings` for good) — post the literal `final_review_comment` as a top-level comment (it is allow-listed in `.claude/settings.json`), never before a refusal's `rate_limit.retry_after`:
   ```bash
   gh pr comment <num> --repo <owner>/<repo> --body "<final_review_comment>"
   ```
+- `pending` with `rate_limit.refused` → the request was refused for the rate limit and never ran; follow "Review requests and the rate limit" and re-post the same final review after `retry_after`.
 - `pending` → it is running; poll `reviewer_state.py`, and **don't push until it finishes** — a push aborts it (the notes file lists the abort wording), which reads as `failed`.
-- `finished` → fix its findings like any others and re-validate them with **incremental** reviews (the trigger comment, or auto-on-push). **Never post a second full review for coverage**: repeated full reviews don't converge, they only sample more, and each spends the reviewer's review quota.
+- `finished` → fix its findings like any others and re-validate them with **incremental** reviews (the trigger comment, or auto-on-push); a local reviewer re-validates them on the threads and with one local round instead ("Local review rounds"). **Never post a second full review for coverage**: repeated full reviews don't converge, they only sample more, and each spends the reviewer's review quota.
 - `failed` → **wait at least 20 minutes, post it once more, and if that also fails, hand it to a human** with both reply links. Never retry immediately (the adapter notes record what is known about failures).
 - `not_required` → the reviewer has no final full review; nothing to do.
 
@@ -414,7 +456,7 @@ Posting it early does no harm (it still counts), but the incremental loop is che
 
 ## Step 6: Wait for every check to settle
 
-A PR isn't done while CI or bot reviews are still pending. **Run this settle only once the reviewer has nothing left for you on the final head** — a verdict on it, and every finding fixed or answered (a pushback leaves the verdict at `findings` for good), plus, if the adapter has one, the final full review `finished` (Step 5a). Between reviewer rounds, poll `reviewer_state.py` instead: this helper waits on the whole suite, which is exactly what you don't want mid-loop. Use the bundled helper:
+A PR isn't done while CI or bot reviews are still pending. **Run this settle only once the reviewer has nothing left for you on the final head** — a verdict on it, and every finding fixed or answered (a pushback leaves the verdict at `findings` for good), plus, if the adapter has one, the final full review `finished` (Step 5a); a local reviewer needs no verdict on the final head, only its final full review `finished` and every finding fixed or answered. Between reviewer rounds, poll `reviewer_state.py` instead: this helper waits on the whole suite, which is exactly what you don't want mid-loop. Use the bundled helper:
 
 ```bash
 bash <skill-dir>/scripts/wait_for_pr_checks.sh <pr-number> <owner>/<repo>
@@ -443,7 +485,7 @@ End with a short status summary:
 - What's still outstanding (if anything).
 - Whether the reviewer's trigger comment was posted (or auto-run was relied on) and what to expect next.
 - Current `mergeStateStatus` from the fresh `gh pr view` call. **Never call a PR merge-ready while GitHub reports `BEHIND`, `CONFLICTING` or `DIRTY`** — that's an unresolved gating concern (Step 2f), not a footnote. "Green checks but behind base" means CI verified stale code; update the branch and re-verify first. (With a merge queue, a PR behind its base reads `CLEAN` and is fine.)
-- **The reviewer has reviewed the current head and its final full review is done.** Read `reviewer_state.py`: `verdict` is `pass` / `findings` on `head_sha`, `open_findings` is empty (every finding fixed or answered), and `final_review_outcome` is `finished` or `not_required`. If the ruleset requires it, the `review-gate` status shows the same thing and must be green. **The reviewer's own check is not evidence** — it can pass on a head it skipped or was rate-limited on. A missing review or final review is a gating concern exactly like a `BEHIND` branch; report it explicitly, never as a footnote.
+- **The reviewer has reviewed the current head and its final full review is done.** Read `reviewer_state.py`: `verdict` is `pass` / `findings` on `head_sha`, `open_findings` is empty (every finding fixed or answered), and `final_review_outcome` is `finished` or `not_required`. For a local reviewer (`local_review.configured: true`) the verdict on the head isn't needed: the final full review `finished` and no open reviewer thread is the bar. If the ruleset requires it, the `review-gate` status shows the same thing and must be green. **The reviewer's own check is not evidence** — it can pass on a head it skipped or was rate-limited on. A missing review or final review is a gating concern exactly like a `BEHIND` branch; report it explicitly, never as a footnote.
 - **Who merges.** This skill drives the PR to merge-ready and **stops**; merging is the user's call. With a merge queue on, merging means "Merge when ready", which enqueues the PR and lets the queue test it against the latest base.
 
 ## Red flags — stop and reassess
@@ -451,6 +493,8 @@ End with a short status summary:
 - Describing a `BEHIND` branch as merge-ready, or framing "update the branch from base" as optional / the merger's call — it is a **gating** Step-2f concern: merge base in, re-run CI + the automated reviewer on the merged state, then re-assess.
 - Posting the final-review comment a second time for more coverage, or re-posting it immediately after a failure — once per PR, and a failure waits 20+ minutes for one retry (Step 5a).
 - Calling a head reviewed because the reviewer's own check is green — that check can pass on a head it skipped. Read `reviewer_state.py` (or the `review-gate` status).
+- Answering a refused (rate-limited) request with a different request, or re-posting it before `rate_limit.retry_after` — wait, then re-post the SAME request ("Review requests and the rate limit").
+- Posting the trigger comment for a reviewer that reviews locally — its fix rounds go through `local_review.py`; the PR's one request is the final full review.
 - A concern shows up in a category you don't recognize (e.g. a third-party SAST bot you haven't seen) — surface it to the user, don't auto-classify.
 - The fix would conflict with the user's stated intent in the PR description — ask before changing direction.
 - Tests pass after a fix but the fix doesn't actually address the reviewer's concern (you treated the symptom, not the cause).
