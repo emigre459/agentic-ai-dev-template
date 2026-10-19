@@ -186,7 +186,7 @@ Followed by a terse listing of epics (one line each: `#<num> <title>`) and relat
 
 Use `AskUserQuestion` for each focused question, one at a time, multi-choice when possible:
 
-1. **Parent epic?** Offer the detected open epics (the unioned inventory from Phase 2 — both `EPIC`-labeled and any `[EPIC]`-titled-but-unlabeled containers) + "propose a new epic" + "none (justify)". Picking "none" requires a one-sentence justification that goes into the issue body — see "No orphan issues" in Core rules.
+1. **Parent epic?** Offer the detected open epics (the unioned inventory from Phase 2 — both `EPIC`-labeled and any `[EPIC]`-titled-but-unlabeled containers) + "propose a new epic" + "none (justify)". Picking "none" requires a one-sentence justification that goes into the issue body — see "No orphan issues" in Core rules. **No evergreen epics** (clean-up-kanban §1a): trackers cap an epic's children (GitHub: 100 sub-issues), so prefer proposing a new, drainable epic scoped to this push over nesting under a long-lived broad one, and check a candidate's child count before offering it (past ~60 children, offer a successor epic instead).
 2. **Scope shape:** single card or N decomposed cards? If N, how many roughly?
 3. **Acceptance criteria** per proposed card: terse bullets, max ~5 items, written in the present tense ("X is implemented and tested"). Ask the user to validate each card's acceptance bullets before moving on.
 4. **Blocked-by relationships:** for each card, which existing issues block it, and which other proposed cards block it? Capture both kinds of edges.
@@ -253,7 +253,7 @@ Order of operations matters — do the structural pieces first, then wire depend
    ```bash
    gh api repos/<owner>/<repo>/issues/<number> --jq '.id'
    ```
-   **Write the `<epic body>` per the clean-up-kanban §1 template** — the epic body IS the cross-child map `/build-from-issue` reads for meta-context: `## Product outcome` (customer value + **lifecycle stage: 0 — POC / 1 — Hardening / 2 — Later** + drainable-vs-index posture), `## Foundation` (merged decisions children must not reopen), `## The story` (each child's one-line role + blockers + sequential/parallel execution order), `## End-state` (what "drained" observably looks like). If the Project board has a `Stage` single-select field, set it on the epic item after attaching.
+   **Write the `<epic body>` per the clean-up-kanban §1 template** — the epic body IS the cross-child map `/build-from-issue` reads for meta-context: `## Product outcome` (customer value + **lifecycle stage: 0 — POC / 1 — Hardening / 2 — Later** + a note that it is temporally drainable — no evergreen epics, see clean-up-kanban §1a), `## Foundation` (merged decisions children must not reopen), `## The story` (each child's one-line role + blockers + sequential/parallel execution order), `## End-state` (what "drained" observably looks like). If the Project board has a `Stage` single-select field, set it on the epic item after attaching.
 
 2. **Create child cards.** For each approved card in Loop A whose tracker is GitHub (for a card under ANY step-1 would-be-epic decision — the one-member hatch OR the zero-count moot path — append `Would-be epic: <title>` to its body BEFORE this create call; for an EXISTING surviving issue on the zero-count path, append the marker via `gh issue edit` now — the marker always lands on the board, never as an afterthought):
    ```bash
