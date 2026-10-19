@@ -15,6 +15,7 @@ The board decays in four ways, and this skill is the countermeasure for each:
 | Orphans accumulate — hand-filed cards bypass the planning skills and never get a parent | Orphan-adoption sweep (§4) |
 | Duplicate efforts sprout because nobody searched before filing | Duplicate hunt (§5) |
 | Epic bodies rot into bare child lists that mislead `/build-from-issue` | Epic-body template (§1) |
+| Epics grow forever until they hit the tracker's child cap | No evergreen epics (§1a) |
 
 **Announce at start:** "Using clean-up-kanban to <review the board | adopt orphans | refresh epic #N>."
 
@@ -30,9 +31,9 @@ Every epic body MUST tell a story a `/build-from-issue` agent can navigate from 
 ## Product outcome
 What customer-visible value this epic creates or improves, in 1-3 sentences.
 **Lifecycle stage: <0 — POC | 1 — Hardening | 2 — Later>** (+ per-child
-exceptions if mixed). Note parallelism with other in-flight epics and whether
-this epic is TEMPORALLY DRAINABLE (default) or a standing index (rare —
-DevEx-type containers; say so explicitly).
+exceptions if mixed). Note parallelism with other in-flight epics. Every epic is
+TEMPORALLY DRAINABLE: it has an end-state, drains, and closes. No evergreen or
+standing-index epics (see §1a).
 
 ## Foundation (merged — build on, don't re-litigate)
 The shipped PRs/issues whose decisions children must not reopen.
@@ -54,6 +55,15 @@ Lifecycle-stage definitions (Dave, 2026-07-07):
 Stage also lives on the **Project's `Stage` single-select field** (sortable in board views; create it once per Project: settings → New field → single select with the three stage options) — set it on the epic (and optionally children) whenever you create or re-stage one. The Project's `Priority` field expresses urgency, which is a DIFFERENT axis (a hardening-stage bug can be Urgent).
 
 **Whenever you nest a card under an epic, re-read the epic body** — if the new child has no place in its story, either amend the story or question the nesting (plan-issues' amend-vs-wrong-home fork).
+
+## §1a No evergreen epics: prefer a new, drainable epic
+
+Trackers cap how many children an epic can hold: GitHub allows 100 sub-issues per parent, and Jira and other trackers have their own limits. An epic that only ever grows (a broad theme, a "standing index") eventually can't take new children and has to be closed and split mid-flight — and long before that, a bloated epic's story stops telling `/build-from-issue` anything useful.
+
+- Every epic has a concrete end-state, drains, and closes. A theme that outlives any one push is expressed as a sequence of drainable epics, each naming its predecessor in `## Foundation`, not as one evergreen container.
+- When new work arrives, prefer a new epic scoped to that push (≥2 children; otherwise plan-issues' would-be-epic escape hatch) over nesting it under a long-lived broad epic, unless the new cards genuinely belong to that epic's current end-state.
+- Before nesting under an existing epic, check its child count (`gh api repos/<o>/<r>/issues/<n> --jq .sub_issues_summary.total`). Past ~60 children, treat it as a split signal: propose a successor epic rather than adding more.
+- In a board review (§2), flag any epic with no reachable end-state, or one past ~60 children, as AMBIGUOUS with "split or close" as the resolver.
 
 ## §2 The three-bucket board review
 
