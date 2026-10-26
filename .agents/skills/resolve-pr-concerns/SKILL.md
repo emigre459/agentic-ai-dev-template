@@ -12,7 +12,7 @@ Reactive, project-aware orchestrator that closes the loop on an open PR before i
 This skill exists because PRs accumulate signal from multiple sources (bots, humans, dependency systems) and shipping requires noticing and addressing all of them — silently merging while a reviewer finding sits unread is a failure mode worth a workflow guard.
 
 **Delegations:**
-- Evaluation discipline for every concern → `superpowers:receiving-code-review` (verify against codebase, no performative agreement, push back when wrong, YAGNI checks, GitHub thread replies); after a fix lands, close its inline thread with a reply + resolve (Step 4d)
+- Evaluation discipline for every concern → `superpowers:receiving-code-review` (verify against codebase, no performative agreement, push back when wrong, YAGNI checks, GitHub thread replies); after a fix lands, close its inline thread with a reply + resolve (Step 4d); a human reviewer's items are answered on their threads and in one body comment, never resolved by the agent, then the reviewer is re-requested (Steps 2h, 4e)
 - Per-fix discipline → `superpowers:test-driven-development` (RED → Verify-RED → GREEN → Verify-GREEN; iron law)
 - Non-obvious root causes (CI failure that isn't lint/test, reviewer finding that's symptom not cause) → `superpowers:systematic-debugging` before patching
 - Independent fixes in parallel (gated, capped at 4) → `superpowers:dispatching-parallel-agents` + `superpowers:using-git-worktrees`
@@ -65,6 +65,8 @@ previous_concern_fingerprints = {}   # set of (source, file, line, body-hash) tu
 4. If the fingerprint set shrank (some resolved, some still present): update `previous_concern_fingerprints` to the current set and continue.
 
 A parallel-mode iteration counts as **one** outer iteration regardless of how many bughunters were dispatched — fingerprint comparison happens at enumeration, not per-bughunter.
+
+**A human reviewer's concerns (Step 2h) skip the fingerprints.** `human_review.sh` already drops a thread or review body once a marked answer covers it, and lists it again if the human replies after that, so its output *is* the live set for human items. Add them to each pass's concerns, but leave them out of the oscillation comparison: an answered human item stays open until its reviewer resolves it.
 
 ## Workflow
 
@@ -186,11 +188,11 @@ Look at each review's `author.login` and `body`. The configured reviewer, Copilo
 ### 2b. Inline review comments
 
 ```bash
-gh api repos/<owner>/<repo>/pulls/<num>/comments \
-  --jq '.[] | {author: .user.login, body: .body, path: .path, line: .line, commit: .commit_id}'
+gh api --paginate repos/<owner>/<repo>/pulls/<num>/comments \
+  --jq '.[] | {id, in_reply_to_id, subject_type, author: .user.login, body, path, line, commit: .commit_id}'
 ```
 
-These are the file/line-anchored findings — the reviewer puts its specific bug reports here, and human reviewers leave their comments here too.
+These are the file/line-anchored findings — the reviewer puts its specific bug reports here, and human reviewers leave their comments here too. Keep `--paginate` (a big review runs past one page), `id` (what you reply on), `in_reply_to_id` (which thread a reply belongs to) and `subject_type` (`line`, or `file` for a file-level comment, whose `line` is null). A human's comments are listed for you, answered-or-not, by Step 2h.
 
 ### 2c. Issue-style PR comments
 
@@ -255,6 +257,23 @@ git push
 ```
 
 Then **loop back** — the push re-runs CI and you re-trigger the automated reviewer (Step 5) so the green checks + clean review reflect the post-merge state. Only a branch current with its base (`mergeStateStatus` not `BEHIND`) and green **on that merged state** is merge-ready. If a merge conflict needs human judgment, surface it; otherwise resolve it yourself.
+
+### 2h. A human reviewer's review — every item is a concern
+
+The reviewer bot's findings come from Steps 2a/2b. A person's review (a teammate's, or the developer's own comments) arrives as line threads, file-level threads and a review body, often with `CHANGES_REQUESTED`. Read it with:
+
+```bash
+bash <skill-dir>/scripts/human_review.sh <num> <owner>/<repo>
+```
+
+It prints JSON (exit 64 on a usage error or an invalid `.github/pr-reviewer.json`; every read is paginated):
+
+- `threads`: each unresolved thread started by a human and not yet answered, with `reply_to` (the comment id to reply on), `subject_type`, `path`, `line` and the human's newest `body`. A human follow-up after your answer brings the thread back.
+- `review_bodies`: each human `CHANGES_REQUESTED` / `COMMENTED` review body not yet answered, with its `review_id`. **Split each body into its items yourself**: every request, question or flag in it is a concern of its own.
+- `changes_requested_by`: humans whose request for changes still stands. `rerequest_reviewers`: those of them with nothing left open and no pending review request. `awaiting_rereview`: those already asked again.
+- `answer_marker`: the hidden marker your thread replies must carry (Step 4e).
+
+A human is any author that isn't a GitHub Bot and isn't in any configured reviewer's `bot_logins`. Every thread and every body item is a concern: triage it in Step 3, fix it or push back, and answer it in Step 4e.
 
 ## Step 3: Classify each concern (with `superpowers:receiving-code-review` discipline)
 
@@ -342,7 +361,7 @@ After all serial fixes land, run `make pr_check` once more on the full set, then
 
 ### 4d. Close the loop on every fixed inline thread (both modes)
 
-A fix that only shows up in the pushed diff leaves the reviewer's thread dangling as if unaddressed — the audit trail reviewers actually read lives **on the PR thread**, not in your chat summary. So after the fix commit for an **inline** finding (reviewer bot or human) is pushed, close its thread in two steps:
+A fix that only shows up in the pushed diff leaves the reviewer's thread dangling as if unaddressed — the audit trail reviewers actually read lives **on the PR thread**, not in your chat summary. So after the fix commit for a reviewer bot's **inline** finding is pushed, close its thread in two steps (a human reviewer's threads follow Step 4e instead, and are never resolved by the agent):
 
 1. **Reply on the thread** with the fix and the commit SHA that made it — via the replies endpoint, not a top-level PR comment:
    ```bash
@@ -368,6 +387,26 @@ A fix that only shows up in the pushed diff leaves the reviewer's thread danglin
 Do this **per fixed inline finding**, as the last action for that finding. It applies to both serial (4c) and parallel (4b) modes — in parallel mode the orchestrator owns the reply-and-resolve after cherry-picking, since it holds the final SHAs. Do **not**, however, post the trigger comment here to re-trigger a review — that's Step 5's conditional trigger (see the trigger modes there and the `pr-reviewer-auto-trigger` shared rule). Reply-and-resolve closes the *existing* threads; triggering a *fresh* review is separate.
 
 If the adapter sets `self_resolves_threads: true`, the reviewer may already have resolved its own addressed thread by the time you reply — still reply with the SHA, and don't re-open it. Resolve threads **one at a time** as above; never post a reviewer's resolve-all / approve command to shortcut this (the notes file names them) — it clears threads nobody has addressed.
+
+### 4e. Answer a human reviewer, then ask them to review again
+
+A human's items are answered differently from the bot's:
+
+1. **Thread (line or file-level)**: reply on it with the fix SHA, or with the reasoning for a pushback or a question's answer, and end the reply with the `answer_marker` from Step 2h. The agent posts as whoever runs it, who may be the reviewer, so the marker is the only thing that tells `human_review.sh` the thread is answered:
+   ```bash
+   gh api repos/<owner>/<repo>/pulls/<num>/comments/<reply_to>/replies \
+     -f body="Fixed in <sha>: <one-line description>.
+
+   <!-- resolve-pr-concerns:answer -->"
+   ```
+2. **Review body**: answer **all** of a review's body items in **one** top-level PR comment, one numbered line per item (fix SHA or reasoning), ending with `<!-- resolve-pr-concerns:answer review=<review_id> -->`. One comment can answer several reviews: put one marker per review.
+3. **Never resolve a human's thread** (no `resolveReviewThread`, no reviewer resolve command). Resolving is the human's sign-off.
+4. **Don't re-run the reviewer bot to validate a human's items.** The human is the one to confirm them. (The bot still reviews each new head as usual, Step 5; that is about the head, not the human's items.)
+5. **Once `human_review.sh` lists the reviewer in `rerequest_reviewers`** (everything of theirs is answered, the fixes are pushed), ask them to review again:
+   ```bash
+   gh pr edit <num> --repo <owner>/<repo> --add-reviewer <login>
+   ```
+   This doesn't clear their request for changes; only their new review does (Step 7).
 
 ## Step 5: Ensure a fresh review of the latest commit
 
@@ -413,10 +452,13 @@ End with a short status summary:
 - What's still outstanding (if anything).
 - Whether the reviewer's trigger comment was posted (or auto-run was relied on) and what to expect next.
 - Current `mergeStateStatus` from the fresh `gh pr view` call. **Never call a PR merge-ready while `mergeStateStatus` is `BEHIND`** — that's an unresolved gating concern (Step 2f), not a footnote. "Green checks but behind base" means CI verified stale code; update the branch and re-verify first.
+- **No human request for changes stands, and no human item is unanswered.** Read `human_review.sh` (Step 2h): `open_concern_count` is 0 and `changes_requested_by` is empty. While a reviewer's request stands, the PR is **not** merge-ready even with every item answered: report it as "waiting on @<login>'s re-review" (name `awaiting_rereview`), never as ready.
 
 ## Red flags — stop and reassess
 
 - Describing a `BEHIND` branch as merge-ready, or framing "update the branch from base" as optional / the merger's call — it is a **gating** Step-2f concern: merge base in, re-run CI + the automated reviewer on the merged state, then re-assess.
+- Calling a PR merge-ready while `human_review.sh` lists an open human item or a standing `changes_requested_by` — a human's request for changes blocks exactly like a red check (Step 7).
+- Resolving a human reviewer's thread, or answering a human thread or review body without the answer marker — resolution is the human's sign-off, and an unmarked answer keeps being listed (Step 4e).
 - A concern shows up in a category you don't recognize (e.g. a third-party SAST bot you haven't seen) — surface it to the user, don't auto-classify.
 - The fix would conflict with the user's stated intent in the PR description — ask before changing direction.
 - Tests pass after a fix but the fix doesn't actually address the reviewer's concern (you treated the symptom, not the cause).
