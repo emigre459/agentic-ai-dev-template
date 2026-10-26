@@ -2,6 +2,7 @@
 
 ## 2026-10-26
 - feat: `resolve-pr-concerns` answers a human reviewer's review, not only the configured bot: a new `scripts/human_review.sh` lists their unresolved line and file-level threads, unanswered review bodies and standing `CHANGES_REQUESTED`; the agent answers threads on the thread and body items in one top-level comment (marked so its own answers never count as concerns), never resolves a human's thread, re-requests the reviewer once everything is answered, and won't report merge-ready while their request stands (ports gridium-agent#2603)
+- fix: `resolve-pr-concerns` never resolves a review thread itself any more (bot or human): Step 4d replies with the fix SHA and leaves the thread for a human, the loop guard sets answered threads aside, and a new `no-self-resolve-pr-threads` shared rule states the norm
 
 ## 2026-08-09
 - fix: require an explicit GitHub target and add a non-mutating initialization preflight for tools, authentication, remotes, admin permission, Issues, and clean Git state

@@ -12,7 +12,7 @@ Reactive, project-aware orchestrator that closes the loop on an open PR before i
 This skill exists because PRs accumulate signal from multiple sources (bots, humans, dependency systems) and shipping requires noticing and addressing all of them — silently merging while a reviewer finding sits unread is a failure mode worth a workflow guard.
 
 **Delegations:**
-- Evaluation discipline for every concern → `superpowers:receiving-code-review` (verify against codebase, no performative agreement, push back when wrong, YAGNI checks, GitHub thread replies); after a fix lands, close its inline thread with a reply + resolve (Step 4d); a human reviewer's items are answered on their threads and in one body comment, never resolved by the agent, then the reviewer is re-requested (Steps 2h, 4e)
+- Evaluation discipline for every concern → `superpowers:receiving-code-review` (verify against codebase, no performative agreement, push back when wrong, YAGNI checks, GitHub thread replies); after a fix lands, reply on its inline thread with the fix SHA and leave it open — a **human** resolves the thread, never the agent (Step 4d); a human reviewer's items are answered on their threads and in one body comment, never resolved by the agent, then the reviewer is re-requested (Steps 2h, 4e)
 - Per-fix discipline → `superpowers:test-driven-development` (RED → Verify-RED → GREEN → Verify-GREEN; iron law)
 - Non-obvious root causes (CI failure that isn't lint/test, reviewer finding that's symptom not cause) → `superpowers:systematic-debugging` before patching
 - Independent fixes in parallel (gated, capped at 4) → `superpowers:dispatching-parallel-agents` + `superpowers:using-git-worktrees`
@@ -61,7 +61,7 @@ previous_concern_fingerprints = {}   # set of (source, file, line, body-hash) tu
 
 1. `iteration += 1`
 2. If `iteration > MAX_ITERATIONS`: stop, surface a summary of remaining concerns to the user, ask how to proceed. Do **not** attempt another autonomous fix pass.
-3. After enumerating concerns, compute a fingerprint for each: `(author_login, path, line, hash(body))`. If the full set of fingerprints is identical to `previous_concern_fingerprints`, the loop is oscillating — the same issues keep resurfacing. Stop immediately and tell the user: list the stuck concerns, explain that two consecutive passes produced the same findings with no change, and ask for direction. Do **not** try to fix them again.
+3. After enumerating concerns, set aside every thread you already answered (replied with the fix SHA or a pushback, Step 4d) — the agent never resolves threads, so an answered thread stays open and is awaiting a **human**, not agent action. Compute a fingerprint for each remaining concern: `(author_login, path, line, hash(body))`. If the full set of fingerprints is identical to `previous_concern_fingerprints`, the loop is oscillating — the same issues keep resurfacing. Stop immediately and tell the user: list the stuck concerns, explain that two consecutive passes produced the same findings with no change, and ask for direction. Do **not** try to fix them again.
 4. If the fingerprint set shrank (some resolved, some still present): update `previous_concern_fingerprints` to the current set and continue.
 
 A parallel-mode iteration counts as **one** outer iteration regardless of how many bughunters were dispatched — fingerprint comparison happens at enumeration, not per-bughunter.
@@ -99,7 +99,7 @@ digraph resolve_pr_concerns {
     "Serial fix path:\nreceiving-code-review + TDD\n(or systematic-debugging if root cause unclear)" [shape=box];
     "Run make pr_check on integrated state" [shape=box];
     "Push (single push covers all)" [shape=box];
-    "Reply + resolve each fixed inline thread\n(reply w/ SHA, then resolveReviewThread)" [shape=box];
+    "Reply w/ SHA on each fixed inline thread\n(leave it open: a human resolves)" [shape=box];
 
     "Start" -> "Init loop guards" -> "Find open PR for current branch" -> "PR exists?";
     "PR exists?" -> "Stop — nothing to do" [label="no"];
@@ -125,8 +125,8 @@ digraph resolve_pr_concerns {
     "Cherry-pick each bughunter commit\n(serial integration gate)" -> "Run make pr_check on integrated state";
     "Serial fix path:\nreceiving-code-review + TDD\n(or systematic-debugging if root cause unclear)" -> "Run make pr_check on integrated state";
     "Run make pr_check on integrated state" -> "Push (single push covers all)";
-    "Push (single push covers all)" -> "Reply + resolve each fixed inline thread\n(reply w/ SHA, then resolveReviewThread)";
-    "Reply + resolve each fixed inline thread\n(reply w/ SHA, then resolveReviewThread)" -> "Find open PR for current branch";
+    "Push (single push covers all)" -> "Reply w/ SHA on each fixed inline thread\n(leave it open: a human resolves)";
+    "Reply w/ SHA on each fixed inline thread\n(leave it open: a human resolves)" -> "Find open PR for current branch";
 }
 ```
 
@@ -359,34 +359,21 @@ For each concern, in order:
 
 After all serial fixes land, run `make pr_check` once more on the full set, then push.
 
-### 4d. Close the loop on every fixed inline thread (both modes)
+### 4d. Reply on every fixed inline thread, and leave resolving to a human (both modes)
 
-A fix that only shows up in the pushed diff leaves the reviewer's thread dangling as if unaddressed — the audit trail reviewers actually read lives **on the PR thread**, not in your chat summary. So after the fix commit for a reviewer bot's **inline** finding is pushed, close its thread in two steps (a human reviewer's threads follow Step 4e instead, and are never resolved by the agent):
+A fix that only shows up in the pushed diff leaves the reviewer's thread dangling as if unaddressed — the audit trail reviewers actually read lives **on the PR thread**, not in your chat summary. So after the fix commit for a reviewer bot's **inline** finding is pushed, reply on its thread — and **stop before resolving** (a human reviewer's threads follow Step 4e):
 
 1. **Reply on the thread** with the fix and the commit SHA that made it — via the replies endpoint, not a top-level PR comment:
    ```bash
    gh api repos/<owner>/<repo>/pulls/<num>/comments/<comment_id>/replies \
      -f body="Fixed in <sha>: <one-line description of the change>."
    ```
-   State the fix plainly — no "thanks" / "great catch" (same `superpowers:receiving-code-review` no-performative-agreement rule as Step 3). If you pushed back instead of fixing, the thread reply already happened in Step 3; still resolve it below once the discussion is settled.
-2. **Resolve the conversation** via the GraphQL `resolveReviewThread` mutation. Find the thread node id by matching the first comment's `databaseId` to the `comment_id` you replied to, then resolve it:
-   ```bash
-   # Find the thread node id for a given inline comment id:
-   gh api graphql -f query='
-     query($owner:String!,$repo:String!,$num:Int!){
-       repository(owner:$owner,name:$repo){
-         pullRequest(number:$num){
-           reviewThreads(first:100){ nodes{ id isResolved comments(first:1){ nodes{ databaseId } } } }
-         }}}' -F owner=<owner> -F repo=<repo> -F num=<num>
-   # Then resolve the matched thread:
-   gh api graphql -f query='
-     mutation($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}){ thread{ isResolved } } }' \
-     -F threadId=<PRRT_...>
-   ```
+   State the fix plainly — no "thanks" / "great catch" (same `superpowers:receiving-code-review` no-performative-agreement rule as Step 3). If you pushed back instead of fixing, the thread reply already happened in Step 3.
+2. **Do NOT resolve the thread yourself — a human resolves it.** Never call the `resolveReviewThread` mutation, never resolve a conversation through the UI, and never post a reviewer's resolve-all / approve command (the notes file names them). Replying with the fix SHA is the agent's job; *resolving* the conversation — the "I've looked, this is genuinely addressed" judgment — is the **human's**, and a ruleset that requires conversation resolution turns it into the final human gate before merge. Leave every thread you replied to **open**. If the adapter sets `self_resolves_threads: true`, the reviewer clears its *own* addressed threads when it re-reviews; that is the bot's judgment, not yours.
 
-Do this **per fixed inline finding**, as the last action for that finding. It applies to both serial (4c) and parallel (4b) modes — in parallel mode the orchestrator owns the reply-and-resolve after cherry-picking, since it holds the final SHAs. Do **not**, however, post the trigger comment here to re-trigger a review — that's Step 5's conditional trigger (see the trigger modes there and the `pr-reviewer-auto-trigger` shared rule). Reply-and-resolve closes the *existing* threads; triggering a *fresh* review is separate.
+Do this **per fixed inline finding**, as the last action for that finding. It applies to both serial (4c) and parallel (4b) modes — in parallel mode the orchestrator owns the replies after cherry-picking, since it holds the final SHAs. An addressed thread stays open until a human (or the reviewer itself) resolves it, so the next enumeration returns it again: it is awaiting human resolution, not agent action — don't re-fix it, and leave it out of the oscillation comparison (Loop guards). Do **not**, however, post the trigger comment here to re-trigger a review — that's Step 5's conditional trigger (see the trigger modes there and the `pr-reviewer-auto-trigger` shared rule). Replying answers the *existing* threads; triggering a *fresh* review is separate.
 
-If the adapter sets `self_resolves_threads: true`, the reviewer may already have resolved its own addressed thread by the time you reply — still reply with the SHA, and don't re-open it. Resolve threads **one at a time** as above; never post a reviewer's resolve-all / approve command to shortcut this (the notes file names them) — it clears threads nobody has addressed.
+If the adapter sets `self_resolves_threads: true`, the reviewer may already have resolved its own addressed thread by the time you reply — still reply with the SHA, and don't re-open it. Never post a reviewer's resolve-all / approve command (the notes file names them) — it clears threads nobody has addressed.
 
 ### 4e. Answer a human reviewer, then ask them to review again
 
@@ -453,6 +440,7 @@ End with a short status summary:
 - Whether the reviewer's trigger comment was posted (or auto-run was relied on) and what to expect next.
 - Current `mergeStateStatus` from the fresh `gh pr view` call. **Never call a PR merge-ready while `mergeStateStatus` is `BEHIND`** — that's an unresolved gating concern (Step 2f), not a footnote. "Green checks but behind base" means CI verified stale code; update the branch and re-verify first.
 - **No human request for changes stands, and no human item is unanswered.** Read `human_review.sh` (Step 2h): `open_concern_count` is 0 and `changes_requested_by` is empty. While a reviewer's request stands, the PR is **not** merge-ready even with every item answered: report it as "waiting on @<login>'s re-review" (name `awaiting_rereview`), never as ready.
+- **A human resolves the threads and performs the final merge.** This skill drives the PR to merge-ready and **stops**: every thread answered and left open for its reviewer, never `resolveReviewThread` to force a green state, never a self-merge.
 
 ## Red flags — stop and reassess
 
@@ -463,7 +451,8 @@ End with a short status summary:
 - The fix would conflict with the user's stated intent in the PR description — ask before changing direction.
 - Tests pass after a fix but the fix doesn't actually address the reviewer's concern (you treated the symptom, not the cause).
 - Performative agreement ("Thanks for catching this!", "You're absolutely right!") is being drafted — `superpowers:receiving-code-review` forbids this; state the fix or push back instead.
-- An inline finding was fixed and pushed but its thread is still open / has no reply naming the fix commit — Step 4d isn't optional; the dangling thread reads as unaddressed to reviewers. Reply with the SHA, then resolve the conversation.
+- An inline finding was fixed and pushed but its thread has no reply naming the fix commit — Step 4d isn't optional; the dangling thread reads as unaddressed to reviewers. Reply with the SHA, then **leave the thread open for a human to resolve**.
+- About to call `resolveReviewThread` (or resolve a conversation through the UI) yourself — **stop.** Resolution is a human-only final gate, exactly like the merge.
 - About to dispatch parallel bughunters for `complex` concerns — they need user alignment per concern, not autonomous fixing.
 - About to dispatch parallel bughunters whose concerns share a directory — directory-level disjointness is the gate, not file-level. Fall back to serial.
 - About to let bughunters push their own work — orchestrator owns the single serial push as the integration gate.
@@ -483,7 +472,8 @@ End with a short status summary:
 | Bumping a workflow file that uses OIDC → App token (claude-code-review, claude) inside a PR | Revert that workflow change from the PR; ask the user to land it on the default branch directly |
 | Forgetting to re-enumerate after pushing | New pushes draw new bot reviews; loop back to Step 1 |
 | "I addressed all the comments" without actually pushing | Verify `git status` is clean and the remote has the new commits before declaring done |
-| Fixing an inline finding but only summarizing it in chat, leaving the PR thread open | Step 4d: reply on the thread with the fix + commit SHA, then resolve the conversation via `resolveReviewThread` — per fixed finding |
+| Fixing an inline finding but only summarizing it in chat, leaving the thread with no reply | Step 4d: reply on the thread with the fix + commit SHA, per fixed finding |
+| Self-resolving a review thread (`resolveReviewThread`) to make the PR look done | Resolution is a human-only gate; reply with the SHA and leave the thread open |
 | Looping forever on non-deterministic LLM reviewer feedback | Check fingerprints each pass; identical findings two passes in a row → stop and surface, never re-fix |
 | Silently grinding through all 5 iterations without telling the user | On iteration 5, surface remaining concerns and ask for direction before doing anything else |
 | Inlining TDD steps in the fix path | Reference `superpowers:test-driven-development` instead — the iron law and verify-RED/GREEN gates live there |
