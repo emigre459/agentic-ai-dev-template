@@ -113,6 +113,10 @@ builder's working notes; this document carries every decision they fed.
     and the other knobs live in **one shared config file** that both stacks read, so
     the Python and React stacks stay in sync, including in a repo initialized with
     only one of them.
+14. **No new config file for the speed guard.** Its settings go in a `test_speed`
+    section of `.github/pr-reviewer.json`, the existing stack-neutral settings file.
+    The file's reviewer-flavored name stays for now; whether to rename it to a
+    general settings file is #48's call (recorded on that card).
 
 ## Design, per skill
 
@@ -327,11 +331,13 @@ Downstream's guard, generalized to both stacks and to a fresh repo.
   guard prints its own measurement every run, so seeding a class is one line). The
   `ubuntu-latest` value is seeded from this PR's own CI run. `--factor` pins the
   factor for debugging.
-- **One config, both stacks.** A single shared file holds `budget_seconds = 10`,
-  `recheck_fraction`, the factor clamp, and the per-runner-class typical times. It
-  lives outside `stacks/` (*builder's call, marked:* a `conf/test-speed.toml` that
-  `make init` keeps for either stack), so changing the budget is a one-line edit that
-  applies to Python and React alike, and survives initialization with one stack.
+- **One config, both stacks.** The settings live in a `test_speed` section of
+  `.github/pr-reviewer.json` (decision 14): `budget_seconds: 10`, `recheck_fraction`,
+  the factor clamp, the shared-setup budget, and the per-runner-class typical times.
+  That file is stack-neutral, survives `make init` for either stack, and is already
+  the one settings file the workflow reads (next to `review_rounds`), so changing the
+  budget is a one-line edit that applies to Python and React alike. The seam test
+  validates the section's shape.
 - **Where the code lives.** One stack-neutral, stdlib-`python3` script pair (the
   checker and the runner-speed calibrator) outside `stacks/`, kept by `make init`
   for either stack (as `scripts/apply_repo_settings.py` is today). It parses either
