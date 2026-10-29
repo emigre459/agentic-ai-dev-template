@@ -7,6 +7,7 @@ from typing import NoReturn
 import pytest
 
 from scripts.apply_repo_settings import (
+    DEFERRED_RULE_TYPES,
     _current_rulesets,
     _gh_json,
     find_main_ruleset,
@@ -314,3 +315,67 @@ def test_gh_json_reports_missing_cli_in_plain_language() -> None:
 
     with pytest.raises(RuntimeError, match="GitHub CLI.*gh auth login"):
         _gh_json(["api", "repos/acme/repo"], missing_runner)
+
+
+# --- merge queue (#53) ----------------------------------------------------------
+
+
+def test_shipped_ruleset_has_a_squash_merge_queue() -> None:
+    """Merges go through a queue that tests each PR against the latest main."""
+    ruleset = load_desired(REPO_SETTINGS).ruleset
+    [queue] = [r for r in ruleset["rules"] if r["type"] == "merge_queue"]
+    params = queue["parameters"]
+    assert params["merge_method"] == "SQUASH"
+    assert params["grouping_strategy"] == "ALLGREEN"
+    assert params["min_entries_to_merge"] == 1
+    assert params["max_entries_to_merge"] >= params["min_entries_to_merge"]
+    assert params["max_entries_to_build"] >= 1
+    assert 1 <= params["check_response_timeout_minutes"] <= 360
+
+
+def test_shipped_ruleset_does_not_require_up_to_date_branches() -> None:
+    """The queue replaces strict up-to-date checks; both would mean catch-up churn."""
+    ruleset = load_desired(REPO_SETTINGS).ruleset
+    [checks] = [r for r in ruleset["rules"] if r["type"] == "required_status_checks"]
+    assert checks["parameters"]["strict_required_status_checks_policy"] is False
+
+
+def test_bootstrap_phase_defers_the_merge_queue() -> None:
+    """A queue with no required checks would merge untested; defer both together."""
+    desired: dict = {
+        "name": "main",
+        "rules": [
+            {"type": "pull_request", "parameters": {}},
+            {"type": "required_status_checks", "parameters": {}},
+            {"type": "merge_queue", "parameters": {}},
+        ],
+    }
+    bootstrap = ruleset_for_phase(desired, "bootstrap")
+    final = ruleset_for_phase(desired, "final")
+    assert [r["type"] for r in bootstrap["rules"]] == ["pull_request"]
+    assert [r["type"] for r in final["rules"]] == [
+        "pull_request",
+        "required_status_checks",
+        "merge_queue",
+    ]
+
+
+def test_bootstrap_plan_removes_a_live_merge_queue() -> None:
+    current = {
+        "id": 7,
+        "name": "main",
+        "rules": [{"type": "pull_request"}, {"type": "merge_queue"}],
+    }
+    actions = plan_actions(
+        current_rulesets=[current],
+        current_merge={"allow_squash_merge": True, **_ALIGNED_SECURITY},
+        desired_ruleset={"name": "main", "rules": [{"type": "pull_request"}]},
+        desired_merge={"allow_squash_merge": True},
+        desired_security=_ALIGNED_SECURITY,
+        forbidden_rule_types=DEFERRED_RULE_TYPES,
+    )
+    assert actions == [("ruleset", "PUT", 7)]
+
+
+def test_deferred_rule_types_cover_checks_and_queue() -> None:
+    assert {"required_status_checks", "merge_queue"} <= DEFERRED_RULE_TYPES

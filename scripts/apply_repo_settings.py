@@ -13,7 +13,7 @@ import copy
 import json
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Container
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -42,6 +42,11 @@ class CommandResult(Protocol):
 
 
 REPO_SETTINGS_DIR = Path(__file__).resolve().parent.parent / ".github" / "repo-settings"
+
+# Rule types the bootstrap phase defers until the setup PR merges: the required CI
+# checks (their workflow isn't on main yet) and the merge queue (with no required
+# checks it would merge untested).
+DEFERRED_RULE_TYPES = frozenset({"required_status_checks", "merge_queue"})
 
 # Ruleset fields we assert; everything else (id, timestamps, _links) is ignored.
 _RULESET_KEYS = (
@@ -85,7 +90,7 @@ def ruleset_for_phase(
     ruleset
         Canonical final ruleset loaded from disk.
     phase
-        ``bootstrap`` defers required CI contexts; ``final`` keeps every rule.
+        ``bootstrap`` defers ``DEFERRED_RULE_TYPES``; ``final`` keeps every rule.
 
     Returns
     -------
@@ -104,7 +109,7 @@ def ruleset_for_phase(
         phased["rules"] = [
             rule
             for rule in phased.get("rules", [])
-            if rule.get("type") != "required_status_checks"
+            if rule.get("type") not in DEFERRED_RULE_TYPES
         ]
     return phased
 
@@ -173,7 +178,7 @@ def plan_actions(
     desired_ruleset: JsonObject,
     desired_merge: JsonObject,
     desired_security: JsonObject,
-    forbidden_rule_types: set[str] | None = None,
+    forbidden_rule_types: Container[str] | None = None,
 ) -> list[Action]:
     """Compute the minimal set of apply actions.
 
@@ -186,7 +191,7 @@ def plan_actions(
     if main is None:
         actions.append(("ruleset", "POST", None))
     elif not ruleset_matches(desired_ruleset, main) or any(
-        rule.get("type") in (forbidden_rule_types or set())
+        rule.get("type") in (forbidden_rule_types or ())
         for rule in main.get("rules", [])
     ):
         actions.append(("ruleset", "PUT", main["id"]))
@@ -333,9 +338,7 @@ def main(
         desired_ruleset,
         desired.merge,
         desired.security,
-        forbidden_rule_types=(
-            {"required_status_checks"} if args.phase == "bootstrap" else None
-        ),
+        forbidden_rule_types=DEFERRED_RULE_TYPES if args.phase == "bootstrap" else None,
     )
     if not actions:
         print(f"{repo}: settings already aligned — no changes.")
@@ -359,7 +362,8 @@ def main(
     print(f"Applied {args.phase} settings to {repo}.")
     if args.phase == "bootstrap":
         print(
-            "Required CI checks are deferred until the setup PR merges. "
+            "Required CI checks and the merge queue are deferred until the setup "
+            "PR merges. "
             "After merge, run `make finalize_repo_settings TARGET_REPO="
             f"{repo}`."
         )
