@@ -12,6 +12,8 @@ from scripts.apply_repo_settings import (
     _gh_json,
     find_main_ruleset,
     load_desired,
+    main,
+    merge_queue_eligibility,
     merge_settings_match,
     plan_actions,
     ruleset_for_phase,
@@ -379,3 +381,206 @@ def test_bootstrap_plan_removes_a_live_merge_queue() -> None:
 
 def test_deferred_rule_types_cover_checks_and_queue() -> None:
     assert {"required_status_checks", "merge_queue"} <= DEFERRED_RULE_TYPES
+
+
+def _repo(owner_type: str, visibility: str) -> dict:
+    return {
+        "owner": {"login": "acme", "type": owner_type},
+        "visibility": visibility,
+        "private": visibility != "public",
+    }
+
+
+@pytest.mark.parametrize(
+    ("repo", "org", "expected"),
+    [
+        (_repo("User", "public"), None, "no"),
+        (_repo("User", "private"), None, "no"),
+        (_repo("Organization", "public"), None, "yes"),
+        (_repo("Organization", "private"), {"plan": {"name": "enterprise"}}, "yes"),
+        (_repo("Organization", "private"), {"plan": {"name": "team"}}, "no"),
+        (_repo("Organization", "private"), {"plan": {"name": "free"}}, "no"),
+        (_repo("Organization", "private"), {"login": "acme"}, "unknown"),
+        (_repo("Organization", "private"), None, "unknown"),
+        (_repo("Organization", "internal"), {"plan": {"name": "enterprise"}}, "yes"),
+    ],
+    ids=[
+        "user-public",
+        "user-private",
+        "org-public",
+        "org-private-enterprise",
+        "org-private-team",
+        "org-private-free",
+        "org-private-plan-hidden",
+        "org-private-org-unreadable",
+        "org-internal-enterprise",
+    ],
+)
+def test_merge_queue_eligibility(repo: dict, org: dict | None, expected: str) -> None:
+    verdict, reason = merge_queue_eligibility(repo, org)
+    assert verdict == expected
+    assert reason  # every verdict explains itself in the notice
+
+
+class _FakeGh:
+    """A stub `gh` for main(): serves GETs, records writes, can reject merge_queue."""
+
+    def __init__(
+        self,
+        repo: dict,
+        org: dict | None = None,
+        rulesets: list | None = None,
+        reject_merge_queue: bool = False,
+        fail_ruleset_with: str | None = None,
+    ) -> None:
+        self.repo, self.org, self.rulesets = repo, org, rulesets or []
+        self.reject_merge_queue = reject_merge_queue
+        self.fail_ruleset_with = fail_ruleset_with
+        self.calls: list[list[str]] = []
+        self.ruleset_writes: list[dict] = []
+
+    def __call__(self, cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        self.calls.append(cmd)
+        args = cmd[1:]
+        if "--method" not in args:
+            endpoint = args[-1]
+            if endpoint == "repos/acme/repo/rulesets":
+                body: object = [
+                    {"id": r["id"], "name": r["name"]} for r in self.rulesets
+                ]
+            elif endpoint.startswith("repos/acme/repo/rulesets/"):
+                body = self.rulesets[0]
+            elif endpoint == "repos/acme/repo":
+                body = self.repo
+            elif endpoint == "orgs/acme":
+                if self.org is None:
+                    raise subprocess.CalledProcessError(
+                        1, cmd, stderr="gh: Not Found (HTTP 404)"
+                    )
+                body = self.org
+            else:
+                raise AssertionError(f"unexpected GET {cmd}")
+            return SimpleNamespace(stdout=json.dumps(body))
+        endpoint = args[args.index("--method") + 2]
+        if "/rulesets" in endpoint:
+            payload = json.loads(str(kwargs["input"]))
+            self.ruleset_writes.append(payload)
+            types = {r["type"] for r in payload["rules"]}
+            if self.fail_ruleset_with:
+                raise subprocess.CalledProcessError(
+                    1, cmd, stderr=self.fail_ruleset_with
+                )
+            if self.reject_merge_queue and "merge_queue" in types:
+                raise subprocess.CalledProcessError(
+                    1,
+                    cmd,
+                    stderr="gh: Validation Failed: Invalid rule 'merge_queue': (HTTP 422)",
+                )
+        return SimpleNamespace(stdout="")
+
+
+def _rule_types(payload: dict) -> list[str]:
+    return [r["type"] for r in payload["rules"]]
+
+
+def test_main_skips_the_queue_on_a_user_owned_repo(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    gh = _FakeGh(_repo("User", "public"))
+    assert main(["--repo", "acme/repo", "--yes"], runner=gh) == 0
+    [written] = gh.ruleset_writes
+    assert "merge_queue" not in _rule_types(written)
+    assert "required_status_checks" in _rule_types(written)
+    out = capsys.readouterr().out
+    assert "no merge queue" in out and "organization" in out
+    assert not any(c[-1] == "orgs/acme" for c in gh.calls)
+
+
+def test_a_skipped_queue_stays_a_no_op_on_rerun() -> None:
+    """Idempotent: once applied without the queue, a rerun plans no ruleset change."""
+    first = _FakeGh(_repo("User", "public"))
+    main(["--repo", "acme/repo", "--yes"], runner=first)
+    live = {"id": 9, **first.ruleset_writes[0]}
+    second = _FakeGh(_repo("User", "public"), rulesets=[live])
+    main(["--repo", "acme/repo", "--yes"], runner=second)
+    assert second.ruleset_writes == []
+
+
+def test_main_sends_the_queue_on_an_org_public_repo() -> None:
+    gh = _FakeGh(_repo("Organization", "public"))
+    assert main(["--repo", "acme/repo", "--yes"], runner=gh) == 0
+    [written] = gh.ruleset_writes
+    assert "merge_queue" in _rule_types(written)
+    assert not any(c[-1] == "orgs/acme" for c in gh.calls)
+
+
+def test_main_reads_the_org_plan_only_for_a_private_org_repo() -> None:
+    gh = _FakeGh(_repo("Organization", "private"), org={"plan": {"name": "team"}})
+    assert main(["--repo", "acme/repo", "--yes"], runner=gh) == 0
+    assert any(c[-1] == "orgs/acme" for c in gh.calls)
+    assert "merge_queue" not in _rule_types(gh.ruleset_writes[0])
+
+
+def test_main_retries_without_the_queue_when_github_rejects_it(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Plan hidden from the caller: try it, and fall back on GitHub's 422."""
+    gh = _FakeGh(_repo("Organization", "private"), reject_merge_queue=True)
+    assert main(["--repo", "acme/repo", "--yes"], runner=gh) == 0
+    assert [("merge_queue" in _rule_types(w)) for w in gh.ruleset_writes] == [
+        True,
+        False,
+    ]
+    assert "no merge queue" in capsys.readouterr().out
+
+
+def test_main_fails_hard_on_any_other_ruleset_error() -> None:
+    gh = _FakeGh(
+        _repo("Organization", "private"),
+        fail_ruleset_with="gh: Resource not accessible by integration (HTTP 403)",
+    )
+    assert main(["--repo", "acme/repo", "--yes"], runner=gh) == 2
+    assert len(gh.ruleset_writes) == 1  # no blind retry
+
+
+def test_main_does_not_retry_a_rejection_on_a_known_eligible_repo() -> None:
+    """A 422 on a repo we know has queues is a real error, not ineligibility."""
+    gh = _FakeGh(_repo("Organization", "public"), reject_merge_queue=True)
+    assert main(["--repo", "acme/repo", "--yes"], runner=gh) == 2
+    assert len(gh.ruleset_writes) == 1
+
+
+def test_bootstrap_never_asks_about_the_queue() -> None:
+    gh = _FakeGh(_repo("Organization", "private"))
+    assert (
+        main(["--repo", "acme/repo", "--phase", "bootstrap", "--yes"], runner=gh) == 0
+    )
+    assert not any(c[-1] == "orgs/acme" for c in gh.calls)
+    assert "merge_queue" not in _rule_types(gh.ruleset_writes[0])
+
+
+def test_a_rejection_named_only_in_the_response_body_is_recognized() -> None:
+    """`gh api` prints the error body (naming the rule) to stdout, a summary to stderr."""
+
+    class _BodyOnly(_FakeGh):
+        def __call__(self, cmd: list[str], **kwargs: object) -> SimpleNamespace:
+            if "--method" in cmd and "/rulesets" in " ".join(cmd):
+                payload = json.loads(str(kwargs["input"]))
+                self.ruleset_writes.append(payload)
+                if "merge_queue" in _rule_types(payload):
+                    raise subprocess.CalledProcessError(
+                        1,
+                        cmd,
+                        output='{"message":"Validation Failed","errors":'
+                        "[\"Invalid rule 'merge_queue': \"]}",
+                        stderr="gh: Validation Failed (HTTP 422)",
+                    )
+                return SimpleNamespace(stdout="")
+            return super().__call__(cmd, **kwargs)
+
+    gh = _BodyOnly(_repo("Organization", "private"))
+    assert main(["--repo", "acme/repo", "--yes"], runner=gh) == 0
+    assert [("merge_queue" in _rule_types(w)) for w in gh.ruleset_writes] == [
+        True,
+        False,
+    ]
