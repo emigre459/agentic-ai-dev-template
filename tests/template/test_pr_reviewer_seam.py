@@ -521,3 +521,19 @@ def test_coderabbit_notes_hedge_the_status_type_and_cap_review_size() -> None:
 
 def test_bugbot_notes_explain_the_stale_summary() -> None:
     assert "BUGBOT_REVIEW_STALE" in (_NOTES_DIR / "bugbot.md").read_text()
+
+
+def test_the_pr_round_budget_is_scoped_away_from_a_local_reviewer() -> None:
+    """pr_round_caps zeroes a local reviewer's PR caps.
+
+    So ``final_review_due`` reads true from the first read and ``trigger_allowed``
+    false: the prose must route a local reviewer to ``local_review`` instead, or it
+    would post its final review before any local round and stop fixing after it.
+    """
+    section = _section(_flat(_SKILL), "### Review-round budget")
+    assert "govern PR-round reviewers only" in section
+    assert "local_review.configured: true" in section
+    step5a = _section(_flat(_SKILL), "## Step 5a:")
+    assert "for a reviewer without a local review, `round_budget.final_review_due`" in (
+        step5a
+    )

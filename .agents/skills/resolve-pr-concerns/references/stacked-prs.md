@@ -19,7 +19,7 @@ Reporting and the merge gate · Landing — the human's call · Gotchas
 gh api "repos/<owner>/<repo>/stacks?pull_request=<num>" --jq '.[].pull_requests[].number'
 ```
 
-No output (exit 0) means the PR is in no stack. PR numbers, bottom first, mean it is
+No output (exit 0), or a 404 (a repository without the stacks API), means the PR is in no stack. PR numbers, bottom first, mean it is
 a layer. When this worktree tracks the stack, `gh stack view --json` gives the same
 list; a session resuming in another worktree rebuilds the tracking with
 `gh stack checkout <PR-number>`.
@@ -73,9 +73,11 @@ on the user's machine.
 **Never merge `main` into a layer.** A stack must stay linear, and the merge refuses
 otherwise. Rebasing layers (which `gh stack` does with `--force-with-lease`) is the
 one exception to the merge-don't-rebase habit for branches with review history.
-When GitHub reports a layer `CONFLICTING` / `DIRTY` (or `BEHIND` under an
-up-to-date rule), catch up with `gh stack sync` (or `gh stack rebase`, resolve,
-`gh stack rebase --continue`), then `gh stack push`. A sync can move every layer, so
+When GitHub reports a layer `CONFLICTING` / `DIRTY`, catch up at once; a layer
+that is only `BEHIND` (which blocks only under the up-to-date rule) is caught up
+once, at the end, never mid-review (next paragraph). To catch up, run
+`gh stack sync` (or `gh stack rebase`, resolve, `gh stack rebase --continue`), then
+`gh stack push`. A sync can move every layer, so
 compare the layers' heads before and after (`git rev-parse <branch>` and the remote),
 re-read CI on each layer whose head changed, and trigger only where `needs_trigger`
 is true.
@@ -161,6 +163,9 @@ stack.
    print `Staged '<file>' using previous resolution` with another session's
    resolution. Check the file holds exactly this layer's content before
    `git rebase --continue`; `git rerere forget <path>` drops a bad entry.
+Gotchas 9 and 10 change the stack's state (unstack, retarget, reopen, re-enqueue):
+take those steps only under the landing permission, or at the human's direction.
+
 9. **A lower layer landed but the next PR wasn't retargeted.** Its base still names
    the merged branch, and landing fails on a base conflict the PR page can't show.
    Reopen any closed layer first. Then `gh stack sync` (drops the merged layer and
