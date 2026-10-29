@@ -585,7 +585,7 @@ End with a short status summary:
 - Answering a refused (rate-limited) request with a different request, or re-posting it before `rate_limit.retry_after` — wait, then re-post the SAME request ("Review requests and the rate limit").
 - Posting the trigger comment for a reviewer that reviews locally — its fix rounds go through `local_review.py`; the PR's one request is the final full review.
 - About to `git merge origin/<base>` into a stack layer, or `gh pr merge` a layer, or call a stack merge-ready from its top layer alone (`references/stacked-prs.md`).
-- About to install `gh stack` (or anything else) on the user's machine — show them the command instead.
+- About to install `gh stack` (or any other CLI extension or system tool) on the user's machine — show them the command instead.
 - A concern shows up in a category you don't recognize (e.g. a third-party SAST bot you haven't seen) — surface it to the user, don't auto-classify.
 - The fix would conflict with the user's stated intent in the PR description — ask before changing direction.
 - Tests pass after a fix but the fix doesn't actually address the reviewer's concern (you treated the symptom, not the cause).

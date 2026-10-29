@@ -27,8 +27,8 @@ list; a session resuming in another worktree rebuilds the tracking with
 Fixing a layer needs the extension. Check with `gh stack --help`. If it is missing,
 tell the user and show them the commands to run themselves:
 `gh extension install github/gh-stack` (and, optionally, its agent skill:
-`npx skills add github/gh-stack`). The agent never installs it, or anything else,
-on the user's machine.
+`npx skills add github/gh-stack`). The agent never installs CLI extensions or
+system tools on the user's machine itself.
 
 ## Driving the review
 
@@ -125,7 +125,10 @@ stack.
   bottom-up (possibly in separate groups). `main` moving underneath is the queue's
   job, not yours.
 - **Without a merge queue**, the stack merge lands the layers bottom-up as one
-  all-or-nothing operation, and each layer's own PR checks gate it. If a lower
+  all-or-nothing operation, and each layer's own PR checks gate it. Pass the repo's
+  allowed merge method explicitly — `gh stack merge <top-PR> --yes --squash` in this
+  template, which allows squash merges only (with `--yes` and no method,
+  `gh stack merge` uses your last-used one). If a lower
   layer lands on its own (an early landing, which needs a stated reason in the PR
   thread), the layer above it must be **retargeted to the new base and rebased onto
   it before it lands**; a stack-aware merge does this, and `gh stack sync` afterwards
@@ -163,6 +166,7 @@ stack.
    print `Staged '<file>' using previous resolution` with another session's
    resolution. Check the file holds exactly this layer's content before
    `git rebase --continue`; `git rerere forget <path>` drops a bad entry.
+
 Gotchas 9 and 10 change the stack's state (unstack, retarget, reopen, re-enqueue):
 take those steps only under the landing permission, or at the human's direction.
 

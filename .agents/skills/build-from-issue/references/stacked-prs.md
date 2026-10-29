@@ -33,7 +33,7 @@ gh extension install github/gh-stack
 npx skills add github/gh-stack    # optional: the extension's own agent skill
 ```
 
-The agent never installs it, or anything else, on the user's machine. Without the
+The agent never installs CLI extensions or system tools on the user's machine itself. Without the
 extension, deliver the plan as one PR (or wait for the user to install it).
 
 ## When to stack
@@ -80,7 +80,8 @@ A plan may still record the decision explicitly with `Stack: none - <reason>`.
   fine.
 - **Don't pad layers.** Aim for a few hundred to roughly 1.5k changed lines each.
 - **Every layer must be one the reviewer can review.** A layer over the configured
-  reviewer's file limit (its notes file says if it has one) can't get `review-gate`
+  reviewer's file limit (`resolve-pr-concerns`' `references/reviewers/<active>.md`
+  says if it has one) can't get `review-gate`
   green, and a stack can't be merged with a ruleset bypass. Land such a change as its
   own PR first and build the stack on top of it.
 - **Prefer one new test file per layer** when several layers would append tests to the
@@ -146,7 +147,8 @@ tasks by layer. A plan without a `## Stack` section is a single PR.
 ## Finalize
 
 This replaces the single-PR path of Step 11; `finishing-a-development-branch` still
-owns test verification and the cleanup checks.
+owns test verification and the cleanup checks, but its push/PR option is not taken:
+`gh stack push` pushes the layers and `gh stack submit` opens their PRs.
 
 1. **Local gate.** `make pr_check` on the **top** layer (it contains every layer's
    change) must exit 0, plus `make lint` on each lower layer, bottom-up
@@ -188,7 +190,10 @@ permission** for this stack. The whole stack lands from its top PR
   the queue tests each against the latest `main` and lands them bottom-up. `main`
   moving underneath is the queue's job.
 - **Without a merge queue**, each layer's own PR checks gate it, and the stack lands
-  bottom-up. If a lower layer lands on its own, the layer above must be retargeted
+  bottom-up. Pass the repo's allowed merge method explicitly —
+  `gh stack merge <top-PR> --yes --squash` in this template, which allows squash
+  merges only (with `--yes` and no method, `gh stack merge` uses your last-used
+  one). If a lower layer lands on its own, the layer above must be retargeted
   to the new base and **rebased onto it before it lands** (a stack-aware merge does
   this; `gh stack sync` updates the local branches afterwards).
 
@@ -198,8 +203,10 @@ layer, catching up with the trunk, recovering a layer that wasn't retargeted).
 ## Gotchas
 
 1. **Never merge `main` into a layer.** A stack must stay linear. Catch up with
-   `gh stack sync` or `gh stack rebase` — and only when GitHub reports a conflict,
-   never mid-review just to be current.
+   `gh stack sync` or `gh stack rebase`: at once when GitHub reports a layer
+   `CONFLICTING` / `DIRTY`; a layer that is only `BEHIND` (which blocks only under
+   the up-to-date rule) is caught up once, at the end — never mid-review just to be
+   current.
 2. **Stack tracking is per worktree.** Removing the worktree loses it; a session
    resuming elsewhere rebuilds it with `gh stack checkout <PR-number>`.
 3. **Use non-interactive forms only**, e.g. `gh stack view --json`,
