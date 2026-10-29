@@ -7,6 +7,16 @@
     "max_local_before_final": 3,
     "max_local_after_final": 3
   },
+  "test_speed": {
+    "_note": "Budgets are seconds on a typical runner of the class, scaled by this machine's measured speed; the benchmark is Python and stands in for single-thread CPU speed on React too, where tests are judged on their full time (no shared-setup split).",
+    "budget_seconds": 10,
+    "recheck_fraction": 0.6,
+    "factor_low": 0.5,
+    "factor_high": 2.0,
+    "shared_setup_budget_seconds": 30,
+    "default_runner_class": "ubuntu-latest",
+    "reference_seconds": {"ubuntu-latest": 0.874}
+  },
   "reviewers": {
     "bugbot": {
       "display_name": "Cursor Bugbot",
