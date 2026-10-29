@@ -84,6 +84,17 @@ command with `{base}`, and how its output marks findings and completion) plus a
 (a local reviewer's one PR request is its final full review); the skills need no
 change.
 
+## CODEOWNERS and `review-gate`
+
+If the default branch has a CODEOWNERS file (`.github/CODEOWNERS`, `CODEOWNERS` or
+`docs/CODEOWNERS`), `review-gate` also fails while a changed path's owner hasn't
+approved the head (`@<owner> must approve: …`), whatever Bugbot's verdict. It resolves
+user logins only: a CODEOWNERS line naming a team (`@org/team`) or an email owner,
+alone or beside users, is skipped by this gate (as is a line with `!`, `[...]` or `\`
+in its pattern) and its paths are left to GitHub's own "Require review from Code
+Owners" rule, so turn that rule on if you rely on team owners. Without a CODEOWNERS
+file the ownership half does nothing.
+
 ## Threads
 
 - `self_resolves_threads: true` — Bugbot resolves its own addressed threads once a

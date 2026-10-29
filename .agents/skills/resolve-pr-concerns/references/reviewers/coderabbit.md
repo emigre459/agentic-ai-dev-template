@@ -220,6 +220,17 @@ prose names no vendor; read this file before interpreting a review when
   changes) — those are not inline findings and don't affect the verdict; read them
   as ordinary PR feedback.
 
+## CODEOWNERS and `review-gate`
+
+If the default branch has a CODEOWNERS file (`.github/CODEOWNERS`, `CODEOWNERS` or
+`docs/CODEOWNERS`), `review-gate` also fails while a changed path's owner hasn't
+approved the head (`@<owner> must approve: …`), whatever CodeRabbit's verdict. It
+resolves user logins only: a CODEOWNERS line naming a team (`@org/team`) or an email
+owner, alone or beside users, is skipped by this gate (as is a line with `!`, `[...]`
+or `\` in its pattern) and its paths are left to GitHub's own "Require review from
+Code Owners" rule, so turn that rule on if you rely on team owners. Without a
+CODEOWNERS file the ownership half does nothing.
+
 ## Threads
 
 - **(observed)** `self_resolves_threads: true` — CodeRabbit resolves its own thread

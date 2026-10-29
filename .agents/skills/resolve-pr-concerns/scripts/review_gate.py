@@ -5,10 +5,17 @@ The PR reviewer's own status check passes on heads it never reviewed (skipped or
 rate-limited pushes), so a ruleset should require this status instead. It is green
 only when the configured reviewer (``.github/pr-reviewer.json``) has a verdict on the
 current head AND its final full review finished -- the state ``reviewer_state``
-reports. A reviewer with a local review runs its fix rounds off the PR, so its gate
-is the final full review finished with every reviewer thread resolved, whatever the
-head. Run by ``.github/workflows/review-gate.yml`` from the default branch; never
-from PR code.
+reports. A verdict carried onto a rebase-only head (``verdict_carried_from``) counts
+like one on the head itself. A reviewer with a local review runs its fix rounds off
+the PR, so its gate is the final full review finished with every reviewer thread
+resolved, whatever the head.
+
+With a CODEOWNERS file (see ``path_owners``), a PR touching a path its author
+doesn't own also needs that path's owner to approve the head; that half is reported
+first. CODEOWNERS alone turns the status on: with no reviewer configured
+(``"active": null``) the status is the ownership half only. With neither, nothing is
+posted. Run by ``.github/workflows/review-gate.yml`` from the default branch's
+checkout, never from PR code, so a PR can't loosen the CODEOWNERS that gates it.
 """
 
 from __future__ import annotations
@@ -20,11 +27,16 @@ import subprocess  # nosec B404 -- fixed gh argv, no shell
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
+import path_owners
 import reviewer_state
 
 STATUS_CONTEXT = "review-gate"
+# scripts/ -> resolve-pr-concerns/ -> skills/ -> .agents/ -> repo root. The workflow
+# checks out the default branch, so the CODEOWNERS read here is the default branch's.
+REPO_ROOT = Path(__file__).resolve().parents[4]
+OWNERSHIP_CLEAR = "no changed path needs another owner's approval"
 _MAX_DESCRIPTION = 140  # GitHub rejects longer status descriptions
 # Posts per run before giving up on a state that keeps changing (the sweep retries).
 _MAX_POSTS = 5
@@ -35,17 +47,46 @@ def _clip(text: str) -> str:
 
 
 def gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
-    """Return (status state, description) for one PR's ``collect_state`` output."""
+    """Return (status state, description) for one PR's ``collect_state`` output.
+
+    Parameters
+    ----------
+    state : Mapping[str, Any]
+        Reviewer state as returned by ``reviewer_state.collect_state``.
+
+    Returns
+    -------
+    tuple[str, str]
+        The commit-status state (``success``, ``pending`` or ``failure``) and its
+        clipped description.
+    """
     if (state.get("local_review") or {}).get("configured"):
         return _local_gate_status(state)
     name, sha7 = state["reviewer_name"], state["head_sha"][:7]
+    trigger = state["trigger_comment"]
     if state["verdict"] not in ("pass", "findings"):
-        return "failure", _clip(
-            f"{name} has not reviewed {sha7}: post `{state['trigger_comment']}`"
-        )
+        # Pending, not failure: the reviewer's reply edit re-runs this workflow.
+        if state.get("review_running"):
+            return "pending", _clip(f"{name} is reviewing {sha7}")
+        if state.get("incremental_review_outcome") in ("failed", "not_completed"):
+            return "failure", _clip(
+                f"{name}'s last review request did not complete: "
+                f"post `{trigger}` for {sha7}"
+            )
+        return "failure", _clip(f"{name} has not reviewed {sha7}: post `{trigger}`")
     final = state["final_review_outcome"]
     command = state.get("final_review_comment")
     if final in ("finished", "not_required"):
+        source = state.get("verdict_carried_from")
+        if source:
+            why = (
+                "same diff"
+                if state.get("verdict_carry_reason") == "same_patch"
+                else "nothing new to review"
+            )
+            return "success", _clip(
+                f"{name}'s verdict on {source[:7]} carries to {sha7} ({why})"
+            )
         return "success", _clip(f"{name} reviewed {sha7}")
     if final == "not_requested":
         return "failure", _clip(
@@ -117,6 +158,101 @@ def _gh_output(args: Sequence[str]) -> str:
     ).stdout
 
 
+class OwnershipInputs(NamedTuple):
+    """What the ownership half of the gate reads from a PR.
+
+    Attributes
+    ----------
+    author : str
+        The PR author's login.
+    changed_files : int
+        GitHub's count of changed files (may exceed ``files`` when truncated).
+    files : list[str]
+        The changed files as listed.
+    renamed_from : list[str]
+        Old paths of renamed files.
+    reviews : list[Mapping[str, Any]]
+        The PR's reviews, oldest first.
+    """
+
+    author: str
+    changed_files: int
+    files: list[str]
+    renamed_from: list[str]
+    reviews: list[Mapping[str, Any]]
+
+
+def _ownership_inputs(repo: str, pr: int) -> OwnershipInputs:
+    pull = reviewer_state._gh_json(["api", f"repos/{repo}/pulls/{pr}"])
+    listed = (
+        reviewer_state._gh_json(
+            ["api", "--paginate", f"repos/{repo}/pulls/{pr}/files?per_page=100"]
+        )
+        or []
+    )
+    reviews = (
+        reviewer_state._gh_json(
+            ["api", "--paginate", f"repos/{repo}/pulls/{pr}/reviews?per_page=100"]
+        )
+        or []
+    )
+    return OwnershipInputs(
+        author=pull["user"]["login"],
+        changed_files=int(pull["changed_files"]),
+        files=[f["filename"] for f in listed],
+        renamed_from=[
+            f["previous_filename"] for f in listed if f.get("previous_filename")
+        ],
+        reviews=reviews,
+    )
+
+
+def _head_sha(repo: str, pr: int) -> str:
+    """Return the PR's head commit (the reviewer state reads it when there is one)."""
+    pull = reviewer_state._gh_json(["api", f"repos/{repo}/pulls/{pr}"])
+    return str(pull["head"]["sha"])
+
+
+def _codeowners_rules() -> list[path_owners.Rule] | None:
+    """Return the checkout's CODEOWNERS rules, or None when it has no CODEOWNERS."""
+    path = path_owners.find_codeowners(REPO_ROOT)
+    return None if path is None else path_owners.load_rules(path)
+
+
+def ownership_gate_status(repo: str, pr: int, head_sha: str) -> tuple[str, str] | None:
+    """Return the ownership half of the gate for ``pr``, or None without CODEOWNERS.
+
+    Parameters
+    ----------
+    repo : str
+        Repository as ``owner/name``.
+    pr : int
+        Pull request number.
+    head_sha : str
+        The head the gate is being computed for.
+
+    Returns
+    -------
+    tuple[str, str] or None
+        ``("failure", description)`` while a path owner's approval is missing,
+        ``("success", OWNERSHIP_CLEAR)`` when none is, or None when the default
+        branch has no CODEOWNERS file (the PR isn't read at all).
+    """
+    rules = _codeowners_rules()
+    if rules is None:
+        return None
+    pr_in = _ownership_inputs(repo, pr)
+    status = path_owners.ownership_status(
+        rules,
+        pr_in.files,
+        pr_in.author,
+        path_owners.approvers(pr_in.reviews, head_sha),
+        changed_files=pr_in.changed_files,
+        renamed_from=pr_in.renamed_from,
+    )
+    return status or ("success", OWNERSHIP_CLEAR)
+
+
 def _current_gate_status(repo: str, sha: str) -> tuple[str, str] | None:
     """Return the newest ``review-gate`` (state, description) on ``sha``, if any.
 
@@ -165,8 +301,34 @@ def _post(repo: str, sha: str, state: str, description: str) -> None:
     _gh(args)
 
 
-def post_for_pr(repo: str, pr: int, adapter: reviewer_state.ReviewerAdapter) -> None:
+def _want(
+    repo: str, pr: int, adapter: reviewer_state.ReviewerAdapter | None
+) -> tuple[str, tuple[str, str] | None]:
+    """Return (head SHA, status to post) for ``pr``; no status when nothing gates it.
+
+    A missing owner's approval wins (it is the slower, human half); otherwise the
+    reviewer's gate decides, or the ownership half alone when there is no reviewer.
+    """
+    if adapter is None:
+        head_sha = _head_sha(repo, pr)
+        return head_sha, ownership_gate_status(repo, pr, head_sha)
+    state = reviewer_state.collect_state(repo, pr, adapter)
+    head_sha = state["head_sha"]
+    owners = ownership_gate_status(repo, pr, head_sha)
+    if owners is not None and owners[0] == "failure":
+        return head_sha, owners
+    return head_sha, gate_status(state)
+
+
+def post_for_pr(
+    repo: str, pr: int, adapter: reviewer_state.ReviewerAdapter | None
+) -> None:
     """Compute the gate for ``pr`` and post it on the head it was computed for.
+
+    The gate fails while a path owner's approval is missing, whatever the reviewer's
+    state; otherwise it is the reviewer's gate (``gate_status``). With no reviewer
+    (``adapter`` None) it is the ownership half alone, and nothing is posted when
+    there is no CODEOWNERS file either.
 
     Runs are never cancelled (a cancelled run is a red X on the PR and on `main`),
     so several can overlap. A run posts only when the head's newest status differs
@@ -174,19 +336,33 @@ def post_for_pr(repo: str, pr: int, adapter: reviewer_state.ReviewerAdapter) -> 
     overlapping run's stale result lands on top, the next pass puts the fresh one
     back. Skipping unchanged statuses also keeps the periodic sweep well under
     GitHub's 1,000-statuses-per-SHA limit.
+
+    Parameters
+    ----------
+    repo : str
+        Repository as ``owner/name``.
+    pr : int
+        Pull request number.
+    adapter : reviewer_state.ReviewerAdapter or None
+        Configured reviewer adapter, or None when no reviewer is active.
     """
     posts = 0
     while True:
-        state = reviewer_state.collect_state(repo, pr, adapter)
-        want = gate_status(state)
+        head_sha, want = _want(repo, pr, adapter)
         # Never a later head: a push mid-run triggers its own run for the new head.
-        if _current_gate_status(repo, state["head_sha"]) == want or posts == _MAX_POSTS:
+        if (
+            want is None
+            or _current_gate_status(repo, head_sha) == want
+            or posts == _MAX_POSTS
+        ):
             return
-        _post(repo, state["head_sha"], *want)
+        _post(repo, head_sha, *want)
         posts += 1
 
 
-def post_for_all_open_prs(repo: str, adapter: reviewer_state.ReviewerAdapter) -> None:
+def post_for_all_open_prs(
+    repo: str, adapter: reviewer_state.ReviewerAdapter | None
+) -> None:
     """Recompute every open PR (the periodic sweep heals any status left stale).
 
     One PR's failure doesn't stop the rest; the run fails at the end if any did.
@@ -226,13 +402,17 @@ def main() -> None:
     if args.merge_group_sha:
         post_for_merge_group(args.repo, args.merge_group_sha)
         return
+    adapter: reviewer_state.ReviewerAdapter | None
     try:
         adapter = reviewer_state.load_reviewer(args.config)
     except reviewer_state.NoActiveReviewer as exc:
-        # Nothing to gate. Post nothing: a ruleset that requires review-gate with no
-        # reviewer active stays blocked, which is the right signal.
-        print(f"::notice::{exc}")
-        return
+        adapter = None
+        if _codeowners_rules() is None:
+            # Nothing to gate. Post nothing: a ruleset that requires review-gate
+            # with no reviewer active stays blocked, which is the right signal.
+            print(f"::notice::{exc}")
+            return
+        print(f"::notice::{exc} Posting the CODEOWNERS half of the gate only.")
     if args.all_open:
         post_for_all_open_prs(args.repo, adapter)
     else:
