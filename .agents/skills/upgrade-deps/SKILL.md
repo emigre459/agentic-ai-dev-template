@@ -18,10 +18,10 @@ One PR that brings every dependency current, security fixes first, with the same
 **Bundled script** (run it from the repo root; path is relative to this skill's directory, e.g. `${CLAUDE_SKILL_DIR}` in Claude Code, `.agents/skills/upgrade-deps/` canonically):
 
 ```bash
-python3 <skill-dir>/scripts/alert_status.py --repo <owner>/<repo>
+uv run python <skill-dir>/scripts/alert_status.py --repo <owner>/<repo>
 ```
 
-It reads the open Dependabot alerts and tests every version locked in each alert's lockfile (nested copies included) against the alert's vulnerable range. Per alert: `cleared`, `open`, or `unknown` (lockfile or range unreadable). Exit 0 only when every alert is `cleared`; 1 otherwise; 64 when `gh` fails. Run it before and after — the Dependabot UI only catches up once the fix reaches the default branch, so on a refresh branch this script is the check.
+It needs Python 3.11+ (`tomllib`), hence `uv run python`; under an older `python3` it exits 64 and says so. It reads the open Dependabot alerts and tests every version locked in each alert's lockfile (nested copies included) against the alert's vulnerable range. Per alert: `cleared`, `open`, or `unknown` (lockfile or range unreadable). Exit 0 only when every alert is `cleared`; 1 otherwise; 64 when `gh` fails or the interpreter is too old. Run it before and after — the Dependabot UI only catches up once the fix reaches the default branch, so on a refresh branch this script is the check.
 
 ## Rules
 
@@ -42,8 +42,10 @@ It reads the open Dependabot alerts and tests every version locked in each alert
 ```bash
 gh pr list --repo <owner>/<repo> --state open --json number,title,author,headRefName,files \
   --jq '.[] | select(.author.login | test("dependabot|renovate"))'
-python3 <skill-dir>/scripts/alert_status.py --repo <owner>/<repo>
-gh pr list --repo <owner>/<repo> --state merged --search "upgrade-deps in:body" --limit 1 --json number,body
+uv run python <skill-dir>/scripts/alert_status.py --repo <owner>/<repo>
+gh pr list --repo <owner>/<repo> --state merged --search "upgrade-deps in:body" --limit 50 \
+  --json number,body,mergedAt \
+  --jq '[.[] | select(.body | contains("<!-- upgrade-deps -->"))] | max_by(.mergedAt) // empty | {number, body}'
 ```
 
 - **Bot PRs:** for each, `gh pr diff <n>` and note the *manifest* changes (version ranges in `pyproject.toml` / `package.json`, a `[build-system]` requirement, a workflow `uses:` pin). Their lockfile changes are ignored (Rules).
@@ -68,6 +70,7 @@ Apply each bot PR's manifest change, then relock with the tool. Keep the groups 
 
 ## Step 4: Bump everything else
 
+- **Overrides first:** every existing override (bun `overrides`, uv `constraint-dependencies`) pins a version *by force*, and after a major bump it can pin below what a parent now asks for — silently, since the override wins. Remove each one, relock, and re-run the audit / `alert_status.py`; keep it only if a fix still needs it.
 - **uv projects:** `uv lock --upgrade` in each. It never touches `[build-system] requires` (build requirements aren't locked): bump those only by editing the manifest, as a bot PR proposes.
 - **bun projects:** `bun update --latest` in each (this crosses majors and rewrites `package.json` ranges).
 - **GitHub Actions:** only the `uses:` pins a bot PR proposed; there is no relock tool.
@@ -100,7 +103,7 @@ make deps
 make pr_check
 make coverage
 make security
-python3 <skill-dir>/scripts/alert_status.py --repo <owner>/<repo>   # must exit 0
+uv run python <skill-dir>/scripts/alert_status.py --repo <owner>/<repo>   # must exit 0
 ```
 
 `make security` covers what each stack's scanner covers (a JS dependency audit, a Python SAST scan); `alert_status.py` covers the Dependabot alerts across every lockfile.

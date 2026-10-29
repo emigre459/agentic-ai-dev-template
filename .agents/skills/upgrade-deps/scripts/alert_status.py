@@ -24,18 +24,24 @@ import json
 import re
 import subprocess  # nosec B404 -- fixed gh argv, no shell
 import sys
-import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11; main() reports it as a usage error
+    tomllib = None  # type: ignore[assignment]
+
 #: ``argv -> stdout``; raises ``GhError`` when the command fails.
 Runner = Callable[[Sequence[str]], str]
 
-_LOCKFILES = ("uv.lock", "bun.lock")
+#: Alert ecosystem -> the lockfile that pins it.
+_LOCKFILE_FOR_ECOSYSTEM = {"pip": "uv.lock", "npm": "bun.lock"}
 _CLAUSE = re.compile(r"^\s*(<=|>=|<|>|=)\s*(\S+)\s*$")
 _RELEASE = re.compile(r"^v?(\d+(?:\.\d+)*)(.*)$")
 _POST = re.compile(r"^[.-]?(?:post|rev|r)\d*$", re.IGNORECASE)
+_SUFFIX_TOKEN = re.compile(r"\d+|[a-z]+")
 # A bun.lock package entry: `"<key>": ["<name>@<version>", ...`
 _BUN_ENTRY = re.compile(r'^\s*"[^"]+":\s*\["(?P<spec>[^"]+)"')
 
@@ -44,7 +50,18 @@ class GhError(RuntimeError):
     """A ``gh`` command failed."""
 
 
-def _version_key(version: str) -> tuple[tuple[int, ...], int, str]:
+_SuffixKey = tuple[tuple[int, int, str], ...]
+
+
+def _suffix_key(rest: str) -> _SuffixKey:
+    """Order a pre/post suffix token by token: numbers as numbers (beta.2 < beta.10)."""
+    return tuple(
+        (0, int(token), "") if token.isdigit() else (1, 0, token)
+        for token in _SUFFIX_TOKEN.findall(rest.lower())
+    )
+
+
+def _version_key(version: str) -> tuple[tuple[int, ...], int, _SuffixKey]:
     """Sort key: release numbers, then pre (0) < release (1) < post (2)."""
     match = _RELEASE.match(version.split("+", 1)[0].strip())
     if not match:
@@ -54,10 +71,10 @@ def _version_key(version: str) -> tuple[tuple[int, ...], int, str]:
         release = release[:-1]
     rest = match.group(2)
     if not rest:
-        return (release, 1, "")
+        return (release, 1, ())
     if _POST.match(rest):
-        return (release, 2, rest.lower())
-    return (release, 0, rest.lower())
+        return (release, 2, _suffix_key(rest))
+    return (release, 0, _suffix_key(rest))
 
 
 def in_range(version: str, vulnerable_range: str) -> bool:
@@ -95,19 +112,22 @@ def _normalize_pypi(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def lockfile_for(root: Path, manifest_path: str) -> Path | None:
+def lockfile_for(root: Path, manifest_path: str, ecosystem: str) -> Path | None:
     """Return the lockfile that pins the packages an alert's manifest declares.
 
-    A lockfile maps to itself; any other manifest maps to a lockfile beside it.
+    The alert's ecosystem picks the lockfile (``pip`` -> ``uv.lock``, ``npm`` ->
+    ``bun.lock``), so a folder holding both never checks an alert against the wrong
+    one. A lockfile manifest maps to itself; any other manifest to the lockfile
+    beside it. ``None`` when the ecosystem is unsupported or doesn't match.
     """
+    name = _LOCKFILE_FOR_ECOSYSTEM.get(ecosystem)
     manifest = root / manifest_path
-    if manifest.name in _LOCKFILES:
-        return manifest
-    for name in _LOCKFILES:
-        candidate = manifest.parent / name
-        if candidate.is_file():
-            return candidate
-    return None
+    if name is None:
+        return None
+    if manifest.name in _LOCKFILE_FOR_ECOSYSTEM.values():
+        return manifest if manifest.name == name else None
+    candidate = manifest.parent / name
+    return candidate if candidate.is_file() else None
 
 
 def _uv_versions(lockfile: Path, package: str) -> list[str]:
@@ -156,7 +176,7 @@ def status_of(alert: Mapping[str, Any], root: Path) -> dict[str, Any]:
     vulnerability = alert.get("security_vulnerability") or {}
     vulnerable = vulnerability.get("vulnerable_version_range", "")
     patched = (vulnerability.get("first_patched_version") or {}).get("identifier")
-    lockfile = lockfile_for(root, dependency.get("manifest_path", ""))
+    lockfile = lockfile_for(root, dependency.get("manifest_path", ""), ecosystem)
     result: dict[str, Any] = {
         "number": alert.get("number"),
         "severity": (alert.get("security_advisory") or {}).get("severity"),
@@ -232,6 +252,13 @@ def main(argv: Sequence[str] | None = None, runner: Runner = _run_gh) -> int:
         "--root", type=Path, default=Path.cwd(), help="repo root (default: cwd)"
     )
     args = parser.parse_args(argv)
+    if tomllib is None:
+        print(
+            "alert_status.py needs Python 3.11+ (tomllib); run it with "
+            "`uv run python`.",
+            file=sys.stderr,
+        )
+        return 64
     try:
         if args.repo:
             alerts = fetch_open_alerts(args.repo, runner)
