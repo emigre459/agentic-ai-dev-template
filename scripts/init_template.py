@@ -15,8 +15,9 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     # Type-only: this file runs as a plain script, where `scripts.` isn't importable.
@@ -160,7 +161,10 @@ def filter_html_markers(text: str, keep: str) -> str:
     """Drop the non-kept stack's HTML-marker blocks; unwrap the kept stack's markers."""
     other = _other(keep)
     text = re.sub(
-        rf"<!-- STACK:{other} -->.*?<!-- /STACK:{other} -->\n?", "", text, flags=re.S
+        rf"<!-- STACK:{other} -->.*?<!-- /STACK:{other} -->\n?",
+        "",
+        text,
+        flags=re.DOTALL,
     )
     text = re.sub(rf"<!-- /?STACK:{keep} -->\n?", "", text)
     return text
@@ -178,9 +182,11 @@ def filter_yaml_markers(text: str, keep: str) -> str:
             rf"^[ \t]*# >>> STACK:{name}\b.*?^[ \t]*# <<< STACK:{name}\b.*?\n",
             "",
             text,
-            flags=re.S | re.M,
+            flags=re.DOTALL | re.MULTILINE,
         )
-    text = re.sub(rf"^[ \t]*# (?:>>>|<<<) STACK:{keep}\b.*?\n", "", text, flags=re.M)
+    text = re.sub(
+        rf"^[ \t]*# (?:>>>|<<<) STACK:{keep}\b.*?\n", "", text, flags=re.MULTILINE
+    )
     return text
 
 
@@ -194,14 +200,17 @@ def strip_stack_job_prefix(text: str, stack: str) -> str:
         rf"^  {re.escape(stack)}-({'|'.join(_CI_JOBS)}):",
         r"  \1:",
         text,
-        flags=re.M,
+        flags=re.MULTILINE,
     )
 
 
 def strip_interview(text: str) -> str:
     """Remove the README interview prompt block."""
     return re.sub(
-        r"<!-- INTERVIEW:start -->.*?<!-- INTERVIEW:end -->\n?", "", text, flags=re.S
+        r"<!-- INTERVIEW:start -->.*?<!-- INTERVIEW:end -->\n?",
+        "",
+        text,
+        flags=re.DOTALL,
     )
 
 

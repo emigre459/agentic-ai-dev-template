@@ -21,13 +21,14 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 if TYPE_CHECKING:
     # Aliases live here because this stdlib-only script may run under an older
     # system python3, where a runtime ``int | None`` inside an alias would fail.
-    from typing import TypeAlias
+    # Plain assignments, not ``type X = ...`` (a SyntaxError before 3.12, even
+    # here) or ``TypeAlias`` (ruff UP040); mypy reads these as aliases.
 
     # A decoded GitHub JSON object. Values are mixed (strings, booleans, lists,
     # nested objects), so ``dict[str, str]`` would be wrong; keys are always str.
-    JsonObject: TypeAlias = dict[str, Any]
+    JsonObject = dict[str, Any]
     # One planned change: (setting kind, HTTP method, ruleset id for a PUT).
-    Action: TypeAlias = tuple[
+    Action = tuple[
         Literal["ruleset", "merge", "security"],
         Literal["POST", "PUT", "PATCH"],
         int | None,

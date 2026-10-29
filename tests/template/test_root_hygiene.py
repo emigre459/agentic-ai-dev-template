@@ -78,6 +78,7 @@ def _gitignored_tracked_files() -> list[str]:
         input="\0".join(tracked) + "\0",
         capture_output=True,
         text=True,
+        check=False,
     )
     if proc.returncode not in (0, 1):
         raise RuntimeError(
@@ -93,6 +94,7 @@ def _is_ignored(rel_path: str) -> bool:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        check=False,
     )
     if proc.returncode not in (0, 1):
         raise RuntimeError(
