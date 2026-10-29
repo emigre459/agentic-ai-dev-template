@@ -39,6 +39,8 @@ builder's working notes; this document carries every decision they fed.
 3. Every helper a skill calls lives in that skill's own folder and runs on stdlib
    `python3` (or POSIX `sh`); no skill invokes another skill's scripts.
 4. `make pr_check` passes, including the skill tests, and `pr_check` now mirrors CI.
+5. Every repo built from the template ships a per-test speed guard, so a high-coverage
+   suite can't quietly grow slow tests that make CI and development painful.
 
 ## Non-goals
 
@@ -47,8 +49,6 @@ builder's working notes; this document carries every decision they fed.
 - Cross-tracker routing in plan-issues (twin cards in a second tracker). That is a
   per-repo customization and belongs to #48. This card only removes the orphaned
   tracker wording canonical still carries.
-- The per-test speed guard (`check_test_speed.py`) as a script; it is repo CI
-  infrastructure, not a skill helper (follow-up card).
 - The downstream `review-gate.yml` comment-edit filter (it hard-codes one vendor's
   phrases into a vendor-neutral workflow).
 - The downstream "light check" scope rule for doc-only diffs (no such rule here).
@@ -76,7 +76,8 @@ builder's working notes; this document carries every decision they fed.
 1. **Scope** includes stacked PRs and the merge gate (beyond the initial proposal).
 2. **CODEOWNERS ownership gate** ships only in a form where a repo without a
    CODEOWNERS file never sees it.
-3. **`make pr_check` = lint + coverage + security**, matching CI's required jobs;
+3. **`make pr_check` = lint + coverage + security** (plus the speed check, decision
+   13), matching CI's required jobs;
    the pr-check skill then truthfully says it mirrors CI.
 4. **`wait_for_pr_checks` and `human_review` move to stdlib python3** (both are
    bash + `jq` today, in canonical and downstream alike).
@@ -106,6 +107,12 @@ builder's working notes; this document carries every decision they fed.
     the skills detect a missing extension and show the user the commands; they never
     install it themselves. (Had install machinery existed, it would have needed a
     loud, explicit human Y/N before installing anything locally.)
+13. **The per-test speed guard is folded into this card.** Every test gets a budget of
+    **10 seconds**, kept **dynamic**: it means "10 s on a typical runner of this
+    class" and is scaled by the measured speed of the machine running it. The budget
+    and the other knobs live in **one shared config file** that both stacks read, so
+    the Python and React stacks stay in sync, including in a repo initialized with
+    only one of them.
 
 ## Design, per skill
 
@@ -288,13 +295,68 @@ NumPy docstrings. New tests cover these, plus a smoke test that every skill unde
 
 ### pr-check, Makefiles, docs
 
-- Root `Makefile`: `pr_check: lint machinery_tests coverage security`. Each stack
-  `Makefile`: `pr_check: lint coverage security`. `make tests` stays the fast
-  iteration target (not the gate).
-- pr-check skill: describes the three components and says it mirrors CI; reports
-  coverage shortfalls and security findings.
+- Root `Makefile`: `pr_check: lint machinery_tests coverage test_speed_check security`.
+  Each stack `Makefile`: `pr_check: lint coverage test_speed_check security`, where
+  the speed check reads the JUnit file coverage just wrote. `make tests` stays the
+  fast iteration target (not the gate).
+- pr-check skill: describes the components and says it mirrors CI; reports
+  coverage shortfalls, speed-guard offenders (with the remedy order) and security
+  findings.
 - AGENTS.md quality-gates table, README, and any init-template text that describes
   `pr_check` are updated to match.
+
+### Per-test speed guard (both stacks)
+
+Downstream's guard, generalized to both stacks and to a fresh repo.
+
+- **What it does.** After the coverage run, read the suite's JUnit XML and fail if any
+  test not on the allowlist took longer than the budget. To stop false alarms from a
+  busy, parallel run, every test over the budget (or within `recheck_fraction` of it,
+  since sharing work can hide a slow test) is **re-run alone, one at a time**, and
+  fails only if it is still over the budget when run alone. An allowlisted test that has become fast gets a
+  warning so the list shrinks over time (a ratchet). On a failure, print the
+  remedies in order: speed the test up (usually by mocking a slow dependency), move
+  it to a slower test group, and only then add it to the allowlist with a reason and a
+  tracking issue.
+- **Dynamic budget.** The budget means "seconds on a typical runner of this class".
+  At start, the guard times a fixed pure-Python benchmark (best of 5) and divides
+  by the committed typical time for its runner class (`TEST_SPEED_RUNNER_CLASS`,
+  default `ubuntu-latest`, the template's CI runner), clamped to 0.5–2×. A faster
+  machine (a laptop) gets a proportionally tighter budget, and a slow CI instance a
+  looser one. An unknown runner class fails loudly and says how to add it (the
+  guard prints its own measurement every run, so seeding a class is one line). The
+  `ubuntu-latest` value is seeded from this PR's own CI run. `--factor` pins the
+  factor for debugging.
+- **One config, both stacks.** A single shared file holds `budget_seconds = 10`,
+  `recheck_fraction`, the factor clamp, and the per-runner-class typical times. It
+  lives outside `stacks/` (*builder's call, marked:* a `conf/test-speed.toml` that
+  `make init` keeps for either stack), so changing the budget is a one-line edit that
+  applies to Python and React alike, and survives initialization with one stack.
+- **Where the code lives.** One stack-neutral, stdlib-`python3` script pair (the
+  checker and the runner-speed calibrator) outside `stacks/`, kept by `make init`
+  for either stack (as `scripts/apply_repo_settings.py` is today). It parses either
+  test runner's JUnit XML. Each stack supplies only what is genuinely stack-specific
+  through its Makefile: how to emit JUnit from the coverage run (pytest
+  `--junitxml`, Vitest's JUnit reporter), the command that re-runs one test alone,
+  and its own allowlist file (empty at first).
+- **Wiring.** Each stack gets `make test_speed_check`, which reads the last coverage
+  run's JUnit file. `make pr_check` becomes lint + coverage + speed check + security,
+  and CI runs the speed check right after coverage in each stack's tests job on PRs
+  and merge-queue runs, but not on pushes to `main`, where it would only re-run
+  flakes. The template's own CI checks that the speed guard is wired into both
+  stacks.
+- **Python extra.** Downstream's pytest plugin that records shared-fixture setup on
+  the test that paid for it comes along for the Python stack, so a session-scoped
+  fixture's one-time cost isn't blamed on one unlucky test. Shared setup has its own
+  budget in the same config. Vitest has no equivalent hook, so React tests are judged
+  on their full time (noted in the config).
+- **Not ported:** the downstream "slow lane" (a second 90-second budget for
+  slow-marked tests) and its wall-clock ranking report. The template has no slow lane.
+- **Known approximation.** The benchmark is Python, and for a React repo it stands in
+  for single-thread CPU speed. That is good enough to scale a budget, and the config
+  notes it.
+- resolve-pr-concerns' coaching for a failing speed check is ported unconditionally,
+  since every repo built from the template now has the guard.
 
 ### Tests (`tests/template/`)
 
@@ -302,7 +364,9 @@ Port downstream's tests for every new capability, rewritten against neutral data
 (`owner/repo`, neutral logins, tmp CODEOWNERS fixtures, a synthetic reviewer-state
 timeline that reproduces the orderings the replay tests assert). Keep every
 canonical-only test (no-reviewer, rate-limit, local-round recovery). Port the
-existing bash-script tests to the python helpers. Add tests for exit 3, the merge
+existing bash-script tests to the python helpers. Add tests for the speed guard (budget scaling and clamp, re-measure verdicts,
+allowlist ratchet, both JUnit dialects, unknown runner class, the one-config
+invariant), exit 3, the merge
 gate (configurable required checks, `--stack`), path owners (incl. team owners
 skipped, no file → no gate), and the validator. Extend the seam test's field list.
 Add a guard test that scans `.agents/skills/` and the new fixtures for the
