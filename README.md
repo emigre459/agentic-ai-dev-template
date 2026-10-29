@@ -79,19 +79,22 @@ THEN run, in order:
   and honor its confirmation prompt (same `--yes` fallback, with `--phase final`
   and only after the user confirms). This second phase enables the required
   `lint`, `tests`, and `security` checks now that the CI workflow exists on main.
-- Tell the user that automated PR review (Cursor Bugbot) may need to be enabled
-  on this new repo — it is configured per-repo, not inherited from the template.
-  Two steps:
-    1. Install/approve the Cursor GitHub App for the repo (request access, or
-       approve if you're a GitHub org admin):
-       https://github.com/apps/cursor/installations
-    2. Enable the repo on the Cursor side:
-       https://cursor.com/dashboard/bugbot/installation
-  Once enabled, Bugbot reviews automatically on each push (no `bugbot run`
-  comment needed). To give it the repo's noise filters, copy
-  `.github/review-guidelines.md` to `.cursor/BUGBOT.md`. Once reviews arrive,
-  the user can add the vendor-neutral `review-gate` status to the `main`
-  ruleset's required checks — never the reviewer's own check (see
+- Tell the user the template ships with **no automated PR reviewer active**
+  (`"active": null` in `.github/pr-reviewer.json`), so the agent skills fall
+  back to a local subagent review and never post reviewer trigger comments. If
+  the new repo has a reviewer subscription, enable it — it is configured
+  per-repo, not inherited from the template:
+    1. Install the reviewer's GitHub App on the repo and enable the repo on the
+       vendor's side. For Cursor Bugbot: approve the Cursor app
+       (https://github.com/apps/cursor/installations), then enable the repo at
+       https://cursor.com/dashboard/bugbot/installation, and copy
+       `.github/review-guidelines.md` to `.cursor/BUGBOT.md` for its noise
+       filters. For CodeRabbit, follow
+       `.agents/skills/resolve-pr-concerns/references/reviewers/coderabbit.md`.
+    2. Set `"active"` in `.github/pr-reviewer.json` to that adapter's key
+       (`"bugbot"` or `"coderabbit"`).
+  Once reviews arrive, the user can add the vendor-neutral `review-gate` status
+  to the `main` ruleset's required checks — never the reviewer's own check (see
   `.agents/skills/resolve-pr-concerns/references/reviewers/`).
 
 Do not use implicit GitHub repository detection for any mutation. Do not invent

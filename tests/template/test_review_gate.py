@@ -9,6 +9,7 @@ output; posting is tested with ``_gh`` stubbed out.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -192,7 +193,9 @@ def test_the_sweep_posts_every_open_pr_and_isolates_failures(monkeypatch: Any) -
     monkeypatch.setattr(review_gate, "_open_prs", lambda repo: [1, 2, 3])
     monkeypatch.setattr(review_gate, "post_for_pr", _post_for_pr)
     with pytest.raises(SystemExit, match="1 of 3"):
-        review_gate.post_for_all_open_prs(REPO, reviewer_state.load_reviewer())
+        review_gate.post_for_all_open_prs(
+            REPO, reviewer_state.load_reviewer(key="bugbot")
+        )
     assert done == [1, 3]
 
 
@@ -280,3 +283,26 @@ def test_a_failed_full_review_on_a_locally_reviewed_pr_fails(
 def test_a_reviewer_without_a_local_review_still_needs_a_verdict_on_the_head() -> None:
     state, _ = gate_status(_state(verdict="none", local_review={"configured": False}))
     assert state == "failure"
+
+
+@pytest.mark.parametrize("target", [["--pr", "7"], ["--all-open"]])
+def test_no_active_reviewer_posts_no_status(
+    tmp_path: Path, monkeypatch: Any, capsys: Any, target: list[str]
+) -> None:
+    """With no reviewer there is nothing to gate: post nothing and exit 0.
+
+    That keeps the workflow green instead of failing on every PR event.
+    """
+    config = json.loads(reviewer_state.DEFAULT_CONFIG_PATH.read_text())
+    config["active"] = None
+    path = tmp_path / "pr-reviewer.json"
+    path.write_text(json.dumps(config))
+    posted: list[list[str]] = []
+    monkeypatch.setattr(review_gate, "_gh", posted.append)
+    monkeypatch.setattr(review_gate, "_open_prs", lambda repo: [1, 2])
+    monkeypatch.setattr(
+        sys, "argv", ["review_gate.py", "--repo", REPO, *target, "--config", str(path)]
+    )
+    review_gate.main()
+    assert posted == []
+    assert "no PR reviewer" in capsys.readouterr().out

@@ -37,7 +37,12 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from reviewer_state import PreflightSpec, ReviewerAdapter, load_reviewer
+from reviewer_state import (
+    NoActiveReviewer,
+    PreflightSpec,
+    ReviewerAdapter,
+    load_reviewer,
+)
 
 #: ``(argv, timeout_seconds) -> (exit code, stdout)``; raises when the CLI is
 #: missing (``FileNotFoundError``) or hangs (``subprocess.TimeoutExpired``).
@@ -247,6 +252,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         adapter = load_reviewer(args.config)
+    except NoActiveReviewer as exc:
+        verdict = {
+            "reviewer": None,
+            "allowed": True,
+            "status": "not_configured",
+            "remaining": None,
+            "recheck_after_seconds": None,
+            "detail": str(exc),
+            "cause": None,
+            "remedy": None,
+        }
+        print(json.dumps(verdict, indent=2))
+        return EXIT_CODES["not_configured"]
     except (FileNotFoundError, ValueError) as exc:
         print(exc, file=sys.stderr)
         return 64

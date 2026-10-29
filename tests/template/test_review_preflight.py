@@ -271,3 +271,16 @@ def test_main_reports_a_bad_config_as_a_usage_error(
 ) -> None:
     assert review_preflight.main(["--config", str(tmp_path / "absent.json")]) == 64
     assert "pr-reviewer" in capsys.readouterr().err
+
+
+def test_main_with_no_active_reviewer_is_not_configured(
+    tmp_path: Path, capsys: Any
+) -> None:
+    config = json.loads(reviewer_state.DEFAULT_CONFIG_PATH.read_text())
+    config["active"] = None
+    path = tmp_path / "pr-reviewer.json"
+    path.write_text(json.dumps(config))
+    assert review_preflight.main(["--config", str(path)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert (result["reviewer"], result["status"]) == (None, "not_configured")
+    assert result["allowed"] is True

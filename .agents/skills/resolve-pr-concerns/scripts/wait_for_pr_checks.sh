@@ -97,6 +97,11 @@ elif [[ ! -r "$CONFIG" ]]; then
   echo "PR-reviewer config not found: $CONFIG" >&2
   echo "Create .github/pr-reviewer.json naming the active reviewer (see resolve-pr-concerns references/reviewers/), or pass --config PATH." >&2
   exit 64
+elif [[ "$(jq -r 'has("active") and .active == null' "$CONFIG" 2>/dev/null)" == "true" ]]; then
+  # "active": null -- the repo deliberately has no reviewer. Wait on CI only, but
+  # keep every adapter's check soft: a reviewer app may still be installed.
+  echo "NOTE: no PR reviewer active (\"active\" is null in $CONFIG) -- waiting on CI only (plus Copilot, and any --expected-bot)." >&2
+  REVIEWER_CHECKS=$(jq -r '.reviewers[]?.check_name // empty' "$CONFIG")
 else
   if ! ACTIVE_CHECK=$(jq -er '.reviewers[.active].check_name | select(type == "string" and length > 0)' "$CONFIG" 2>/dev/null); then
     echo "PR-reviewer config $CONFIG has no check_name for its active reviewer (or is not valid JSON)." >&2
@@ -285,7 +290,7 @@ if [[ -n "$REPO" ]]; then
         --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | .comments.nodes[0] | "  - \(.author.login) \(.path):\(.line) — \((.body|split("\n")[0]|gsub("^### ";"")))"' 2>/dev/null); then
     if [[ -n "$findings" ]]; then
       echo "$findings"
-      echo "  (unresolved review threads remain — address + resolve them; do NOT merge yet.)" >&2
+      echo "  (unresolved review threads remain — answer each one and leave resolving to a human; do NOT merge yet.)" >&2
     else
       echo "  none unresolved."
     fi

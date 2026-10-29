@@ -45,6 +45,7 @@ from reviewer_state import (
     BASE_PLACEHOLDER,
     LOCAL_FINDING_FIELDS,
     LocalReviewSpec,
+    NoActiveReviewer,
     ReviewerAdapter,
     RoundCaps,
     _gh_json,
@@ -406,6 +407,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         adapter = load_reviewer(args.config)
         caps = load_round_caps(args.config)
+    except NoActiveReviewer as exc:
+        result = {"reviewer": None, "status": "not_configured", "detail": str(exc)}
+        print(json.dumps(result, indent=2))
+        return EXIT_CODES["not_configured"]
     except (FileNotFoundError, ValueError) as exc:
         print(exc, file=sys.stderr)
         return 64

@@ -12,7 +12,7 @@ Reactive, project-aware orchestrator that closes the loop on an open PR before i
 This skill exists because PRs accumulate signal from multiple sources (bots, humans, dependency systems) and shipping requires noticing and addressing all of them — silently merging while a reviewer finding sits unread is a failure mode worth a workflow guard.
 
 **Delegations:**
-- Evaluation discipline for every concern → `superpowers:receiving-code-review` (verify against codebase, no performative agreement, push back when wrong, YAGNI checks, GitHub thread replies); after a fix lands, close its inline thread with a reply + resolve (Step 4d)
+- Evaluation discipline for every concern → `superpowers:receiving-code-review` (verify against codebase, no performative agreement, push back when wrong, YAGNI checks, GitHub thread replies); after a fix lands, reply on its inline thread with the fix SHA and leave it open — a **human** resolves the thread, never the agent (Step 4d); a human reviewer's items are answered on their threads and in one body comment, never resolved by the agent, then the reviewer is re-requested (Steps 2h, 4e)
 - Per-fix discipline → `superpowers:test-driven-development` (RED → Verify-RED → GREEN → Verify-GREEN; iron law)
 - Non-obvious root causes (CI failure that isn't lint/test, reviewer finding that's symptom not cause) → `superpowers:systematic-debugging` before patching
 - Independent fixes in parallel (gated, capped at 4) → `superpowers:dispatching-parallel-agents` + `superpowers:using-git-worktrees`
@@ -33,7 +33,13 @@ This skill exists because PRs accumulate signal from multiple sources (bots, hum
 
 ## The configured reviewer
 
-The automated PR reviewer is **not hardcoded**: `.github/pr-reviewer.json` names it (`active`) and declares its adapter. Read the values once per session:
+The automated PR reviewer is **not hardcoded**: `.github/pr-reviewer.json` names it (`active`) and declares its adapter. First check whether one is active at all:
+
+```bash
+jq -r '.active // "none"' .github/pr-reviewer.json
+```
+
+**`none` (`"active": null`) means the repo has no automated reviewer**: never post a trigger or final-review comment, skip Steps 1a, 5 and 5a, and use the Step 1b pre-pass review instead. `reviewer_state.py` prints `"configured": false`, `local_review.py` / `review_preflight.py` report `not_configured`, `review-gate` posts no status, and `wait_for_pr_checks.sh` waits on CI only. Otherwise, read the active adapter's values once per session:
 
 ```bash
 jq -r '.reviewers[.active] | "reviewer=\(.display_name) check=\(.check_name) trigger=\(.trigger_comment) final=\(.final_review_comment) logins=\(.bot_logins|join(",")) self_resolves=\(.self_resolves_threads)"' .github/pr-reviewer.json
@@ -71,10 +77,12 @@ previous_concern_fingerprints = {}   # set of (source, file, line, body-hash) tu
 
 1. `iteration += 1`
 2. If `iteration > MAX_ITERATIONS`: stop, surface a summary of remaining concerns to the user, ask how to proceed. Do **not** attempt another autonomous fix pass.
-3. After enumerating concerns, compute a fingerprint for each: `(author_login, path, line, hash(body))`. If the full set of fingerprints is identical to `previous_concern_fingerprints`, the loop is oscillating — the same issues keep resurfacing. Stop immediately and tell the user: list the stuck concerns, explain that two consecutive passes produced the same findings with no change, and ask for direction. Do **not** try to fix them again.
+3. After enumerating concerns, set aside every thread you already answered (replied with the fix SHA or a pushback, Step 4d) — the agent never resolves threads, so an answered thread stays open and is awaiting a **human**, not agent action. Compute a fingerprint for each remaining concern: `(author_login, path, line, hash(body))`. If the full set of fingerprints is identical to `previous_concern_fingerprints`, the loop is oscillating — the same issues keep resurfacing. Stop immediately and tell the user: list the stuck concerns, explain that two consecutive passes produced the same findings with no change, and ask for direction. Do **not** try to fix them again.
 4. If the fingerprint set shrank (some resolved, some still present): update `previous_concern_fingerprints` to the current set and continue.
 
 A parallel-mode iteration counts as **one** outer iteration regardless of how many bughunters were dispatched — fingerprint comparison happens at enumeration, not per-bughunter.
+
+**A human reviewer's concerns (Step 2h) skip the fingerprints.** `human_review.sh` already drops a thread or review body once a marked answer covers it, and lists it again if the human replies after that, so its output *is* the live set for human items. Add them to each pass's concerns, but leave them out of the oscillation comparison: an answered human item stays open until its reviewer resolves it.
 
 ## Local review rounds and the rate limit
 
@@ -143,7 +151,7 @@ digraph resolve_pr_concerns {
     "Serial fix path:\nreceiving-code-review + TDD\n(or systematic-debugging if root cause unclear)" [shape=box];
     "Run make pr_check on integrated state" [shape=box];
     "Push (single push covers all)" [shape=box];
-    "Reply + resolve each fixed inline thread\n(reply w/ SHA, then resolveReviewThread)" [shape=box];
+    "Reply w/ SHA on each fixed inline thread\n(leave it open: a human resolves)" [shape=box];
 
     "Start" -> "Init loop guards" -> "Find open PR for current branch" -> "PR exists?";
     "PR exists?" -> "Stop — nothing to do" [label="no"];
@@ -169,8 +177,8 @@ digraph resolve_pr_concerns {
     "Cherry-pick each bughunter commit\n(serial integration gate)" -> "Run make pr_check on integrated state";
     "Serial fix path:\nreceiving-code-review + TDD\n(or systematic-debugging if root cause unclear)" -> "Run make pr_check on integrated state";
     "Run make pr_check on integrated state" -> "Push (single push covers all)";
-    "Push (single push covers all)" -> "Reply + resolve each fixed inline thread\n(reply w/ SHA, then resolveReviewThread)";
-    "Reply + resolve each fixed inline thread\n(reply w/ SHA, then resolveReviewThread)" -> "Find open PR for current branch";
+    "Push (single push covers all)" -> "Reply w/ SHA on each fixed inline thread\n(leave it open: a human resolves)";
+    "Reply w/ SHA on each fixed inline thread\n(leave it open: a human resolves)" -> "Find open PR for current branch";
 }
 ```
 
@@ -215,7 +223,7 @@ Surface the detected mode to the user in one line ("The reviewer auto-runs on pu
 
 ### Step 1b (optional). Pre-pass code review when no bots are configured
 
-If the repo has no automated PR reviewers configured (Step 1a found the configured reviewer `absent`, no Copilot review, no equivalent), invoke `superpowers:requesting-code-review` to dispatch a fresh reviewer subagent against the PR's SHA range before enumerating. Skip this when the repo already has bot review configured — only relevant for repos lacking one.
+If the repo has no automated PR reviewers configured (`"active": null`, or Step 1a found the configured reviewer `absent`, and no Copilot review or equivalent), invoke `superpowers:requesting-code-review` to dispatch a fresh reviewer subagent against the PR's SHA range before enumerating. Skip this when the repo already has bot review configured — only relevant for repos lacking one.
 
 ## Step 2: Enumerate concerns
 
@@ -234,11 +242,11 @@ Look at each review's `author.login` and `body`. The configured reviewer, Copilo
 ### 2b. Inline review comments
 
 ```bash
-gh api repos/<owner>/<repo>/pulls/<num>/comments \
-  --jq '.[] | {author: .user.login, body: .body, path: .path, line: .line, commit: .commit_id}'
+gh api --paginate repos/<owner>/<repo>/pulls/<num>/comments \
+  --jq '.[] | {id, in_reply_to_id, subject_type, author: .user.login, body, path, line, commit: .commit_id}'
 ```
 
-These are the file/line-anchored findings — the reviewer puts its specific bug reports here, and human reviewers leave their comments here too.
+These are the file/line-anchored findings — the reviewer puts its specific bug reports here, and human reviewers leave their comments here too. Keep `--paginate` (a big review runs past one page), `id` (what you reply on), `in_reply_to_id` (which thread a reply belongs to) and `subject_type` (`line`, or `file` for a file-level comment, whose `line` is null). A human's comments are listed for you, answered-or-not, by Step 2h.
 
 ### 2c. Issue-style PR comments
 
@@ -304,7 +312,24 @@ git merge origin/<base> --no-edit     # resolve conflicts if any
 git push
 ```
 
-Then **loop back** — the push re-runs CI and you re-trigger the automated reviewer (Step 5) so the green checks + clean review reflect the post-merge state: the sync changed the head SHA, so the prior review is stale and `review-gate` is unsatisfied on the new head until the reviewer re-reviews it. Only a branch GitHub doesn't report as `BEHIND` / `DIRTY` / `CONFLICTING`, green **on that state** — including a reviewer verdict on the current head — is merge-ready. If a merge conflict needs human judgment, surface it; otherwise resolve it yourself.
+Then **loop back** — the push re-runs CI and you re-trigger the automated reviewer (Step 5) so the green checks + clean review reflect the post-merge state: the sync changed the head SHA, so the prior review is stale and `review-gate` is unsatisfied on the new head until the reviewer re-reviews it. Only a branch GitHub doesn't report as `BEHIND` / `DIRTY` / `CONFLICTING`, green **on that state** — including a reviewer verdict on the current head, when a reviewer is active — is merge-ready. (With `"active": null` there is nothing to re-trigger: CI green on the merged state is the bar.) If a merge conflict needs human judgment, surface it; otherwise resolve it yourself.
+
+### 2h. A human reviewer's review — every item is a concern
+
+The reviewer bot's findings come from Steps 2a/2b. A person's review (a teammate's, or the developer's own comments) arrives as line threads, file-level threads and a review body, often with `CHANGES_REQUESTED`. Read it with:
+
+```bash
+bash <skill-dir>/scripts/human_review.sh <num> <owner>/<repo>
+```
+
+It prints JSON (exit 64 on a usage error or an invalid `.github/pr-reviewer.json`; every read is paginated):
+
+- `threads`: each unresolved thread started by a human and not yet answered, with `reply_to` (the comment id to reply on), `subject_type`, `path`, `line` and the human's newest `body`. A human follow-up after your answer brings the thread back.
+- `review_bodies`: each human `CHANGES_REQUESTED` / `COMMENTED` review body not yet answered, with its `review_id`. **Split each body into its items yourself**: every request, question or flag in it is a concern of its own.
+- `changes_requested_by`: humans whose request for changes still stands. `rerequest_reviewers`: those of them with nothing left open and no pending review request. `awaiting_rereview`: those already asked again.
+- `answer_marker`: the hidden marker your thread replies must carry (Step 4e).
+
+A human is any author that isn't a GitHub Bot and isn't in any configured reviewer's `bot_logins`. Every thread and every body item is a concern: triage it in Step 3, fix it or push back, and answer it in Step 4e.
 
 ## Step 3: Classify each concern (with `superpowers:receiving-code-review` discipline)
 
@@ -337,7 +362,7 @@ Examples:
 
 When in doubt: prefer asking. The cost of an extra question is small; the cost of silently choosing a direction the user disagrees with is large.
 
-If `receiving-code-review` discipline reveals that a "concern" is actually wrong (reviewer lacked context, suggestion would break things, YAGNI), **push back in the PR thread with technical reasoning** rather than implementing. Mark it resolved-by-pushback in the status summary.
+If `receiving-code-review` discipline reveals that a "concern" is actually wrong (reviewer lacked context, suggestion would break things, YAGNI), **push back in the PR thread with technical reasoning** rather than implementing. On a human reviewer's thread, reply as Step 4e says, so the reply carries the answer marker (without it, `human_review.sh` keeps listing the thread and re-requests the reviewer too early). Mark it resolved-by-pushback in the status summary.
 
 ## Step 4: Apply the fixes — choose serial or parallel mode
 
@@ -390,34 +415,39 @@ For each concern, in order:
 
 After all serial fixes land, run `make pr_check` once more on the full set, then push.
 
-### 4d. Close the loop on every fixed inline thread (both modes)
+### 4d. Reply on every fixed inline thread, and leave resolving to a human (both modes)
 
-A fix that only shows up in the pushed diff leaves the reviewer's thread dangling as if unaddressed — the audit trail reviewers actually read lives **on the PR thread**, not in your chat summary. So after the fix commit for an **inline** finding (reviewer bot or human) is pushed, close its thread in two steps:
+A fix that only shows up in the pushed diff leaves the reviewer's thread dangling as if unaddressed — the audit trail reviewers actually read lives **on the PR thread**, not in your chat summary. So after the fix commit for a reviewer bot's **inline** finding is pushed, reply on its thread — and **stop before resolving** (a human reviewer's threads follow Step 4e):
 
 1. **Reply on the thread** with the fix and the commit SHA that made it — via the replies endpoint, not a top-level PR comment:
    ```bash
    gh api repos/<owner>/<repo>/pulls/<num>/comments/<comment_id>/replies \
      -f body="Fixed in <sha>: <one-line description of the change>."
    ```
-   State the fix plainly — no "thanks" / "great catch" (same `superpowers:receiving-code-review` no-performative-agreement rule as Step 3). If you pushed back instead of fixing, the thread reply already happened in Step 3; still resolve it below once the discussion is settled.
-2. **Resolve the conversation** via the GraphQL `resolveReviewThread` mutation. Find the thread node id by matching the first comment's `databaseId` to the `comment_id` you replied to, then resolve it:
+   State the fix plainly — no "thanks" / "great catch" (same `superpowers:receiving-code-review` no-performative-agreement rule as Step 3). If you pushed back instead of fixing, the thread reply already happened in Step 3.
+2. **Do NOT resolve the thread yourself — a human resolves it.** Never call the `resolveReviewThread` mutation, never resolve a conversation through the UI, and never post a reviewer's resolve-all / approve command (the notes file names them). Replying with the fix SHA is the agent's job; *resolving* the conversation — the "I've looked, this is genuinely addressed" judgment — is the **human's**, and a ruleset that requires conversation resolution turns it into the final human gate before merge. Leave every thread you replied to **open**. If the adapter sets `self_resolves_threads: true`, the reviewer clears its *own* addressed threads when it re-reviews; that is the bot's judgment, not yours. If it already resolved one by the time you reply, still reply with the SHA and don't re-open it.
+
+Do this **per fixed inline finding**, as the last action for that finding. It applies to both serial (4c) and parallel (4b) modes — in parallel mode the orchestrator owns the replies after cherry-picking, since it holds the final SHAs. An addressed thread stays open until a human (or the reviewer itself) resolves it, so the next enumeration returns it again: it is awaiting human resolution, not agent action — don't re-fix it, and leave it out of the oscillation comparison (Loop guards). Do **not**, however, post the trigger comment here to re-trigger a review — that's Step 5's conditional trigger (see the trigger modes there and the `pr-reviewer-auto-trigger` shared rule). Replying answers the *existing* threads; triggering a *fresh* review is separate. For a reviewer with a local review, the re-validation of a fix is the reviewer's own reply on its thread plus a local round on the new head ("Local review rounds"), never a PR trigger.
+
+### 4e. Answer a human reviewer, then ask them to review again
+
+A human's items are answered differently from the bot's:
+
+1. **Thread (line or file-level)**: reply on it with the fix SHA, or with the reasoning for a pushback or a question's answer, and end the reply with the `answer_marker` from Step 2h. The agent posts as whoever runs it, who may be the reviewer, so the marker is the only thing that tells `human_review.sh` the thread is answered:
    ```bash
-   # Find the thread node id for a given inline comment id:
-   gh api graphql -f query='
-     query($owner:String!,$repo:String!,$num:Int!){
-       repository(owner:$owner,name:$repo){
-         pullRequest(number:$num){
-           reviewThreads(first:100){ nodes{ id isResolved comments(first:1){ nodes{ databaseId } } } }
-         }}}' -F owner=<owner> -F repo=<repo> -F num=<num>
-   # Then resolve the matched thread:
-   gh api graphql -f query='
-     mutation($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}){ thread{ isResolved } } }' \
-     -F threadId=<PRRT_...>
+   gh api repos/<owner>/<repo>/pulls/<num>/comments/<reply_to>/replies \
+     -f body="Fixed in <sha>: <one-line description>.
+
+   <!-- resolve-pr-concerns:answer -->"
    ```
-
-Do this **per fixed inline finding**, as the last action for that finding. It applies to both serial (4c) and parallel (4b) modes — in parallel mode the orchestrator owns the reply-and-resolve after cherry-picking, since it holds the final SHAs. Do **not**, however, post the trigger comment here to re-trigger a review — that's Step 5's conditional trigger (see the trigger modes there and the `pr-reviewer-auto-trigger` shared rule). Reply-and-resolve closes the *existing* threads; triggering a *fresh* review is separate. For a reviewer with a local review, the re-validation of a fix is the reviewer's own reply on its thread plus a local round on the new head ("Local review rounds"), never a PR trigger.
-
-If the adapter sets `self_resolves_threads: true`, the reviewer may already have resolved its own addressed thread by the time you reply — still reply with the SHA, and don't re-open it. Resolve threads **one at a time** as above; never post a reviewer's resolve-all / approve command to shortcut this (the notes file names them) — it clears threads nobody has addressed.
+2. **Review body**: answer **all** of a review's body items in **one** top-level PR comment, one numbered line per item (fix SHA or reasoning), ending with `<!-- resolve-pr-concerns:answer review=<review_id> -->`. One comment can answer several reviews: put one marker per review.
+3. **Never resolve a human's thread** (no `resolveReviewThread`, no reviewer resolve command). Resolving is the human's sign-off.
+4. **Don't re-run the reviewer bot to validate a human's items.** The human is the one to confirm them. (The bot still reviews each new head as usual, Step 5; that is about the head, not the human's items.)
+5. **Once `human_review.sh` lists the reviewer in `rerequest_reviewers`** (everything of theirs is answered, the fixes are pushed), ask them to review again:
+   ```bash
+   gh pr edit <num> --repo <owner>/<repo> --add-reviewer <login>
+   ```
+   This doesn't clear their request for changes; only their new review does (Step 7).
 
 ## Step 5: Ensure a fresh review of the latest commit
 
@@ -456,7 +486,7 @@ Posting it early does no harm (it still counts), but the incremental loop is che
 
 ## Step 6: Wait for every check to settle
 
-A PR isn't done while CI or bot reviews are still pending. **Run this settle only once the reviewer has nothing left for you on the final head** — a verdict on it, and every finding fixed or answered (a pushback leaves the verdict at `findings` for good), plus, if the adapter has one, the final full review `finished` (Step 5a); a local reviewer needs no verdict on the final head, only its final full review `finished` and every finding fixed or answered. Between reviewer rounds, poll `reviewer_state.py` instead: this helper waits on the whole suite, which is exactly what you don't want mid-loop. Use the bundled helper:
+A PR isn't done while CI or bot reviews are still pending. **Run this settle only once the reviewer has nothing left for you on the final head** (with `"active": null`, as soon as your fixes are pushed) — a verdict on it, and every finding fixed or answered (a pushback leaves the verdict at `findings` for good), plus, if the adapter has one, the final full review `finished` (Step 5a); a local reviewer needs no verdict on the final head, only its final full review `finished` and every finding fixed or answered. Between reviewer rounds, poll `reviewer_state.py` instead: this helper waits on the whole suite, which is exactly what you don't want mid-loop. Use the bundled helper:
 
 ```bash
 bash <skill-dir>/scripts/wait_for_pr_checks.sh <pr-number> <owner>/<repo>
@@ -467,7 +497,7 @@ It polls `gh pr checks` until every required check has reached a terminal state 
 - `0` — all required checks passed; the PR is mergeable from a CI standpoint.
 - `1` — one or more checks failed/cancelled; loop back to Step 2 and treat the failure as a new concern. (A cancelled run of the review-gate workflow's `compute review gate status` job is superseded-run noise and doesn't count — unless no passing `review-gate` status exists.)
 - `2` — timed out (default 20 minutes). Surface to the user; they decide whether to wait longer or investigate.
-- `64` — usage error, an explicit `--config` that doesn't exist, or an invalid `.github/pr-reviewer.json`; fix the config. (A repo with **no** reviewer config is fine — the helper notes it and waits on CI only, per Step 1b.)
+- `64` — usage error, an explicit `--config` that doesn't exist, or an invalid `.github/pr-reviewer.json`; fix the config. (A repo with **no** reviewer config, or `"active": null`, is fine — the helper notes it and waits on CI only, per Step 1b.)
 
 If new bot findings landed during the wait, loop back to Step 1 and address them. Only when this helper exits 0 **and** there are no new comments to address is the job done.
 
@@ -485,12 +515,15 @@ End with a short status summary:
 - What's still outstanding (if anything).
 - Whether the reviewer's trigger comment was posted (or auto-run was relied on) and what to expect next.
 - Current `mergeStateStatus` from the fresh `gh pr view` call. **Never call a PR merge-ready while GitHub reports `BEHIND`, `CONFLICTING` or `DIRTY`** — that's an unresolved gating concern (Step 2f), not a footnote. "Green checks but behind base" means CI verified stale code; update the branch and re-verify first. (With a merge queue, a PR behind its base reads `CLEAN` and is fine.)
-- **The reviewer has reviewed the current head and its final full review is done.** Read `reviewer_state.py`: `verdict` is `pass` / `findings` on `head_sha`, `open_findings` is empty (every finding fixed or answered), and `final_review_outcome` is `finished` or `not_required`. For a local reviewer (`local_review.configured: true`) the verdict on the head isn't needed: the final full review `finished` and no open reviewer thread is the bar. If the ruleset requires it, the `review-gate` status shows the same thing and must be green. **The reviewer's own check is not evidence** — it can pass on a head it skipped or was rate-limited on. A missing review or final review is a gating concern exactly like a `BEHIND` branch; report it explicitly, never as a footnote.
-- **Who merges.** This skill drives the PR to merge-ready and **stops**; merging is the user's call. With a merge queue on, merging means "Merge when ready", which enqueues the PR and lets the queue test it against the latest base.
+- **The reviewer has reviewed the current head and its final full review is done** (skip this with no reviewer active, `"active": null`; say the PR had no automated review, only the Step 1b pre-pass if you ran one). Read `reviewer_state.py`: `verdict` is `pass` / `findings` on `head_sha`, every entry in `open_findings` has your reply (fix SHA or pushback) — you never resolve threads, so report the answered ones still open as waiting on a human to resolve them, not as something left for you to do — and `final_review_outcome` is `finished` or `not_required`. For a local reviewer (`local_review.configured: true`) the verdict on the head isn't needed: the final full review `finished` and every reviewer thread answered is the bar. If the ruleset requires it, the `review-gate` status must be green too; it turns green once a human resolves the answered threads. **The reviewer's own check is not evidence** — it can pass on a head it skipped or was rate-limited on. A missing review or final review is a gating concern exactly like a `BEHIND` branch; report it explicitly, never as a footnote.
+- **No human request for changes stands, and no human item is unanswered.** Read `human_review.sh` (Step 2h): `open_concern_count` is 0 and `changes_requested_by` is empty. While a reviewer's request stands, the PR is **not** merge-ready even with every item answered: report it as "waiting on @<login>'s re-review" (name `awaiting_rereview`), never as ready.
+- **A human resolves the threads and performs the final merge.** This skill drives the PR to merge-ready and **stops**: every thread answered and left open for its reviewer, never `resolveReviewThread` to force a green state, never a self-merge. With a merge queue on, merging means "Merge when ready", which enqueues the PR and lets the queue test it against the latest base.
 
 ## Red flags — stop and reassess
 
 - Describing a `BEHIND` branch as merge-ready, or framing "update the branch from base" as optional / the merger's call — it is a **gating** Step-2f concern: merge base in, re-run CI + the automated reviewer on the merged state, then re-assess.
+- Calling a PR merge-ready while `human_review.sh` lists an open human item or a standing `changes_requested_by` — a human's request for changes blocks exactly like a red check (Step 7).
+- Resolving a human reviewer's thread, or answering a human thread or review body without the answer marker — resolution is the human's sign-off, and an unmarked answer keeps being listed (Step 4e).
 - Posting the final-review comment a second time for more coverage, or re-posting it immediately after a failure — once per PR, and a failure waits 20+ minutes for one retry (Step 5a).
 - Calling a head reviewed because the reviewer's own check is green — that check can pass on a head it skipped. Read `reviewer_state.py` (or the `review-gate` status).
 - Answering a refused (rate-limited) request with a different request, or re-posting it before `rate_limit.retry_after` — wait, then re-post the SAME request ("Review requests and the rate limit").
@@ -499,7 +532,8 @@ End with a short status summary:
 - The fix would conflict with the user's stated intent in the PR description — ask before changing direction.
 - Tests pass after a fix but the fix doesn't actually address the reviewer's concern (you treated the symptom, not the cause).
 - Performative agreement ("Thanks for catching this!", "You're absolutely right!") is being drafted — `superpowers:receiving-code-review` forbids this; state the fix or push back instead.
-- An inline finding was fixed and pushed but its thread is still open / has no reply naming the fix commit — Step 4d isn't optional; the dangling thread reads as unaddressed to reviewers. Reply with the SHA, then resolve the conversation.
+- An inline finding was fixed and pushed but its thread has no reply naming the fix commit — Step 4d isn't optional; the dangling thread reads as unaddressed to reviewers. Reply with the SHA, then **leave the thread open for a human to resolve**.
+- About to call `resolveReviewThread` (or resolve a conversation through the UI) yourself — **stop.** Resolution is a human-only final gate, exactly like the merge.
 - About to dispatch parallel bughunters for `complex` concerns — they need user alignment per concern, not autonomous fixing.
 - About to dispatch parallel bughunters whose concerns share a directory — directory-level disjointness is the gate, not file-level. Fall back to serial.
 - About to let bughunters push their own work — orchestrator owns the single serial push as the integration gate.
@@ -520,7 +554,8 @@ End with a short status summary:
 | Bumping a workflow file that uses OIDC → App token (claude-code-review, claude) inside a PR | Revert that workflow change from the PR; ask the user to land it on the default branch directly |
 | Forgetting to re-enumerate after pushing | New pushes draw new bot reviews; loop back to Step 1 |
 | "I addressed all the comments" without actually pushing | Verify `git status` is clean and the remote has the new commits before declaring done |
-| Fixing an inline finding but only summarizing it in chat, leaving the PR thread open | Step 4d: reply on the thread with the fix + commit SHA, then resolve the conversation via `resolveReviewThread` — per fixed finding |
+| Fixing an inline finding but only summarizing it in chat, leaving the thread with no reply | Step 4d: reply on the thread with the fix + commit SHA, per fixed finding |
+| Self-resolving a review thread (`resolveReviewThread`) to make the PR look done | Resolution is a human-only gate; reply with the SHA and leave the thread open |
 | Looping forever on non-deterministic LLM reviewer feedback | Check fingerprints each pass; identical findings two passes in a row → stop and surface, never re-fix |
 | Silently grinding through all 5 iterations without telling the user | On iteration 5, surface remaining concerns and ask for direction before doing anything else |
 | Inlining TDD steps in the fix path | Reference `superpowers:test-driven-development` instead — the iron law and verify-RED/GREEN gates live there |

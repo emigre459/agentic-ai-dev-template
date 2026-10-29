@@ -1,5 +1,5 @@
 {
-  "active": "bugbot",
+  "active": null,
   "review_rounds": {
     "max_local_before_final": 3,
     "max_local_after_final": 3
