@@ -175,6 +175,7 @@ def test_a_local_review_needs_a_final_full_review(tmp_path: Path) -> None:
             "final_review_done_pattern",
             "final_review_failed_pattern",
             "final_review_partial_pattern",
+            *reviewer_state._INCREMENTAL_REVIEW_FIELDS,
             "rate_limited_pattern",
             "rate_limit_wait_pattern",
             "rate_limit_default_wait_minutes",

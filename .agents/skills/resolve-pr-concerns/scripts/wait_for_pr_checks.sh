@@ -85,7 +85,7 @@ REVIEWER_CHECKS=""
 # poll; the defaults (no logins) skip that wait when no reviewer is configured.
 REVIEWER_NAME="the reviewer"
 REVIEWER_LOGINS="[]"
-REVIEWED_SHA_PATTERN=""
+REVIEWED_SHA_PATTERNS="[]"
 SUMMARY_IN_ISSUE_COMMENTS="false"
 # Tracked at parse time, so `--config ""` stays explicit (and fails below).
 if [[ $CONFIG_EXPLICIT -eq 0 ]]; then
@@ -112,7 +112,9 @@ else
   REVIEWER_CHECKS=$(jq -r '.reviewers[].check_name // empty' "$CONFIG")
   REVIEWER_NAME=$(jq -r '.reviewers[.active].display_name // .active' "$CONFIG")
   REVIEWER_LOGINS=$(jq -c '.reviewers[.active].bot_logins // []' "$CONFIG")
-  REVIEWED_SHA_PATTERN=$(jq -r '.reviewers[.active].reviewed_sha_pattern // empty' "$CONFIG")
+  # One regex, an ordered list, or null: always a JSON array of regexes here.
+  REVIEWED_SHA_PATTERNS=$(jq -c '[.reviewers[.active].reviewed_sha_pattern // empty
+    | if type == "array" then .[] else . end]' "$CONFIG")
   SUMMARY_IN_ISSUE_COMMENTS=$(jq -r '.reviewers[.active].summary_in_issue_comments // false' "$CONFIG")
 fi
 
@@ -249,19 +251,19 @@ if [[ -n "$REPO" ]]; then
       | select(.user.login as $l | $logins | index($l))
       | select($head != "" and (
           (.commit_id // "") == $head
-          or ($pat != "" and ([(.body // "") | match($pat; "gi") | .captures[0].string
-                               | select(. != null and length >= 7)]
-                              | any(. as $s | $head | startswith($s))))))] | length'
+          or ([$pats[] as $pat | (.body // "") | match($pat; "gi") | .captures[0].string
+               | select(. != null and length >= 7)]
+              | any(. as $s | $head | startswith($s)))))] | length'
   reviewed_head_count() {
     local n c=0
     n=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate 2>/dev/null \
       | jq -s --argjson logins "$REVIEWER_LOGINS" --arg head "$head" \
-          --arg pat "$REVIEWED_SHA_PATTERN" "$on_head_jq" 2>/dev/null || echo 0)
+          --argjson pats "$REVIEWED_SHA_PATTERNS" "$on_head_jq" 2>/dev/null || echo 0)
     # Some reviewers keep the verdict in an issue-comment they edit in place.
     if [[ "$SUMMARY_IN_ISSUE_COMMENTS" == "true" ]]; then
       c=$(gh api "repos/$REPO/issues/$PR/comments" --paginate 2>/dev/null \
         | jq -s --argjson logins "$REVIEWER_LOGINS" --arg head "$head" \
-            --arg pat "$REVIEWED_SHA_PATTERN" "$on_head_jq" 2>/dev/null || echo 0)
+            --argjson pats "$REVIEWED_SHA_PATTERNS" "$on_head_jq" 2>/dev/null || echo 0)
     fi
     echo $(( ${n:-0} + ${c:-0} ))
   }

@@ -44,7 +44,7 @@ _FIELDS: dict[str, tuple[type | None, ...]] = {
     "summary_marker": (str, None),
     "clean_pattern": (str,),
     "findings_pattern": (str,),
-    "reviewed_sha_pattern": (str, None),
+    "reviewed_sha_pattern": (str, list, None),
     "self_resolves_threads": (bool,),
     "summary_in_issue_comments": (bool,),
     # The final full review: all set, or all null for a reviewer agents can't ask
@@ -54,6 +54,13 @@ _FIELDS: dict[str, tuple[type | None, ...]] = {
     "final_review_done_pattern": (str, None),
     "final_review_failed_pattern": (str, None),
     "final_review_partial_pattern": (str, None),
+    # The reviewer's replies to the trigger comment: all set, or all null.
+    "incremental_review_done_pattern": (str, None),
+    "incremental_review_no_changes_pattern": (str, None),
+    "incremental_review_failed_pattern": (str, None),
+    "incremental_review_partial_pattern": (str, None),
+    # Findings stated with no thread to reply on (one capture group each).
+    "unthreaded_finding_patterns": (list,),
     # A refused (rate-limited) request: how to recognise it and how long to wait.
     "rate_limited_pattern": (str, None),
     "rate_limit_wait_pattern": (str, None),
@@ -63,6 +70,7 @@ _FIELDS: dict[str, tuple[type | None, ...]] = {
     "local_preflight": (dict, None),
     "local_review": (dict, None),
 }
+_INCREMENTAL_FIELDS = tuple(f for f in _FIELDS if f.startswith("incremental_"))
 _FINAL_REVIEW_FIELDS = tuple(f for f in _FIELDS if f.startswith(("final_", "command_")))
 
 
@@ -129,13 +137,17 @@ def test_every_adapter_is_well_formed(key: str) -> None:
     for field in (
         "clean_pattern",
         "findings_pattern",
-        "reviewed_sha_pattern",
         "final_review_done_pattern",
         "final_review_failed_pattern",
         "final_review_partial_pattern",
+        *_INCREMENTAL_FIELDS,
     ):
         if adapter[field] is not None:
             re.compile(adapter[field])
+    assert len({adapter[f] is None for f in _INCREMENTAL_FIELDS}) == 1, (
+        f"reviewer {key!r}: {', '.join(_INCREMENTAL_FIELDS)} must all be set or "
+        "all be null"
+    )
     assert len({adapter[f] is None for f in _FINAL_REVIEW_FIELDS}) == 1, (
         f"reviewer {key!r}: {', '.join(_FINAL_REVIEW_FIELDS)} must all be set or "
         "all be null"
@@ -144,10 +156,18 @@ def test_every_adapter_is_well_formed(key: str) -> None:
         f"reviewer {key!r}: findings_pattern needs exactly one capture group "
         "(the finding count)"
     )
-    if adapter["reviewed_sha_pattern"] is not None:
-        assert re.compile(adapter["reviewed_sha_pattern"]).groups == 1, (
-            f"reviewer {key!r}: reviewed_sha_pattern needs exactly one capture "
+    sha_patterns = adapter["reviewed_sha_pattern"] or []
+    if isinstance(sha_patterns, str):
+        sha_patterns = [sha_patterns]
+    for pattern in sha_patterns:
+        assert re.compile(pattern).groups == 1, (
+            f"reviewer {key!r}: each reviewed_sha_pattern needs exactly one capture "
             "group (the reviewed SHA)"
+        )
+    for pattern in adapter["unthreaded_finding_patterns"]:
+        assert re.compile(pattern).groups == 1, (
+            f"reviewer {key!r}: each unthreaded_finding_patterns entry needs exactly "
+            "one capture group (the finding's text)"
         )
 
 

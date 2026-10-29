@@ -65,7 +65,7 @@ _REQUIRED_STRINGS = (
     "findings_pattern",
 )
 # Present-but-nullable: an absent key is a typo, not a deliberate null.
-_NULLABLE_STRINGS = ("summary_marker", "reviewed_sha_pattern")
+_NULLABLE_STRINGS = ("summary_marker",)
 # The final full review: all set, or all null for a reviewer agents can't ask for one.
 _FINAL_REVIEW_FIELDS = (
     "final_review_comment",
@@ -73,6 +73,14 @@ _FINAL_REVIEW_FIELDS = (
     "final_review_done_pattern",
     "final_review_failed_pattern",
     "final_review_partial_pattern",
+)
+# The reviewer's replies to the trigger comment: all set, or all null for a reviewer
+# that doesn't reply to it (then no incremental outcome is tracked).
+_INCREMENTAL_REVIEW_FIELDS = (
+    "incremental_review_done_pattern",
+    "incremental_review_no_changes_pattern",
+    "incremental_review_failed_pattern",
+    "incremental_review_partial_pattern",
 )
 
 
@@ -83,7 +91,10 @@ class PreflightSpec(NamedTuple):
     starts while the local allowance is spent. It reads the local pool only, never
     the PR quota. The paths are dotted keys into the command's JSON. When the command
     can't be read, ``auth_command`` tells a logged-out CLI from a broken one, and
-    ``remedies`` holds what to tell the user for each cause.
+    ``remedies`` holds what to tell the user for each cause. ``min_remaining``
+    (optional) is the fewest reviews a round needs: below it the preflight reports
+    the allowance exhausted even though its state is available, because a deep round
+    can cost more than one review.
     """
 
     command: tuple[str, ...]
@@ -95,6 +106,9 @@ class PreflightSpec(NamedTuple):
     auth_command: tuple[str, ...]
     authenticated_path: str
     remedies: dict[str, str]
+    #: Fewest reviews that must remain for a round to start; one means any review
+    #: left will do.
+    min_remaining: int = 1
 
 
 _PREFLIGHT_PATHS = (
@@ -103,7 +117,7 @@ _PREFLIGHT_PATHS = (
     "full_capacity_ms_path",
     "authenticated_path",
 )
-_PREFLIGHT_KEYS = frozenset(
+_PREFLIGHT_REQUIRED_KEYS = frozenset(
     {
         "command",
         "auth_command",
@@ -113,6 +127,9 @@ _PREFLIGHT_KEYS = frozenset(
         *_PREFLIGHT_PATHS,
     }
 )
+#: Optional ``local_preflight`` keys: absent means the documented default.
+_PREFLIGHT_OPTIONAL_KEYS = frozenset({"min_remaining"})
+_PREFLIGHT_KEYS = _PREFLIGHT_REQUIRED_KEYS | _PREFLIGHT_OPTIONAL_KEYS
 #: Why a preflight couldn't be read; each needs its own remedy text.
 PREFLIGHT_FAILURES = ("not_installed", "not_authenticated", "failed")
 
@@ -136,10 +153,14 @@ def _load_preflight(path: Path, key: str, value: Any) -> PreflightSpec | None:
     if value is None:
         return None
     where = f"{path}: reviewers.{key}.local_preflight"
-    if not isinstance(value, dict) or set(value) != _PREFLIGHT_KEYS:
+    if (
+        not isinstance(value, dict)
+        or not _PREFLIGHT_REQUIRED_KEYS <= set(value) <= _PREFLIGHT_KEYS
+    ):
         raise ValueError(
-            f"{where} must be null or an object with exactly the keys "
-            f"{sorted(_PREFLIGHT_KEYS)}."
+            f"{where} must be null or an object with the keys "
+            f"{sorted(_PREFLIGHT_REQUIRED_KEYS)} (optional: "
+            f"{sorted(_PREFLIGHT_OPTIONAL_KEYS)})."
         )
     for field in ("command", "auth_command"):
         if not _argv(value[field]):
@@ -161,6 +182,9 @@ def _load_preflight(path: Path, key: str, value: Any) -> PreflightSpec | None:
         raise ValueError(f"{where}.available_states must be a non-empty list.")
     if not _positive_int(value["max_recheck_seconds"]):
         raise ValueError(f"{where}.max_recheck_seconds must be a positive integer.")
+    minimum = value.get("min_remaining", 1)
+    if not _positive_int(minimum):
+        raise ValueError(f"{where}.min_remaining must be a positive integer.")
     return PreflightSpec(
         command=tuple(value["command"]),
         state_path=value["state_path"],
@@ -171,6 +195,7 @@ def _load_preflight(path: Path, key: str, value: Any) -> PreflightSpec | None:
         auth_command=tuple(value["auth_command"]),
         authenticated_path=value["authenticated_path"],
         remedies=dict(remedies),
+        min_remaining=minimum,
     )
 
 
@@ -183,7 +208,10 @@ class LocalReviewSpec(NamedTuple):
     The command prints one JSON event per line: the event type sits at
     ``event_type_path``, findings are ``finding_event`` lines whose fields
     ``finding_fields`` maps (``severity``, ``path``, ``line``, ``title``, ``body``),
-    and a ``complete_event`` line ends a finished review.
+    and a ``complete_event`` line ends a finished review. ``start_failure_pattern``
+    (optional) matches the command's output when it could not start a review at all,
+    which an exhausted allowance can cause; ``None`` means a start failure is never
+    read as exhaustion.
     """
 
     command: tuple[str, ...]
@@ -192,9 +220,10 @@ class LocalReviewSpec(NamedTuple):
     complete_event: str
     finding_fields: dict[str, str]
     timeout_seconds: int
+    start_failure_pattern: re.Pattern[str] | None = None
 
 
-_LOCAL_REVIEW_KEYS = frozenset(
+_LOCAL_REVIEW_REQUIRED_KEYS = frozenset(
     {
         "command",
         "event_type_path",
@@ -204,6 +233,9 @@ _LOCAL_REVIEW_KEYS = frozenset(
         "timeout_seconds",
     }
 )
+#: Optional ``local_review`` keys: absent means the documented default.
+_LOCAL_REVIEW_OPTIONAL_KEYS = frozenset({"start_failure_pattern"})
+_LOCAL_REVIEW_KEYS = _LOCAL_REVIEW_REQUIRED_KEYS | _LOCAL_REVIEW_OPTIONAL_KEYS
 #: The normalised finding fields every local review must map.
 LOCAL_FINDING_FIELDS = ("severity", "path", "line", "title", "body")
 #: Stands for the base commit in ``LocalReviewSpec.command``.
@@ -215,10 +247,14 @@ def _load_local_review(path: Path, key: str, value: Any) -> LocalReviewSpec | No
     if value is None:
         return None
     where = f"{path}: reviewers.{key}.local_review"
-    if not isinstance(value, dict) or set(value) != _LOCAL_REVIEW_KEYS:
+    if (
+        not isinstance(value, dict)
+        or not _LOCAL_REVIEW_REQUIRED_KEYS <= set(value) <= _LOCAL_REVIEW_KEYS
+    ):
         raise ValueError(
-            f"{where} must be null or an object with exactly the keys "
-            f"{sorted(_LOCAL_REVIEW_KEYS)}."
+            f"{where} must be null or an object with the keys "
+            f"{sorted(_LOCAL_REVIEW_REQUIRED_KEYS)} (optional: "
+            f"{sorted(_LOCAL_REVIEW_OPTIONAL_KEYS)})."
         )
     command = value["command"]
     if not _argv(command):
@@ -242,6 +278,19 @@ def _load_local_review(path: Path, key: str, value: Any) -> LocalReviewSpec | No
         )
     if not _positive_int(value["timeout_seconds"]):
         raise ValueError(f"{where}.timeout_seconds must be a positive integer.")
+    start_failure = None
+    if "start_failure_pattern" in value:
+        text = value["start_failure_pattern"]
+        if not isinstance(text, str) or not text:
+            raise ValueError(
+                f"{where}.start_failure_pattern must be a non-empty regex."
+            )
+        try:
+            start_failure = re.compile(text, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(
+                f"{where}.start_failure_pattern is not a valid regex: {exc}"
+            ) from exc
     return LocalReviewSpec(
         command=tuple(command),
         event_type_path=value["event_type_path"],
@@ -249,6 +298,7 @@ def _load_local_review(path: Path, key: str, value: Any) -> LocalReviewSpec | No
         complete_event=value["complete_event"],
         finding_fields=dict(fields),
         timeout_seconds=value["timeout_seconds"],
+        start_failure_pattern=start_failure,
     )
 
 
@@ -263,7 +313,7 @@ class ReviewerAdapter(NamedTuple):
     summary_marker: str | None
     clean_pattern: re.Pattern[str]
     findings_pattern: re.Pattern[str]
-    reviewed_sha_pattern: re.Pattern[str] | None
+    reviewed_sha_patterns: tuple[re.Pattern[str], ...]
     self_resolves_threads: bool
     summary_in_issue_comments: bool
     final_review_comment: str | None
@@ -271,6 +321,15 @@ class ReviewerAdapter(NamedTuple):
     final_review_done_pattern: re.Pattern[str] | None
     final_review_failed_pattern: re.Pattern[str] | None
     final_review_partial_pattern: re.Pattern[str] | None
+    # The reviewer's replies to the trigger comment (all four set, or all null for a
+    # reviewer that doesn't reply to it).
+    incremental_review_done_pattern: re.Pattern[str] | None
+    incremental_review_no_changes_pattern: re.Pattern[str] | None
+    incremental_review_failed_pattern: re.Pattern[str] | None
+    incremental_review_partial_pattern: re.Pattern[str] | None
+    # Findings the reviewer states with no thread to reply on; each pattern has one
+    # capture group holding the finding's text.
+    unthreaded_finding_patterns: tuple[re.Pattern[str], ...]
     # A command reply saying the request was refused for the rate limit (it never
     # ran, so it is a wait, not a review), the wait it states (one group, minutes),
     # the wait to assume when it states none, and the notice comment the reviewer
@@ -287,19 +346,28 @@ class ReviewerAdapter(NamedTuple):
 
 
 class RoundCaps(NamedTuple):
-    """How many local review rounds a PR gets around its final full review.
+    """How many review rounds a PR gets around its final full review.
 
-    Set in ``.github/pr-reviewer.json`` under ``review_rounds``. They apply only to a
-    reviewer that declares ``local_review``: its fix rounds run locally, before the
-    PR's one final full review and after it.
+    Set in ``.github/pr-reviewer.json`` under ``review_rounds``. ``before_final`` and
+    ``after_final`` count incremental PR reviews (the trigger comment) before and
+    after the final full review; ``fix_iterations`` is the fix loop's outer safety
+    net (the agent counts its passes, this is only the limit). The ``local_*`` caps
+    apply only to a reviewer that declares ``local_review``: its fix rounds run
+    locally, before the PR's one final full review and after it.
     """
 
+    before_final: int = 1
+    after_final: int = 3
+    fix_iterations: int = 5
     local_before_final: int = 3
     local_after_final: int = 3
 
 
 DEFAULT_ROUND_CAPS = RoundCaps()
 _ROUND_CAP_KEYS = {
+    "max_incremental_before_final": "before_final",
+    "max_incremental_after_final": "after_final",
+    "max_fix_iterations": "fix_iterations",
     "max_local_before_final": "local_before_final",
     "max_local_after_final": "local_after_final",
 }
@@ -368,6 +436,25 @@ def _one_group(path: Path, key: str, field: str, compiled: re.Pattern[str]) -> N
             f"{path}: reviewers.{key}.{field} must have exactly one capture group "
             f"(found {compiled.groups})."
         )
+
+
+def _pattern_list(
+    path: Path, key: str, field: str, value: Any, *, allow_empty: bool
+) -> tuple[re.Pattern[str], ...]:
+    """Compile a list of regexes, each with exactly one capture group."""
+    if (
+        not isinstance(value, list)
+        or not (value or allow_empty)
+        or not all(isinstance(p, str) and p for p in value)
+    ):
+        raise ValueError(
+            f"{path}: reviewers.{key}.{field} must be a list of non-empty regexes"
+            + ("." if allow_empty else " (at least one), a single regex, or null.")
+        )
+    compiled = tuple(_compile(path, key, field, p) for p in value)
+    for pattern in compiled:
+        _one_group(path, key, field, pattern)
+    return compiled
 
 
 def load_reviewer(
@@ -464,6 +551,30 @@ def load_reviewer(
         )
     )
 
+    for field in _INCREMENTAL_REVIEW_FIELDS:
+        value = raw.get(field, ...)
+        if not (value is None or (isinstance(value, str) and value)):
+            raise ValueError(
+                f"{path}: reviewers.{chosen}.{field} must be a non-empty string "
+                "or null (and must be present)."
+            )
+    if len({raw[field] is None for field in _INCREMENTAL_REVIEW_FIELDS}) != 1:
+        raise ValueError(
+            f"{path}: reviewers.{chosen}: {', '.join(_INCREMENTAL_REVIEW_FIELDS)} must "
+            "all be set or all be null."
+        )
+    if (
+        raw[_INCREMENTAL_REVIEW_FIELDS[0]] is not None
+        and raw["command_reply_marker"] is None
+    ):
+        raise ValueError(
+            f"{path}: reviewers.{chosen}: the incremental_review_* patterns classify "
+            "command replies, so command_reply_marker must be set too."
+        )
+    incremental = [
+        None if raw[field] is None else _compile(path, chosen, field, raw[field])
+        for field in _INCREMENTAL_REVIEW_FIELDS
+    ]
     rate_limited = raw.get("rate_limited_pattern", ...)
     if not (rate_limited is None or (isinstance(rate_limited, str) and rate_limited)):
         raise ValueError(
@@ -535,12 +646,30 @@ def load_reviewer(
 
     findings = _compile(path, chosen, "findings_pattern", raw["findings_pattern"])
     _one_group(path, chosen, "findings_pattern", findings)
-    reviewed_sha = None
-    if raw["reviewed_sha_pattern"] is not None:
-        reviewed_sha = _compile(
-            path, chosen, "reviewed_sha_pattern", raw["reviewed_sha_pattern"]
+    # One regex or an ordered list: the reviewer's summary format has changed before,
+    # and the first pattern that matches names the reviewed SHA.
+    sha_value = raw.get("reviewed_sha_pattern", ...)
+    if sha_value is ...:
+        raise ValueError(
+            f"{path}: reviewers.{chosen}.reviewed_sha_pattern must be present "
+            "(a regex, a non-empty list of regexes, or null)."
         )
-        _one_group(path, chosen, "reviewed_sha_pattern", reviewed_sha)
+    reviewed_sha: tuple[re.Pattern[str], ...] = ()
+    if sha_value is not None:
+        reviewed_sha = _pattern_list(
+            path,
+            chosen,
+            "reviewed_sha_pattern",
+            [sha_value] if isinstance(sha_value, str) else sha_value,
+            allow_empty=False,
+        )
+    unthreaded = _pattern_list(
+        path,
+        chosen,
+        "unthreaded_finding_patterns",
+        raw.get("unthreaded_finding_patterns"),
+        allow_empty=True,
+    )
 
     return ReviewerAdapter(
         key=chosen,
@@ -551,7 +680,7 @@ def load_reviewer(
         summary_marker=raw["summary_marker"],
         clean_pattern=_compile(path, chosen, "clean_pattern", raw["clean_pattern"]),
         findings_pattern=findings,
-        reviewed_sha_pattern=reviewed_sha,
+        reviewed_sha_patterns=reviewed_sha,
         self_resolves_threads=raw["self_resolves_threads"],
         summary_in_issue_comments=raw["summary_in_issue_comments"],
         final_review_comment=raw["final_review_comment"],
@@ -559,6 +688,11 @@ def load_reviewer(
         final_review_done_pattern=final_done,
         final_review_failed_pattern=final_failed,
         final_review_partial_pattern=final_partial,
+        incremental_review_done_pattern=incremental[0],
+        incremental_review_no_changes_pattern=incremental[1],
+        incremental_review_failed_pattern=incremental[2],
+        incremental_review_partial_pattern=incremental[3],
+        unthreaded_finding_patterns=unthreaded,
         rate_limited_pattern=(
             None
             if rate_limited is None
@@ -604,17 +738,22 @@ def _is_summary(body: str, adapter: ReviewerAdapter) -> bool:
     )
 
 
+def _reviewed_sha(body: str, adapter: ReviewerAdapter) -> str | None:
+    """Return the SHA a summary body says it reviewed (first matching pattern)."""
+    for pattern in adapter.reviewed_sha_patterns:
+        match = pattern.search(body)
+        if match:
+            return match.group(1)
+    return None
+
+
 def _on_head(
     review: Mapping[str, Any], head_sha: str | None, adapter: ReviewerAdapter
 ) -> bool:
     if head_sha is None or review.get("commit_id") == head_sha:
         return True
-    if adapter.reviewed_sha_pattern is None:
-        return False
-    match = adapter.reviewed_sha_pattern.search(review.get("body") or "")
-    if match is None:
-        return False
-    return head_sha.lower().startswith(match.group(1).lower())
+    sha = _reviewed_sha(review.get("body") or "", adapter)
+    return sha is not None and head_sha.lower().startswith(sha.lower())
 
 
 def _live(review: Mapping[str, Any]) -> bool:
@@ -674,6 +813,55 @@ def open_findings(
                 "body": first.get("body"),
             }
         )
+    return found
+
+
+def unthreaded_findings(
+    reviews: Iterable[Mapping[str, Any]],
+    comments: Iterable[Mapping[str, Any]],
+    head_sha: str,
+    adapter: ReviewerAdapter,
+) -> list[dict[str, Any]]:
+    """Return the findings stated on ``head_sha`` with no thread to reply on.
+
+    Matches the adapter's ``unthreaded_finding_patterns`` against its reviews on the
+    head and, when its summary lives in issue comments, against summaries that name
+    the head as reviewed. ``open_findings`` reads threads only, so these would be lost.
+
+    Parameters
+    ----------
+    reviews : Iterable[Mapping[str, Any]]
+        PR reviews as returned by the GitHub API.
+    comments : Iterable[Mapping[str, Any]]
+        PR issue comments.
+    head_sha : str
+        Head commit SHA the findings must be on.
+    adapter : ReviewerAdapter
+        Configured reviewer adapter.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One dict per finding with ``source`` (``review`` or ``summary_comment``),
+        ``id`` of that review or comment, and the finding's ``text``.
+    """
+    sources: list[tuple[str, Mapping[str, Any]]] = [("review", r) for r in reviews]
+    if adapter.summary_in_issue_comments:
+        sources += [("summary_comment", _comment_as_review(c)) for c in comments]
+    found: list[dict[str, Any]] = []
+    for source, item in sources:
+        if (
+            ((item.get("user") or {}).get("login")) not in adapter.bot_logins
+            or not _live(item)
+            or not _on_head(item, head_sha, adapter)
+        ):
+            continue
+        body = item.get("body") or ""
+        for pattern in adapter.unthreaded_finding_patterns:
+            for match in pattern.finditer(body):
+                text = match.group(1).strip()
+                if text:
+                    found.append({"source": source, "id": item.get("id"), "text": text})
     return found
 
 
@@ -1043,6 +1231,7 @@ def _comment_as_review(comment: Mapping[str, Any]) -> dict[str, Any]:
     head it covers.
     """
     return {
+        "id": comment.get("id"),
         "body": comment.get("body"),
         "user": comment.get("user"),
         "commit_id": None,
@@ -1051,10 +1240,26 @@ def _comment_as_review(comment: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _gh_json(args: Sequence[str]) -> Any:
+    """Run ``gh`` and parse its JSON; ``--paginate`` pages of arrays are flattened.
+
+    Recent ``gh`` merges array pages into one array, but a ``gh`` that prints one
+    array per page must not break the parse.
+    """
     out = subprocess.run(  # nosec B603 B607 -- fixed gh argv, no shell
         ["gh", *args], check=True, capture_output=True, text=True
     ).stdout
-    return json.loads(out) if out.strip() else None
+    decoder, docs, i = json.JSONDecoder(), [], 0
+    while i < len(out):
+        if out[i].isspace():
+            i += 1
+            continue
+        doc, i = decoder.raw_decode(out, i)
+        docs.append(doc)
+    if not docs:
+        return None
+    if len(docs) > 1 and all(isinstance(d, list) for d in docs):
+        return [item for page in docs for item in page]
+    return docs[0] if len(docs) == 1 else docs
 
 
 def collect_state(

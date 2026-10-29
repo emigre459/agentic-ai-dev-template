@@ -1312,3 +1312,380 @@ def test_loader_accepts_a_refusal_with_no_stated_wait(tmp_path: Path) -> None:
     adapter = load_reviewer(_write(tmp_path, config))
     assert adapter.rate_limit_wait_pattern is None
     assert adapter.rate_limit_default_wait_minutes == 30
+
+
+# --- List-valued reviewed-SHA patterns ----------------------------------------
+
+
+def test_loader_accepts_a_reviewed_sha_pattern_list(tmp_path: Path) -> None:
+    config = _config_with(reviewed_sha_pattern=["x(a)", "y(b)"])
+    adapter = load_reviewer(_write(tmp_path, config))
+    assert [p.pattern for p in adapter.reviewed_sha_patterns] == ["x(a)", "y(b)"]
+
+
+def test_loader_accepts_a_single_reviewed_sha_pattern(tmp_path: Path) -> None:
+    adapter = load_reviewer(_write(tmp_path, _config_with(reviewed_sha_pattern="x(a)")))
+    assert [p.pattern for p in adapter.reviewed_sha_patterns] == ["x(a)"]
+
+
+def test_a_null_reviewed_sha_pattern_means_no_patterns(tmp_path: Path) -> None:
+    adapter = load_reviewer(_write(tmp_path, _config_with(reviewed_sha_pattern=None)))
+    assert adapter.reviewed_sha_patterns == ()
+
+
+@pytest.mark.parametrize("value", [[], ["(a)(b)"], [""], 3, ""])
+def test_loader_rejects_a_bad_reviewed_sha_pattern(tmp_path: Path, value: Any) -> None:
+    config = _config_with(reviewed_sha_pattern=value)
+    with pytest.raises(ValueError, match="reviewed_sha_pattern"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_reviewed_sha_pattern_must_be_present(tmp_path: Path) -> None:
+    config = _config_with()
+    del config["reviewers"]["x"]["reviewed_sha_pattern"]
+    with pytest.raises(ValueError, match="reviewed_sha_pattern"):
+        load_reviewer(_write(tmp_path, config))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Reviewing files that changed between 1111111 and abc1234.",
+        '{"coveredCommitId": "abc1234"}',
+        'change_assessment_commit: "abc1234"',
+    ],
+    ids=["range", "covered-commit", "change-assessment"],
+)
+def test_coderabbit_reads_the_reviewed_sha_from_any_summary_format(body: str) -> None:
+    """The first matching pattern wins, so a changed summary format still resolves."""
+    head = "abc1234" + "0" * 33
+    reviews = [_rabbit(f"**Actionable comments posted: 1**\n{body}", commit=None)]
+    assert review_verdict(reviews, head, CODERABBIT) == ("findings", 1)
+
+
+# --- Incremental-review reply patterns ----------------------------------------
+
+
+def test_loader_incremental_fields_must_be_present(tmp_path: Path) -> None:
+    config = _config_with()
+    del config["reviewers"]["x"]["incremental_review_failed_pattern"]
+    with pytest.raises(ValueError, match="incremental_review_failed_pattern"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_incremental_fields_are_all_or_nothing(tmp_path: Path) -> None:
+    config = _config_with(**_MARKED, incremental_review_done_pattern="done")
+    with pytest.raises(ValueError, match="all be set or all be null"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_incremental_fields_need_the_reply_marker(tmp_path: Path) -> None:
+    fields = reviewer_state._INCREMENTAL_REVIEW_FIELDS
+    config = _config_with(**dict.fromkeys(fields, "x"))
+    with pytest.raises(ValueError, match="command_reply_marker"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_compiles_the_incremental_patterns(tmp_path: Path) -> None:
+    fields = reviewer_state._INCREMENTAL_REVIEW_FIELDS
+    adapter = load_reviewer(
+        _write(tmp_path, _config_with(**_MARKED, **dict.fromkeys(fields, "x")))
+    )
+    for field in fields:
+        pattern = getattr(adapter, field)
+        assert pattern is not None and pattern.search("X")
+
+
+def test_loader_rejects_an_invalid_incremental_pattern(tmp_path: Path) -> None:
+    fields = reviewer_state._INCREMENTAL_REVIEW_FIELDS
+    values = dict.fromkeys(fields, "x") | {fields[1]: "(unclosed"}
+    with pytest.raises(ValueError, match=fields[1]):
+        load_reviewer(_write(tmp_path, _config_with(**_MARKED, **values)))
+
+
+def test_coderabbit_declares_its_incremental_replies_and_bugbot_none() -> None:
+    reply = "I am an incremental review system.\n\nReview finished."
+    assert CODERABBIT.incremental_review_done_pattern is not None
+    assert CODERABBIT.incremental_review_done_pattern.search(reply)
+    assert CODERABBIT.incremental_review_no_changes_pattern is not None
+    assert CODERABBIT.incremental_review_failed_pattern is not None
+    assert CODERABBIT.incremental_review_partial_pattern is not None
+    for field in reviewer_state._INCREMENTAL_REVIEW_FIELDS:
+        assert getattr(BUGBOT, field) is None
+
+
+# --- Unthreaded-finding patterns ----------------------------------------------
+
+
+@pytest.mark.parametrize("value", [None, "x(a)", ["no group"], [""]])
+def test_loader_rejects_bad_unthreaded_finding_patterns(
+    tmp_path: Path, value: Any
+) -> None:
+    config = _config_with(unthreaded_finding_patterns=value)
+    with pytest.raises(ValueError, match="unthreaded_finding_patterns"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_accepts_an_empty_unthreaded_finding_list(tmp_path: Path) -> None:
+    adapter = load_reviewer(
+        _write(tmp_path, _config_with(unthreaded_finding_patterns=[]))
+    )
+    assert adapter.unthreaded_finding_patterns == ()
+
+
+def test_loader_ignores_unknown_top_level_keys(tmp_path: Path) -> None:
+    """A later top-level section (e.g. ``test_speed``) must not break the loaders."""
+    config = _config_with() | {"test_speed": {"budget_seconds": 10}}
+    config["review_rounds"] = {"max_local_before_final": 2}
+    path = _write(tmp_path, config)
+    assert load_reviewer(path).key == "x"
+    assert reviewer_state.load_round_caps(path).local_before_final == 2
+
+
+_RISK = "<!-- final_review_risk_start -->{}<!-- final_review_risk_end -->"
+_OUTSIDE = (
+    "**Outside diff range comments (1)**\n\n<details>\n"
+    "<summary>src/app/mod.py (1)</summary>\n\n`10-20`: Handle the empty case.\n\n"
+    "</details>\n\n---\n\nOther text"
+)
+_HEAD = "abc1234" + "0" * 33
+
+
+def _risk_comment(text: str, comment_id: int = 7) -> dict[str, Any]:
+    body = f"Reviewing files between 1111111 and abc1234.\n{_RISK.format(text)}"
+    return {
+        "id": comment_id,
+        "body": body,
+        "user": {"login": "coderabbitai[bot]"},
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:05:00Z",
+    }
+
+
+def test_unthreaded_findings_carry_merge_risk_and_outside_diff() -> None:
+    reviews = [{"id": 5, **_rabbit(_OUTSIDE, commit=_HEAD)}]
+    comments = [_risk_comment("**Merge Risk:** the handler can return HTTP 500.")]
+    found = reviewer_state.unthreaded_findings(reviews, comments, _HEAD, CODERABBIT)
+    assert {(f["source"], f["id"]) for f in found} == {
+        ("summary_comment", 7),
+        ("review", 5),
+    }
+    merge_risk = next(f["text"] for f in found if f["source"] == "summary_comment")
+    assert merge_risk == "**Merge Risk:** the handler can return HTTP 500."
+    outside = next(f["text"] for f in found if f["source"] == "review")
+    assert "10-20" in outside and "Other text" not in outside
+
+
+def test_unthreaded_findings_skip_other_heads() -> None:
+    reviews = [{"id": 5, **_rabbit(_OUTSIDE, commit=_HEAD)}]
+    comments = [_risk_comment("**Merge Risk:** x")]
+    assert (
+        reviewer_state.unthreaded_findings(reviews, comments, "0" * 40, CODERABBIT)
+        == []
+    )
+
+
+def test_unthreaded_findings_skip_other_authors_and_dismissed_reviews() -> None:
+    reviews = [
+        {"id": 1, **_rabbit(_OUTSIDE, commit=_HEAD, login="octocat")},
+        {"id": 2, **_rabbit(_OUTSIDE, commit=_HEAD), "state": "DISMISSED"},
+    ]
+    comment = _risk_comment("**Merge Risk:** x")
+    comment["user"] = {"login": "octocat"}
+    assert (
+        reviewer_state.unthreaded_findings(reviews, [comment], _HEAD, CODERABBIT) == []
+    )
+
+
+def test_unthreaded_findings_ignore_empty_matches() -> None:
+    comments = [_risk_comment("   ")]
+    assert reviewer_state.unthreaded_findings([], comments, _HEAD, CODERABBIT) == []
+
+
+def test_bugbot_has_no_unthreaded_findings() -> None:
+    reviews = [{"id": 5, **_review(_OUTSIDE, commit=_HEAD)}]
+    assert reviewer_state.unthreaded_findings(reviews, [], _HEAD, BUGBOT) == []
+
+
+def test_a_summary_comment_keeps_its_id_when_shaped_as_a_review() -> None:
+    shaped = reviewer_state._comment_as_review(_risk_comment("x", comment_id=42))
+    assert shaped["id"] == 42
+
+
+# --- The local preflight's minimum and the start-failure pattern ---------------
+
+
+def test_min_remaining_is_optional_and_defaults_to_one(tmp_path: Path) -> None:
+    config = _config_with(
+        local_preflight=_preflight(), local_review=_LOCAL_REVIEW, **_MARKED
+    )
+    adapter = load_reviewer(_write(tmp_path, config))
+    assert adapter.local_preflight is not None
+    assert adapter.local_preflight.min_remaining == 1
+
+
+def test_loader_reads_min_remaining(tmp_path: Path) -> None:
+    config = _config_with(
+        local_preflight=_preflight(min_remaining=3),
+        local_review=_LOCAL_REVIEW,
+        **_MARKED,
+    )
+    adapter = load_reviewer(_write(tmp_path, config))
+    assert adapter.local_preflight is not None
+    assert adapter.local_preflight.min_remaining == 3
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, 1.5, "2", None])
+def test_loader_rejects_a_bad_min_remaining(tmp_path: Path, bad: Any) -> None:
+    config = _config_with(
+        local_preflight=_preflight(min_remaining=bad),
+        local_review=_LOCAL_REVIEW,
+        **_MARKED,
+    )
+    with pytest.raises(ValueError, match="min_remaining"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_start_failure_pattern_is_optional(tmp_path: Path) -> None:
+    config = _config_with(local_review=_LOCAL_REVIEW, **_MARKED)
+    adapter = load_reviewer(_write(tmp_path, config))
+    assert adapter.local_review is not None
+    assert adapter.local_review.start_failure_pattern is None
+
+
+def test_loader_reads_start_failure_pattern(tmp_path: Path) -> None:
+    review = _LOCAL_REVIEW | {"start_failure_pattern": "Could not start"}
+    adapter = load_reviewer(
+        _write(tmp_path, _config_with(local_review=review, **_MARKED))
+    )
+    assert adapter.local_review is not None
+    pattern = adapter.local_review.start_failure_pattern
+    assert pattern is not None and pattern.search("could not start review")
+
+
+@pytest.mark.parametrize("bad", ["", 3, "(unclosed"])
+def test_loader_rejects_a_bad_start_failure_pattern(tmp_path: Path, bad: Any) -> None:
+    review = _LOCAL_REVIEW | {"start_failure_pattern": bad}
+    with pytest.raises(ValueError, match="start_failure_pattern"):
+        load_reviewer(_write(tmp_path, _config_with(local_review=review, **_MARKED)))
+
+
+def test_loader_still_rejects_an_unknown_local_review_key(tmp_path: Path) -> None:
+    review = _LOCAL_REVIEW | {"surprise": 1}
+    with pytest.raises(ValueError, match="local_review"):
+        load_reviewer(_write(tmp_path, _config_with(local_review=review, **_MARKED)))
+
+
+def test_coderabbit_declares_its_capacity_minimum_and_start_failure() -> None:
+    assert CODERABBIT.local_preflight is not None
+    assert CODERABBIT.local_preflight.min_remaining == 2
+    assert CODERABBIT.local_review is not None
+    pattern = CODERABBIT.local_review.start_failure_pattern
+    assert pattern is not None and pattern.search("Failed to start review")
+
+
+# --- The refreshed rate-limit pattern -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Review rate limited. Your next review will be available in 5 minutes.",
+        "Your included review limit is currently reached.",
+    ],
+)
+def test_coderabbit_recognises_both_refusal_wordings(reply: str) -> None:
+    pattern = CODERABBIT.rate_limited_pattern
+    assert pattern is not None and pattern.search(reply)
+
+
+def test_coderabbit_refusal_pattern_skips_a_reply_that_performed_an_action() -> None:
+    pattern = CODERABBIT.rate_limited_pattern
+    assert pattern is not None
+    reply = "Action performed: review triggered.\n\nReview rate limited earlier."
+    assert pattern.search(reply) is None
+
+
+# --- Round caps -----------------------------------------------------------------
+
+
+def test_the_repo_config_sets_the_incremental_and_fix_caps() -> None:
+    caps = reviewer_state.load_round_caps()
+    assert (caps.before_final, caps.after_final, caps.fix_iterations) == (1, 3, 5)
+
+
+def test_round_caps_read_incremental_and_fix_keys(tmp_path: Path) -> None:
+    config = _config_with()
+    config["review_rounds"] = {
+        "max_incremental_before_final": 4,
+        "max_incremental_after_final": 2,
+        "max_fix_iterations": 8,
+    }
+    caps = reviewer_state.load_round_caps(_write(tmp_path, config))
+    assert (caps.before_final, caps.after_final, caps.fix_iterations) == (4, 2, 8)
+    assert (caps.local_before_final, caps.local_after_final) == (3, 3)
+
+
+def test_round_cap_defaults_without_a_config_block(tmp_path: Path) -> None:
+    caps = reviewer_state.load_round_caps(_write(tmp_path, _config_with()))
+    assert (caps.before_final, caps.after_final, caps.fix_iterations) == (1, 3, 5)
+
+
+@pytest.mark.parametrize(
+    "rounds",
+    [
+        {"max_incremental_before_final": -1},
+        {"max_incremental_after_final": True},
+        {"max_fix_iterations": "5"},
+    ],
+)
+def test_bad_incremental_caps_are_rejected(
+    tmp_path: Path, rounds: dict[str, Any]
+) -> None:
+    config = _config_with()
+    config["review_rounds"] = rounds
+    with pytest.raises(ValueError, match="review_rounds"):
+        reviewer_state.load_round_caps(_write(tmp_path, config))
+
+
+# --- Paginated gh output ----------------------------------------------------------
+
+
+def _fake_run(stdout: str) -> Any:
+    class _Done:
+        pass
+
+    done = _Done()
+    done.stdout = stdout  # type: ignore[attr-defined]
+    return lambda *args, **kwargs: done
+
+
+def test_gh_json_flattens_one_array_per_page(monkeypatch: Any) -> None:
+    """A gh that prints each page's array separately must still parse."""
+    monkeypatch.setattr(
+        reviewer_state.subprocess,
+        "run",
+        _fake_run('[{"id": 1}, {"id": 2}]\n[{"id": 3}]\n'),
+    )
+    assert reviewer_state._gh_json(["api", "x", "--paginate"]) == [
+        {"id": 1},
+        {"id": 2},
+        {"id": 3},
+    ]
+
+
+def test_gh_json_reads_a_single_document(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        reviewer_state.subprocess, "run", _fake_run('{"data": {"a": 1}}')
+    )
+    assert reviewer_state._gh_json(["api", "graphql"]) == {"data": {"a": 1}}
+
+
+def test_gh_json_reads_a_single_array(monkeypatch: Any) -> None:
+    monkeypatch.setattr(reviewer_state.subprocess, "run", _fake_run('[{"id": 1}]'))
+    assert reviewer_state._gh_json(["api", "x"]) == [{"id": 1}]
+
+
+def test_gh_json_of_empty_output_is_none(monkeypatch: Any) -> None:
+    monkeypatch.setattr(reviewer_state.subprocess, "run", _fake_run("\n"))
+    assert reviewer_state._gh_json(["api", "x"]) is None
