@@ -413,13 +413,13 @@ Write long bodies to a scratch file and pass `-F body=@file`. Append amendment b
 **Partial-success reporting (Phase 5).** If issue creation succeeds but blocked-by wiring or epic-nesting fails, the issue still exists. Don't roll back — that's destructive and we don't know what the user wants. Report:
 
 ```
-Created N issues, wired M of K dependencies, nested J of N under epics, attached L of N to project.
+Created N issues, wired M of K dependencies, nested J of P nestable cards under epics, attached L of N to project.
 Failed steps:
   - <issue #x>: <command that would re-run the failed step manually>
   …
 ```
 
-Count definitions: J counts every card successfully nested, including via the task-list-checkbox fallback; cards intentionally left unparented (would-be-epic) are excluded from both J and N. When the board auto-adds, report "attach: auto-added" instead of L of N.
+Count definitions: N is every card created this session. P (the nesting denominator) is the cards that should nest — N minus the cards intentionally left unparented (would-be-epic) — and J counts every one of those successfully nested, including via the task-list-checkbox fallback; would-be-epic cards still count in N (and in L of N). When the board auto-adds, report "attach: auto-added" instead of L of N.
 
 Worktree stays alive; user fixes manually or re-invokes the skill on a smaller scope.
 
