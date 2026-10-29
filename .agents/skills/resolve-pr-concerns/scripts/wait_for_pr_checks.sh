@@ -290,7 +290,7 @@ if [[ -n "$REPO" ]]; then
         --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | .comments.nodes[0] | "  - \(.author.login) \(.path):\(.line) — \((.body|split("\n")[0]|gsub("^### ";"")))"' 2>/dev/null); then
     if [[ -n "$findings" ]]; then
       echo "$findings"
-      echo "  (unresolved review threads remain — address + resolve them; do NOT merge yet.)" >&2
+      echo "  (unresolved review threads remain — answer each one and leave resolving to a human; do NOT merge yet.)" >&2
     else
       echo "  none unresolved."
     fi
