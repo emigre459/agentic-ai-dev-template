@@ -68,7 +68,7 @@ Apply each bot PR's manifest change, then relock with the tool. Keep the groups 
 
 ## Step 4: Bump everything else
 
-- **uv projects:** `uv lock --upgrade` in each.
+- **uv projects:** `uv lock --upgrade` in each. It never touches `[build-system] requires` (build requirements aren't locked): bump those only by editing the manifest, as a bot PR proposes.
 - **bun projects:** `bun update --latest` in each (this crosses majors and rewrites `package.json` ranges).
 - **GitHub Actions:** only the `uses:` pins a bot PR proposed; there is no relock tool.
 - Then `make deps` so the environment matches the locks.
@@ -83,7 +83,7 @@ make pr_check && make coverage && make security
 
 Read the failures, not just the exit codes. Typical, mechanical breakage:
 
-- **A linter's new default rules** (e.g. a ruff release adding import-order or `subprocess` `check=` findings): fix each finding; `--fix` for the auto-fixable ones, by hand for the rest.
+- **A linter's new default rules** (e.g. a ruff release adding import-order or `subprocess` `check=` findings): fix each finding; `--fix` for the auto-fixable ones, by hand for the rest. Read every *unsafe* auto-fix against the file's own constraints before keeping it — e.g. rewriting a type alias to `type X = ...` is a SyntaxError on the older interpreter a stdlib-only script promises to run under; find the form that satisfies both.
 - **A config schema bump** (e.g. Biome asking for `biome migrate`): run the tool's migration.
 - **A changed API in a major:** update the call sites with TDD.
 
