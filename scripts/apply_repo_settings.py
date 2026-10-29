@@ -11,9 +11,10 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Container
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -42,6 +43,11 @@ class CommandResult(Protocol):
 
 
 REPO_SETTINGS_DIR = Path(__file__).resolve().parent.parent / ".github" / "repo-settings"
+
+# Rule types the bootstrap phase defers until the setup PR merges: the required CI
+# checks (their workflow isn't on main yet) and the merge queue (with no required
+# checks it would merge untested).
+DEFERRED_RULE_TYPES = frozenset({"required_status_checks", "merge_queue"})
 
 # Ruleset fields we assert; everything else (id, timestamps, _links) is ignored.
 _RULESET_KEYS = (
@@ -85,7 +91,7 @@ def ruleset_for_phase(
     ruleset
         Canonical final ruleset loaded from disk.
     phase
-        ``bootstrap`` defers required CI contexts; ``final`` keeps every rule.
+        ``bootstrap`` defers ``DEFERRED_RULE_TYPES``; ``final`` keeps every rule.
 
     Returns
     -------
@@ -104,9 +110,74 @@ def ruleset_for_phase(
         phased["rules"] = [
             rule
             for rule in phased.get("rules", [])
-            if rule.get("type") != "required_status_checks"
+            if rule.get("type") not in DEFERRED_RULE_TYPES
         ]
     return phased
+
+
+def has_rule(ruleset: JsonObject, rule_type: str) -> bool:
+    """Whether ``ruleset`` declares a rule of ``rule_type``."""
+    return any(rule.get("type") == rule_type for rule in ruleset.get("rules", []))
+
+
+def without_rule(ruleset: JsonObject, rule_type: str) -> JsonObject:
+    """Return a deep copy of ``ruleset`` with every ``rule_type`` rule removed."""
+    trimmed = copy.deepcopy(ruleset)
+    trimmed["rules"] = [
+        rule for rule in trimmed.get("rules", []) if rule.get("type") != rule_type
+    ]
+    return trimmed
+
+
+def merge_queue_eligibility(
+    repo: JsonObject, org: JsonObject | None
+) -> tuple[Literal["yes", "no", "unknown"], str]:
+    """Decide whether GitHub offers a merge queue for this repository.
+
+    GitHub offers merge queues on organization-owned repositories that are public,
+    or private/internal on GitHub Enterprise Cloud. The org's plan is only readable
+    by its owners, so a private org repo whose plan can't be read is ``unknown``.
+
+    Parameters
+    ----------
+    repo
+        ``GET repos/{repo}``.
+    org
+        ``GET orgs/{owner}`` for a non-public org repo, or None when unread.
+
+    Returns
+    -------
+    tuple
+        ``yes`` / ``no`` / ``unknown``, and the reason, for the operator.
+    """
+    owner = repo.get("owner") or {}
+    if owner.get("type") != "Organization":
+        return "no", "the repository is owned by a user, not an organization"
+    if repo.get("visibility") == "public":
+        return "yes", "the repository is public and organization-owned"
+    plan = ((org or {}).get("plan") or {}).get("name")
+    if plan is None:
+        return "unknown", "the organization's plan isn't visible to this account"
+    if plan == "enterprise":
+        return "yes", "the organization is on GitHub Enterprise Cloud"
+    return "no", f"the repository is private and the organization's plan is {plan!r}"
+
+
+def _is_merge_queue_rejection(exc: RuntimeError) -> bool:
+    """Whether GitHub refused a ruleset because it offers no merge queue here."""
+    # GitHub doesn't document the wording; accept `merge_queue` or "merge queue".
+    detail = str(exc)
+    return "HTTP 422" in detail and bool(
+        re.search(r"merge[_ ]queue", detail, re.IGNORECASE)
+    )
+
+
+def _no_queue_notice(repo: str, reason: str) -> str:
+    return (
+        f"{repo}: no merge queue -- {reason}. GitHub offers merge queues only on "
+        "organization-owned repositories (public, or private on Enterprise Cloud); "
+        "PRs here merge without one."
+    )
 
 
 def find_main_ruleset(existing: list[JsonObject]) -> JsonObject | None:
@@ -173,7 +244,7 @@ def plan_actions(
     desired_ruleset: JsonObject,
     desired_merge: JsonObject,
     desired_security: JsonObject,
-    forbidden_rule_types: set[str] | None = None,
+    forbidden_rule_types: Container[str] | None = None,
 ) -> list[Action]:
     """Compute the minimal set of apply actions.
 
@@ -186,7 +257,7 @@ def plan_actions(
     if main is None:
         actions.append(("ruleset", "POST", None))
     elif not ruleset_matches(desired_ruleset, main) or any(
-        rule.get("type") in (forbidden_rule_types or set())
+        rule.get("type") in (forbidden_rule_types or ())
         for rule in main.get("rules", [])
     ):
         actions.append(("ruleset", "PUT", main["id"]))
@@ -217,7 +288,10 @@ def _run_gh(
             "then run `gh auth login`."
         ) from exc
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or "No error detail returned.").strip()
+        # `gh api` puts the summary ("... (HTTP 422)") on stderr and GitHub's error
+        # body -- which names the offending field -- on stdout; keep both.
+        parts = [str(part).strip() for part in (exc.stderr, exc.stdout) if part]
+        detail = " ".join(part for part in parts if part) or "No error detail returned."
         permission_hint = ""
         if any(token in detail for token in ("HTTP 403", "HTTP 404", "accessible")):
             permission_hint = (
@@ -327,15 +401,45 @@ def main(
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 
+    queue_verdict, queue_reason = "yes", ""
+    if has_rule(desired_ruleset, "merge_queue"):
+        owner = current_merge.get("owner") or {}
+        org = None
+        if owner.get("type") == "Organization" and (
+            current_merge.get("visibility") != "public"
+        ):
+            try:
+                org = _gh_json(["api", f"orgs/{owner.get('login')}"], runner)
+            except RuntimeError:
+                org = None  # plan unreadable: eligibility says "unknown"
+        queue_verdict, queue_reason = merge_queue_eligibility(current_merge, org)
+        live_main = find_main_ruleset(current_rulesets)
+        if (
+            queue_verdict == "unknown"
+            and live_main is not None
+            and not has_rule(live_main, "merge_queue")
+            and ruleset_matches(without_rule(desired_ruleset, "merge_queue"), live_main)
+        ):
+            # Everything but the queue is already live, and we can't tell whether
+            # GitHub offers one here: re-sending it would just be rejected again on
+            # every run. An org owner can read the plan and settle it.
+            queue_verdict = "no"
+            queue_reason = (
+                "the organization's plan isn't visible to this account and the "
+                "live ruleset has no queue (GitHub may have rejected it before); "
+                "re-run as an organization owner to settle it"
+            )
+        if queue_verdict == "no":
+            desired_ruleset = without_rule(desired_ruleset, "merge_queue")
+            print(_no_queue_notice(repo, queue_reason))
+
     actions = plan_actions(
         current_rulesets,
         current_merge,
         desired_ruleset,
         desired.merge,
         desired.security,
-        forbidden_rule_types=(
-            {"required_status_checks"} if args.phase == "bootstrap" else None
-        ),
+        forbidden_rule_types=DEFERRED_RULE_TYPES if args.phase == "bootstrap" else None,
     )
     if not actions:
         print(f"{repo}: settings already aligned — no changes.")
@@ -352,14 +456,24 @@ def main(
             return 1
 
     try:
-        _apply_actions(actions, repo, desired, desired_ruleset, runner)
+        try:
+            _apply_actions(actions, repo, desired, desired_ruleset, runner)
+        except RuntimeError as exc:
+            # Only when eligibility was a guess: GitHub's 422 settles it. Ruleset
+            # actions run first, so nothing else was applied before the failure.
+            if queue_verdict != "unknown" or not _is_merge_queue_rejection(exc):
+                raise
+            desired_ruleset = without_rule(desired_ruleset, "merge_queue")
+            print(_no_queue_notice(repo, "GitHub rejected the merge_queue rule"))
+            _apply_actions(actions, repo, desired, desired_ruleset, runner)
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     print(f"Applied {args.phase} settings to {repo}.")
     if args.phase == "bootstrap":
         print(
-            "Required CI checks are deferred until the setup PR merges. "
+            "Required CI checks and the merge queue are deferred until the setup "
+            "PR merges. "
             "After merge, run `make finalize_repo_settings TARGET_REPO="
             f"{repo}`."
         )
