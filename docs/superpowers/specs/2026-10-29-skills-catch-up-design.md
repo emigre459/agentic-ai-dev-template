@@ -89,14 +89,23 @@ builder's working notes; this document carries every decision they fed.
    come from one planned card). **Total files changed across the whole stack < 300**.
 7. **Merge-ready is report-only** (see anti-goals).
 8. Tracker routing → #48.
-9. **Stacks work without a merge queue.** No ruleset or CI change: every layer's PR
-   runs full CI and is gated on its own; `gh stack merge` lands bottom-up. The
-   stacking references say where a merge queue, if a repo has one, changes things.
+9. **Stacks work with or without a merge queue; this card changes no ruleset or CI.**
+   PR #55 (issue #53) makes a merge queue the template default wherever GitHub
+   offers one (org-owned repos); user-owned repos, this template included, get none.
+   So the stacking references describe both paths: with a queue, `gh stack merge`
+   enqueues the layers and the queue tests and lands them bottom-up against the
+   latest `main`; without one, every layer's PR runs full CI and is gated on its own,
+   and landing follows the no-queue retarget steps. Per-layer CI gating (heavy jobs
+   only on the bottom layer) is not added.
 10. **CODEOWNERS alone turns the ownership status on**, with or without a configured
     reviewer. A repo with neither a reviewer nor a CODEOWNERS file still gets no
     `review-gate` status (today's behavior).
 11. **The org-name guard stores hashed names**, never plain text (the repo is
     public). Also scrub the one existing org mention (a `pyproject.toml` comment).
+12. **`gh stack` installation stays manual.** The template installs no tools today, so
+    the skills detect a missing extension and show the user the commands; they never
+    install it themselves. (Had install machinery existed, it would have needed a
+    loud, explicit human Y/N before installing anything locally.)
 
 ## Design, per skill
 
@@ -196,10 +205,14 @@ allow-lists, README, tests).
   same planned card, < 300 files changed across the whole stack (beyond that, split
   the card via `/plan-issues`, don't stack harder). Not for docs/config-only work,
   hotfixes, or a change that can't be split into layers that are each green.
-- **Tooling:** GitHub's `gh stack` CLI extension (`github/gh-stack`, MIT). It is
-  referenced as a prerequisite (`gh extension install github/gh-stack`; its agent
-  skill via `npx skills add github/gh-stack`), not vendored. *Builder's call
-  (marked):* don't copy a third-party skill into the template.
+- **Tooling:** GitHub's `gh stack` CLI extension (`github/gh-stack`, MIT), plus its
+  agent skill (`npx skills add github/gh-stack`). The template has no tool-install
+  machinery (its init preflight only checks that `gh` is on PATH and tells the user
+  to install it), so installing `gh stack` stays **manual** (decision 12): when
+  build-from-issue is about to offer a stack it checks `gh stack --help`; if the
+  extension is missing it says so plainly and prints the exact install commands for
+  the user to run. The agent never installs anything on the user's machine itself.
+  The third-party skill is not vendored.
 - **References, each skill owning its own copy of what it needs** (no cross-skill
   paths): `build-from-issue/references/stacked-prs.md` (when to stack, splitting,
   the plan's `## Stack` section, building, finalize: `make pr_check` on the top
@@ -210,13 +223,13 @@ allow-lists, README, tests).
   layer, CI on a stack, `merge_gate.py --stack`, landing with `gh stack merge` by a
   human or with one-off permission). Generalized from the downstream reference;
   its pilot data and issue numbers are dropped, keeping the reasoning.
-- **No merge queue assumed** (decision 9). Every layer's PR runs the full CI, so the
-  local finalize runs `make pr_check` on the top layer (it contains every change)
-  and the per-layer gate is CI itself; drop the downstream's lint-only-lower-layers
-  rationale and its bottom-layer-only CI gating. Landing covers the no-queue
-  retarget gotchas (a merged layer's successor must be rebased onto the new base
-  before it can land). Where a merge queue would change a step, the reference says
-  so in one line.
+- **Merge queue optional** (decision 9). Local finalize runs `make pr_check` on the
+  top layer (it contains every change); each layer's PR runs full CI. Landing: with
+  a queue, `gh stack merge` enqueues the stack and the queue tests each layer
+  against the latest `main`; without one, the reference covers the retarget gotchas
+  (a merged layer's successor must be rebased onto the new base before it lands).
+  `merge_gate.py` treats `BEHIND` as a blocker only while the ruleset requires
+  up-to-date branches, which a queue replaces.
 
 ### build-from-issue (`SKILL.md`)
 
@@ -301,6 +314,9 @@ hashes, so no name is published in plain text.
 
 ## Constraints
 
+- PR #55 (merge queue default) touches `AGENTS.md`, `README.md` and
+  `.github/repo-settings/ruleset.json`; this branch merges `main` in once #55 lands
+  and reconciles the `AGENTS.md` quality-gates and PR-guidelines text.
 - Harness-agnostic skills (`.agents/rules/shared/harness-agnostic-skills.md`):
   skill-root-relative bundled paths, `.agents/skills/` as canonical, no mandatory
   Claude-only tool.
