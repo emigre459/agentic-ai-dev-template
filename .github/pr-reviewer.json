@@ -15,7 +15,7 @@
     "factor_high": 2.0,
     "shared_setup_budget_seconds": 30,
     "default_runner_class": "ubuntu-latest",
-    "reference_seconds": {"ubuntu-latest": 0.874}
+    "reference_seconds": {"ubuntu-latest": 0.45}
   },
   "reviewers": {
     "bugbot": {

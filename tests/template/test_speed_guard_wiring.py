@@ -146,6 +146,26 @@ def test_ci_runs_the_speed_check_after_coverage_except_on_push(job: str) -> None
     assert guard.get("if") == "github.event_name != 'push'"
 
 
+def test_react_ci_times_the_guard_on_the_python_stacks_interpreter() -> None:
+    """The calibration benchmark is Python, so its speed depends on the interpreter.
+
+    Both stacks' guards must calibrate on the same Python version, or one
+    ``ubuntu-latest`` reference would scale their budgets differently.
+    """
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    steps = _steps(workflow, "react-tests")
+    runs = [step.get("run") for step in steps]
+    setups = [
+        i
+        for i, step in enumerate(steps)
+        if str(step.get("uses", "")).startswith("actions/setup-python@")
+    ]
+    assert setups and setups[0] < runs.index("make test_speed_check")
+    pinned = str(steps[setups[0]]["with"]["python-version"])
+    stack_python = (REPO_ROOT / "stacks/python/.python-version").read_text().strip()
+    assert stack_python.startswith(pinned), (pinned, stack_python)
+
+
 def test_ci_keeps_the_speed_check_inside_each_stack_marker_block() -> None:
     """``make init`` strips the other stack's block, so each step must sit in its own."""
     text = (REPO_ROOT / ".github/workflows/ci.yml").read_text()

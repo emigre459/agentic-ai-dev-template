@@ -148,7 +148,8 @@ def test_the_shipped_config_section_loads() -> None:
     assert (settings["factor_low"], settings["factor_high"]) == (0.5, 2.0)
     assert settings["shared_setup_budget_seconds"] == 30
     assert settings["default_runner_class"] == "ubuntu-latest"
-    assert settings["reference_seconds"] == {"ubuntu-latest": 0.874}
+    # Seeded from the template's own CI: python-tests, Python 3.13 on ubuntu-latest.
+    assert settings["reference_seconds"] == {"ubuntu-latest": 0.45}
     assert rs.DEFAULT_CONFIG == _CONFIG
 
 

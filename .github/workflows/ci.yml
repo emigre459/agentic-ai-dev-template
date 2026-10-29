@@ -93,6 +93,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
+      # The guard calibrates with a Python benchmark, so it runs on the same
+      # interpreter as the python stack's guard (keep in step with its
+      # .python-version); one ubuntu-latest reference then fits both stacks.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
       - run: make deps
       - run: make coverage
       # Not on pushes to main: there it would only re-run flakes after merge.
