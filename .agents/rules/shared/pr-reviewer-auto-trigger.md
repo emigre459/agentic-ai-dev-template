@@ -8,6 +8,9 @@ alwaysApply: true
 The automated PR reviewer is whichever one `.github/pr-reviewer.json` names as
 `active`; the config declares its `check_name`, `trigger_comment`, and `bot_logins`.
 Swapping reviewers is a config edit — never hardcode a vendor in skills or rules.
+**`"active": null` means the repo has no automated reviewer** (no subscription, or
+not installed): post no trigger or final-review comment, run no local review, and
+don't wait for a review — `resolve-pr-concerns` falls back to its Step 1b pre-pass.
 Vendor quirks live in
 `.agents/skills/resolve-pr-concerns/references/reviewers/<active>.md`.
 
@@ -21,7 +24,8 @@ side**, not something this repo controls:
 
 The reviewer must also be **installed** (its GitHub App) and **enabled** for the repo
 before it reviews at all. A fresh repo created from this template has no automated
-review until someone installs + enables it.
+review until someone installs + enables it **and** sets `active` to its adapter key
+(the template ships with `"active": null`).
 
 **How to apply:** Detect the mode once per PR (see `resolve-pr-concerns` Step 1a)
 and act accordingly:

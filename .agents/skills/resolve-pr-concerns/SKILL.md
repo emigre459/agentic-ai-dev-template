@@ -33,7 +33,13 @@ This skill exists because PRs accumulate signal from multiple sources (bots, hum
 
 ## The configured reviewer
 
-The automated PR reviewer is **not hardcoded**: `.github/pr-reviewer.json` names it (`active`) and declares its adapter. Read the values once per session:
+The automated PR reviewer is **not hardcoded**: `.github/pr-reviewer.json` names it (`active`) and declares its adapter. First check whether one is active at all:
+
+```bash
+jq -r '.active // "none"' .github/pr-reviewer.json
+```
+
+**`none` (`"active": null`) means the repo has no automated reviewer**: never post a trigger or final-review comment, skip Steps 1a, 5 and 5a, and use the Step 1b pre-pass review instead. `reviewer_state.py` prints `"configured": false`, `local_review.py` / `review_preflight.py` report `not_configured`, `review-gate` posts no status, and `wait_for_pr_checks.sh` waits on CI only. Otherwise, read the active adapter's values once per session:
 
 ```bash
 jq -r '.reviewers[.active] | "reviewer=\(.display_name) check=\(.check_name) trigger=\(.trigger_comment) final=\(.final_review_comment) logins=\(.bot_logins|join(",")) self_resolves=\(.self_resolves_threads)"' .github/pr-reviewer.json
@@ -217,7 +223,7 @@ Surface the detected mode to the user in one line ("The reviewer auto-runs on pu
 
 ### Step 1b (optional). Pre-pass code review when no bots are configured
 
-If the repo has no automated PR reviewers configured (Step 1a found the configured reviewer `absent`, no Copilot review, no equivalent), invoke `superpowers:requesting-code-review` to dispatch a fresh reviewer subagent against the PR's SHA range before enumerating. Skip this when the repo already has bot review configured — only relevant for repos lacking one.
+If the repo has no automated PR reviewers configured (`"active": null`, or Step 1a found the configured reviewer `absent`, and no Copilot review or equivalent), invoke `superpowers:requesting-code-review` to dispatch a fresh reviewer subagent against the PR's SHA range before enumerating. Skip this when the repo already has bot review configured — only relevant for repos lacking one.
 
 ## Step 2: Enumerate concerns
 
@@ -493,7 +499,7 @@ It polls `gh pr checks` until every required check has reached a terminal state 
 - `0` — all required checks passed; the PR is mergeable from a CI standpoint.
 - `1` — one or more checks failed/cancelled; loop back to Step 2 and treat the failure as a new concern. (A cancelled run of the review-gate workflow's `compute review gate status` job is superseded-run noise and doesn't count — unless no passing `review-gate` status exists.)
 - `2` — timed out (default 20 minutes). Surface to the user; they decide whether to wait longer or investigate.
-- `64` — usage error, an explicit `--config` that doesn't exist, or an invalid `.github/pr-reviewer.json`; fix the config. (A repo with **no** reviewer config is fine — the helper notes it and waits on CI only, per Step 1b.)
+- `64` — usage error, an explicit `--config` that doesn't exist, or an invalid `.github/pr-reviewer.json`; fix the config. (A repo with **no** reviewer config, or `"active": null`, is fine — the helper notes it and waits on CI only, per Step 1b.)
 
 If new bot findings landed during the wait, loop back to Step 1 and address them. Only when this helper exits 0 **and** there are no new comments to address is the job done.
 
@@ -511,7 +517,7 @@ End with a short status summary:
 - What's still outstanding (if anything).
 - Whether the reviewer's trigger comment was posted (or auto-run was relied on) and what to expect next.
 - Current `mergeStateStatus` from the fresh `gh pr view` call. **Never call a PR merge-ready while GitHub reports `BEHIND`, `CONFLICTING` or `DIRTY`** — that's an unresolved gating concern (Step 2f), not a footnote. "Green checks but behind base" means CI verified stale code; update the branch and re-verify first. (With a merge queue, a PR behind its base reads `CLEAN` and is fine.)
-- **The reviewer has reviewed the current head and its final full review is done.** Read `reviewer_state.py`: `verdict` is `pass` / `findings` on `head_sha`, `open_findings` is empty (every finding fixed or answered), and `final_review_outcome` is `finished` or `not_required`. For a local reviewer (`local_review.configured: true`) the verdict on the head isn't needed: the final full review `finished` and no open reviewer thread is the bar. If the ruleset requires it, the `review-gate` status shows the same thing and must be green. **The reviewer's own check is not evidence** — it can pass on a head it skipped or was rate-limited on. A missing review or final review is a gating concern exactly like a `BEHIND` branch; report it explicitly, never as a footnote.
+- **The reviewer has reviewed the current head and its final full review is done** (skip this with no reviewer active, `"active": null`; say the PR had no automated review, only the Step 1b pre-pass if you ran one). Read `reviewer_state.py`: `verdict` is `pass` / `findings` on `head_sha`, `open_findings` is empty (every finding fixed or answered), and `final_review_outcome` is `finished` or `not_required`. For a local reviewer (`local_review.configured: true`) the verdict on the head isn't needed: the final full review `finished` and no open reviewer thread is the bar. If the ruleset requires it, the `review-gate` status shows the same thing and must be green. **The reviewer's own check is not evidence** — it can pass on a head it skipped or was rate-limited on. A missing review or final review is a gating concern exactly like a `BEHIND` branch; report it explicitly, never as a footnote.
 - **No human request for changes stands, and no human item is unanswered.** Read `human_review.sh` (Step 2h): `open_concern_count` is 0 and `changes_requested_by` is empty. While a reviewer's request stands, the PR is **not** merge-ready even with every item answered: report it as "waiting on @<login>'s re-review" (name `awaiting_rereview`), never as ready.
 - **A human resolves the threads and performs the final merge.** This skill drives the PR to merge-ready and **stops**: every thread answered and left open for its reviewer, never `resolveReviewThread` to force a green state, never a self-merge. With a merge queue on, merging means "Merge when ready", which enqueues the PR and lets the queue test it against the latest base.
 
