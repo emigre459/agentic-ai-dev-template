@@ -177,6 +177,45 @@ def test_unknown_merge_state_blocks() -> None:
     assert _gate(merge_state_status="UNKNOWN")["mergeable"] is False
 
 
+def test_an_unexplained_blocked_state_is_a_blocker() -> None:
+    """Nothing else accounts for BLOCKED (e.g. a missing approval): it blocks."""
+    verdict = _gate(merge_state_status="BLOCKED")
+    assert verdict["mergeable"] is False
+    assert [b for b in verdict["blockers"] if "BLOCKED" in b] == [
+        "mergeStateStatus is BLOCKED (need one of BEHIND, CLEAN, HAS_HOOKS, UNSTABLE)"
+    ]
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        {"check_conclusions": {"ci / lint": "failure", "ci / tests": "success"}},
+        {"changes_requested_by": ["octocat"]},
+        {"unresolved_thread_total": 1, "threads_must_resolve": True},
+    ],
+)
+def test_a_blocked_state_another_blocker_explains_is_info(
+    cause: dict[str, Any],
+) -> None:
+    verdict = _gate(merge_state_status="BLOCKED", **cause)
+    assert verdict["mergeable"] is False
+    assert len(verdict["blockers"]) == 1
+    assert not any("BLOCKED" in b for b in verdict["blockers"])
+    assert any(
+        "mergeStateStatus is BLOCKED" in note for note in verdict["info"]["notes"]
+    )
+
+
+def test_reviewer_or_audit_blockers_do_not_explain_a_blocked_state() -> None:
+    """GitHub's BLOCKED comes from the base branch's rules, not the reviewer."""
+    verdict = _gate(
+        merge_state_status="BLOCKED",
+        reviewer_verdict="none",
+        acceptance_audit_clean=False,
+    )
+    assert any("mergeStateStatus is BLOCKED" in b for b in verdict["blockers"])
+
+
 # --- reviewer half -------------------------------------------------------------
 
 

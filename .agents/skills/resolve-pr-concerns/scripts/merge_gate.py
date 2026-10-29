@@ -79,6 +79,7 @@ UNFINISHED_STATES = frozenset(
 # UNSTABLE means a non-required check is failing; the rules still allow it.
 PASSING_MERGE_STATES = frozenset({"CLEAN", "UNSTABLE", "HAS_HOOKS"})
 _BEHIND = "BEHIND"
+_BLOCKED = "BLOCKED"
 
 _THREADS_QUERY = """
 query MergeGateThreads($owner:String!, $name:String!, $pr:Int!, $endCursor:String) {
@@ -420,8 +421,35 @@ def _reviewer_blockers(
     return blockers
 
 
-def _merge_state_blocker(status: str, strict: bool, notes: list[str]) -> str | None:
-    """Return the ``mergeStateStatus`` blocker, if any."""
+def _merge_state_blocker(
+    status: str, strict: bool, notes: list[str], explained: bool = False
+) -> str | None:
+    """Return the ``mergeStateStatus`` blocker, if any.
+
+    Parameters
+    ----------
+    status : str
+        GitHub ``mergeStateStatus`` of the PR.
+    strict : bool
+        The base branch's rules require an up-to-date branch.
+    notes : list[str]
+        The report's notes; non-blocking states are recorded here.
+    explained : bool
+        Another blocker from the base branch's rules (a required check, a
+        standing change request, a required thread resolution) already accounts
+        for ``BLOCKED``, so it is a note, not a second blocker.
+
+    Returns
+    -------
+    str | None
+        The blocker text, or ``None`` when the state does not block.
+    """
+    if status == _BLOCKED and explained:
+        notes.append(
+            f"mergeStateStatus is {_BLOCKED}, explained by the blockers above "
+            "(not a separate blocker)"
+        )
+        return None
     if status == _BEHIND and strict:
         return (
             f"mergeStateStatus is {_BEHIND} and the base branch's rules require an "
@@ -555,6 +583,10 @@ def evaluate_gate(
             "not)"
         )
     blockers += _check_blockers(check_conclusions, required_checks, notes)
+    # Blockers GitHub itself enforces (a closed PR, the base branch's rules) --
+    # the ones that can explain its BLOCKED merge state. Reviewer and audit
+    # blockers are this gate's own and never do.
+    rule_blockers = len(blockers)
 
     if reviewer_verdict is None:
         notes.append(
@@ -579,12 +611,14 @@ def evaluate_gate(
         )
 
     for login in changes_requested_by:
+        rule_blockers += 1
         blockers.append(
             f"@{login} requested changes — answer every item (human_review.py), "
             "then re-request their review; only their new review clears it"
         )
 
     if unresolved_thread_total and threads_must_resolve:
+        rule_blockers += 1
         blockers.append(
             f"{unresolved_thread_total} unresolved review thread(s); the base "
             "branch's rules require resolution: a human resolves answered threads "
@@ -596,7 +630,9 @@ def evaluate_gate(
             "the base branch's rules do not require resolution)"
         )
 
-    state_blocker = _merge_state_blocker(merge_state_status, strict_up_to_date, notes)
+    state_blocker = _merge_state_blocker(
+        merge_state_status, strict_up_to_date, notes, explained=rule_blockers > 0
+    )
     if state_blocker:
         blockers.append(state_blocker)
 
