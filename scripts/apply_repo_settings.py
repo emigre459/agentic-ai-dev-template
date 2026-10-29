@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Container
@@ -164,8 +165,11 @@ def merge_queue_eligibility(
 
 def _is_merge_queue_rejection(exc: RuntimeError) -> bool:
     """Whether GitHub refused a ruleset because it offers no merge queue here."""
+    # GitHub doesn't document the wording; accept `merge_queue` or "merge queue".
     detail = str(exc)
-    return "HTTP 422" in detail and "merge_queue" in detail
+    return "HTTP 422" in detail and bool(
+        re.search(r"merge[_ ]queue", detail, re.IGNORECASE)
+    )
 
 
 def _no_queue_notice(repo: str, reason: str) -> str:
@@ -409,6 +413,22 @@ def main(
             except RuntimeError:
                 org = None  # plan unreadable: eligibility says "unknown"
         queue_verdict, queue_reason = merge_queue_eligibility(current_merge, org)
+        live_main = find_main_ruleset(current_rulesets)
+        if (
+            queue_verdict == "unknown"
+            and live_main is not None
+            and not has_rule(live_main, "merge_queue")
+            and ruleset_matches(without_rule(desired_ruleset, "merge_queue"), live_main)
+        ):
+            # Everything but the queue is already live, and we can't tell whether
+            # GitHub offers one here: re-sending it would just be rejected again on
+            # every run. An org owner can read the plan and settle it.
+            queue_verdict = "no"
+            queue_reason = (
+                "the organization's plan isn't visible to this account and the "
+                "live ruleset has no queue (GitHub may have rejected it before); "
+                "re-run as an organization owner to settle it"
+            )
         if queue_verdict == "no":
             desired_ruleset = without_rule(desired_ruleset, "merge_queue")
             print(_no_queue_notice(repo, queue_reason))

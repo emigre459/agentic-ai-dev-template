@@ -10,6 +10,7 @@ from scripts.apply_repo_settings import (
     DEFERRED_RULE_TYPES,
     _current_rulesets,
     _gh_json,
+    _is_merge_queue_rejection,
     find_main_ruleset,
     load_desired,
     main,
@@ -584,3 +585,53 @@ def test_a_rejection_named_only_in_the_response_body_is_recognized() -> None:
         True,
         False,
     ]
+
+
+def test_a_rejected_queue_settles_on_rerun(capsys: pytest.CaptureFixture) -> None:
+    """Plan hidden + GitHub said no once: a rerun must not re-send and re-fail."""
+    first = _FakeGh(_repo("Organization", "private"), reject_merge_queue=True)
+    assert main(["--repo", "acme/repo", "--yes"], runner=first) == 0
+    live = {"id": 9, **first.ruleset_writes[-1]}
+    capsys.readouterr()
+    second = _FakeGh(
+        _repo("Organization", "private"), rulesets=[live], reject_merge_queue=True
+    )
+    assert main(["--repo", "acme/repo", "--yes"], runner=second) == 0
+    assert second.ruleset_writes == []
+    out = capsys.readouterr().out
+    assert "organization owner" in out
+
+
+def test_a_first_finalize_with_hidden_plan_still_tries_the_queue() -> None:
+    """The bootstrap ruleset lacks the required checks too, so the queue is tried."""
+    bootstrap_live = {
+        "id": 9,
+        **ruleset_for_phase(load_desired(REPO_SETTINGS).ruleset, "bootstrap"),
+    }
+    gh = _FakeGh(_repo("Organization", "private"), rulesets=[bootstrap_live])
+    assert main(["--repo", "acme/repo", "--yes"], runner=gh) == 0
+    [written] = gh.ruleset_writes
+    assert "merge_queue" in _rule_types(written)
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "gh: Validation Failed (HTTP 422) Invalid rule 'merge_queue'",
+        "gh: Validation Failed (HTTP 422) Merge queue is not available for this repository",
+        "gh: Validation Failed (HTTP 422) merge queue rules are not supported",
+    ],
+)
+def test_queue_rejections_are_recognized(detail: str) -> None:
+    assert _is_merge_queue_rejection(RuntimeError(detail))
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "gh: Validation Failed (HTTP 422) Invalid rule 'required_status_checks'",
+        "gh: Resource not accessible by integration (HTTP 403) merge_queue",
+    ],
+)
+def test_other_errors_are_not_queue_rejections(detail: str) -> None:
+    assert not _is_merge_queue_rejection(RuntimeError(detail))
