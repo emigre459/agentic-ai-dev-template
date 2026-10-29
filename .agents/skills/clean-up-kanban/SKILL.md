@@ -112,7 +112,7 @@ When a user describes new work (plan-issues) or a branch implies work (build-fro
 
 ## §6 Cross-repo + convention guardrails
 
-- **Cross-tracker routing**: when the repo defines routing rules (e.g. server-side work belongs on another team's Jira via a twin-card pattern), classify each card before filing — never file work on the wrong tracker.
+- **Cross-tracker routing**: if the repo defines tracker-routing rules, classify each card before filing — never file work on the wrong tracker.
 - **Cross-repo routing**: when the org splits surfaces across repos (backend / frontend / eval tooling), file each card in the OWNING repo, attached to the shared GH Project for portfolio visibility; the current repo keeps the backend/contract halves.
 - Epics are labeled `EPIC` (uppercase) + `[EPIC] ` title prefix — both, always.
 - New/amended core dev skills (this one included) in downstream repos → suggest an upstream PR to the shared template repo at finalization so the canonical copy stays in sync (see `.agents/rules/shared/sync-core-dev-skills-upstream.md`).

@@ -75,7 +75,7 @@ The skill enforces these rules. They are NOT memory references — they are the 
 * **Database ID, not issue number, for dependencies.** GitHub's dependencies API requires the integer database ID of the blocker, not the issue number. Capture it with `gh api repos/<o>/<r>/issues/<n> --jq '.id'` immediately after creating any issue.
 * **Worktree for planning sessions.** Switch to a worktree off `origin/main` before epic/issue/kanban work so parallel coding agents in the main checkout aren't disturbed. If already in a worktree, verify it's clean and current.
 * **Fail hard, don't warn+fallback.** Every `gh` / `gh api` exit code is checked. Failures stop the skill immediately and surface actual stderr. Subtle warn-and-continue logs get missed and silent degradation surfaces later as mysterious bugs.
-* **Never delete, only close.** Remove issues by closing with an explanatory comment, never `gh issue delete` or DELETE via `gh api`. Closure preserves audit trail; deletion destroys supersession links and discussion history.
+* **Never delete, only close.** Remove issues by closing with an explanatory comment, never `gh issue delete` or a REST DELETE of an issue or comment. Closure preserves audit trail; deletion destroys supersession links and discussion history. Unlinking is not deleting: removing a blocked-by edge or a sub-issue link (`gh api -X DELETE …/dependencies/blocked_by/<id>`, `…/sub_issue`) is allowed, because no issue or comment is lost.
 * **Fetch library docs first.** For any acceptance criterion that mentions a third-party library API, fetch current docs via `context7-mcp` before drafting that criterion. Training data may not reflect recent changes.
 
 ## Workflow
@@ -150,7 +150,7 @@ gh project list --owner <org> --format json     # GraphQL — see "REST-only fal
 gh label list --repo <owner>/<repo> --limit 200 --json name,description,color
 ```
 
-Hold the result in working memory for the duration of the session. When Phase 4 needs to offer label choices, draw from this in-memory list. If `gh label list` fails (e.g., offline), fail hard — labels are required to materialize cards correctly.
+Hold the result in working memory for the duration of the session. When Phase 4 needs to offer label choices, draw from this in-memory list. If `gh label list` fails (e.g., offline), fail hard — labels are required to materialize cards correctly — unless it is the GraphQL-refused case, in which case switch to the REST-only fallback instead.
 
 Pull current open epics. Epics in this repo are identified by the **`EPIC` label** (case-sensitive — the label is uppercase `EPIC`, not `epic`). By convention every epic also carries an `[EPIC]` title prefix and acts as a GitHub parent (sub-)issue, but the label is the canonical, queryable signal:
 
@@ -306,7 +306,7 @@ Order of operations matters — do the structural pieces first, then wire depend
    gh issue comment <n> --body "<reason + link(s) to superseding cards>"
    gh issue close <n>
    ```
-   **Never** `gh issue delete` and never `DELETE /repos/.../issues/...` via `gh api`. Closure preserves the audit trail; deletion destroys it.
+   **Never** `gh issue delete` and never a REST DELETE of an issue or comment (`DELETE /repos/.../issues/<n>`, `…/comments/<id>`). Closure preserves the audit trail; deletion destroys it. (Unlinking a dependency edge or sub-issue link is not a deletion and is allowed.)
 
 If `gh issue close` fails after `gh issue comment` succeeded, surface both facts: the comment is on the issue but the issue is still open. Fail hard with the stderr.
 
@@ -358,12 +358,13 @@ Quick reference for the commands this skill runs, in the order they typically ap
 
 ## REST-only fallback (when GraphQL is unavailable)
 
-Some environments — e.g. a sandboxed or cloud harness whose GitHub proxy forwards only repository-scoped REST (`repos/{owner}/{repo}/…`) — refuse **GraphQL**. `gh issue …`, `gh label …`, `gh project …` and `gh search …` use GraphQL under the hood and fail, as does the org-wide `search/issues` REST endpoint. The token is still the invoking user's own, so this is transport, not permissions. Detect it once (the first `gh issue list` fails with an error such as `HTTP 403 … GraphQL is not available`, or `gh auth status` reports the token invalid) and substitute for the rest of the session. Everything this skill needs has a REST route — the dependencies and sub-issues steps already use it:
+Some environments — e.g. a sandboxed or cloud harness whose GitHub proxy forwards only repository-scoped REST (`repos/{owner}/{repo}/…`) — refuse **GraphQL**. `gh issue …`, `gh label …`, `gh project …` and `gh search …` use GraphQL under the hood and fail, as does the org-wide `search/issues` REST endpoint. The token is still the invoking user's own, so this is transport, not permissions. Detect it on the FIRST GraphQL-backed `gh` call that fails (often `gh repo view` or `gh label list` in Phase 2) with the refused signature, e.g. `HTTP 403 … GraphQL is not available` (or `gh auth status` reports the token invalid), and substitute for the rest of the session. Everything this skill needs has a REST route — the dependencies and sub-issues steps already use it:
 
 | Skill step | Default (`gh` subcommand) | REST via `gh api` |
 |---|---|---|
-| Labels | `gh label list …` | `gh api repos/<o>/<r>/labels --paginate --jq '.[].name'` |
-| Open epics / related issues | `gh issue list --label EPIC …` / `--search` | `gh api 'repos/<o>/<r>/issues?labels=EPIC&state=open&per_page=100'`; for keyword matching pull `issues?state=open&per_page=100&page=N` and filter with `jq` locally |
+| Detect repo | `gh repo view --json nameWithOwner -q .nameWithOwner` | parse `git remote get-url origin` into `<owner>/<repo>`, or confirm with `gh api repos/<owner>/<repo>` |
+| Labels | `gh label list …` | `gh api repos/<o>/<r>/labels --paginate --jq 'map({name,description,color})'` |
+| Open epics / related issues | `gh issue list --label EPIC …` / `--search` | `gh api 'repos/<o>/<r>/issues?labels=EPIC&state=open&per_page=100'`; for keyword matching pull `issues?state=open&per_page=100&page=N` and filter with `jq` locally. The REST issues list also returns pull requests — drop items that have a `pull_request` key |
 | Read an issue | `gh issue view <n>` | `gh api repos/<o>/<r>/issues/<n>` (`--jq .body`, `.id`, `.labels`) |
 | Create issue / epic | `gh issue create …` | `gh api -X POST repos/<o>/<r>/issues -f title=… -F body=@file.md -f 'labels[]=a' -f 'labels[]=b'` — the response carries `number`, `id`, `html_url` |
 | Edit body / retitle / add label | `gh issue edit …` | `gh api -X PATCH repos/<o>/<r>/issues/<n> -F body=@file.md [-f title=…]`; labels: `gh api -X POST repos/<o>/<r>/issues/<n>/labels -f 'labels[]=EPIC'` |
@@ -389,7 +390,7 @@ Write long bodies to a scratch file and pass `-F body=@file`. Append amendment b
 | Worktree for planning | 1 | The skill itself IS the enforcement. Smart-force semantics described in Phase 1. |
 | Fail hard, don't warn+fallback | All | Every `gh`/`gh api` exit code is checked. Failures stop the skill immediately and surface the actual stderr. |
 | Fetch library docs first | 3 (conditional) | If an acceptance criterion references a third-party library API, invoke `context7-mcp` before drafting that criterion. |
-| Never delete, only close | 5 | The skill has no codepath that calls `gh issue delete` or the REST DELETE endpoint. Closure pairs `gh issue comment` (reason) with `gh issue close`. |
+| Never delete, only close | 5 | No codepath deletes an issue or comment (`gh issue delete`, REST DELETE of an issue/comment); unlinking a dependency edge or sub-issue is allowed. Closure pairs `gh issue comment` (reason) with `gh issue close`. |
 
 ## Edge cases & failure modes
 
@@ -397,8 +398,8 @@ Write long bodies to a scratch file and pass `-F body=@file`. Append amendment b
 
 * `gh` not authenticated → stop at Phase 2 with the `gh auth status` output.
 * `git fetch origin` fails → stop at Phase 1.
-* `gh repo view` returns nothing (not in a repo / no origin) → stop at Phase 2 with "this skill needs a GitHub-backed repo in CWD."
-* `gh label list` fails → stop at Phase 2. Labels are required and there is no cache to fall back on.
+* `gh repo view` returns nothing (not in a repo / no origin) → stop at Phase 2 with "this skill needs a GitHub-backed repo in CWD." (If it fails with the GraphQL-refused signature, switch to the REST-only fallback instead.)
+* `gh label list` fails → stop at Phase 2. Labels are required and there is no cache to fall back on — unless it is the GraphQL-refused case, in which case switch to the REST-only fallback instead.
 * Any 4xx/5xx from the dependencies API → stop at Phase 5, report which dependency edge failed and the issue numbers involved.
 * Verification readback shows expected ID missing → stop at Phase 5, same.
 * `gh issue close` fails after `gh issue comment` succeeded → stop, surface both facts.
@@ -417,6 +418,8 @@ Failed steps:
   - <issue #x>: <command that would re-run the failed step manually>
   …
 ```
+
+Count definitions: J counts every card successfully nested, including via the task-list-checkbox fallback; cards intentionally left unparented (would-be-epic) are excluded from both J and N. When the board auto-adds, report "attach: auto-added" instead of L of N.
 
 Worktree stays alive; user fixes manually or re-invokes the skill on a smaller scope.
 
@@ -459,7 +462,7 @@ Explicit non-goals — surface these to the user if a request brushes against th
 
 **Never:**
 
-* Call `gh issue delete` or `gh api -X DELETE /repos/.../issues/...`.
+* Call `gh issue delete` or `gh api -X DELETE` on an issue or comment (unlinking a dependency edge or sub-issue is fine).
 * Create an issue without a parent epic decision (epic, propose-new, or justified none).
 * Wire blocked-by using issue numbers instead of database IDs.
 * Skip the verification readback after wiring a dependency.
