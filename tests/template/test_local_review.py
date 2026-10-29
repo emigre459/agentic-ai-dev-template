@@ -63,8 +63,8 @@ def _local_review(**overrides: Any) -> dict[str, Any]:
     return block
 
 
-def _preflight() -> dict[str, Any]:
-    return {
+def _preflight(min_remaining: int | None = None) -> dict[str, Any]:
+    block: dict[str, Any] = {
         "command": ["reviewer-cli", "usage"],
         "state_path": "pool.state",
         "available_states": ["available"],
@@ -79,6 +79,9 @@ def _preflight() -> dict[str, Any]:
             "failed": "run the doctor",
         },
     }
+    if min_remaining is not None:
+        block["min_remaining"] = min_remaining
+    return block
 
 
 def _config(**entry: Any) -> dict[str, Any]:
@@ -98,6 +101,15 @@ def _adapter(tmp_path: Path, **entry: Any) -> Any:
     entry.setdefault("local_review", _local_review())
     entry.setdefault("local_preflight", _preflight())
     return reviewer_state.load_reviewer(_write(tmp_path, _config(**entry)))
+
+
+def _capacity_adapter(tmp_path: Path, min_remaining: int = 2) -> Any:
+    """Return an adapter that names its start failure and asks for a minimum."""
+    return _adapter(
+        tmp_path,
+        local_review=_local_review(start_failure_pattern="Failed to start review"),
+        local_preflight=_preflight(min_remaining=min_remaining),
+    )
 
 
 # --- Loader --------------------------------------------------------------------
@@ -430,11 +442,17 @@ class _Fake:
         local_head: str = HEAD,
         review: tuple[int, str, str] | BaseException = (0, "", ""),
         preflight: str = "available",
+        remaining: list[int | None] | None = None,
+        after_status: str | None = None,
     ) -> None:
         self.comments = comments or []
         self.local_head = local_head
         self.review = review
         self.preflight_status = preflight
+        # Preflight readings, call by call (before the round, then after it).
+        self.remaining = remaining if remaining is not None else [None]
+        self.preflights = 0
+        self.after_status = after_status  # status of the re-read after the round
         self.ran: list[list[str]] = []
         self.posted: list[str] = []
         self.pr_heads: list[str] = [HEAD]  # what the API reports, call by call
@@ -469,8 +487,12 @@ class _Fake:
         return "https://github.com/o/r/pull/7#issuecomment-1"
 
     def preflight(self, adapter: Any) -> dict[str, Any]:
+        left = self.remaining[min(self.preflights, len(self.remaining) - 1)]
+        status = self.after_status if self.preflights and self.after_status else None
+        self.preflights += 1
         return {
-            "status": self.preflight_status,
+            "status": status or self.preflight_status,
+            "remaining": left,
             "recheck_after_seconds": 120,
             "remedy": None,
             "detail": "x",
@@ -692,3 +714,249 @@ def test_main_with_no_active_reviewer_is_not_configured(
     assert local_review.main(["--repo", "o/r", "--pr", "7", "--config", str(path)]) == 0
     result = json.loads(capsys.readouterr().out)
     assert (result["reviewer"], result["status"]) == (None, "not_configured")
+
+
+# --- Remaining reviews before and after a round --------------------------------
+
+_START_FAILURE = "Error: Failed to start review. Please try again."
+
+
+def test_a_round_records_remaining_before_and_after(tmp_path: Path) -> None:
+    fake = _Fake(review=(0, _ndjson(_FINDING, _DONE), ""), remaining=[4, 2])
+    result, code = _run(tmp_path, fake)
+    assert (result["status"], code) == ("reviewed", 0)
+    assert result["remaining_before"] == 4
+    assert result["remaining_after"] == 2
+    [body] = fake.posted
+    [record] = reviewer_state.local_review_records(
+        [{"body": body, "created_at": "2026-10-14T05:00:00Z"}]
+    )
+    assert record["remaining_before"] == 4 and record["remaining_after"] == 2
+    assert record["head"] == HEAD and record["findings"] == 1
+    assert "Local allowance: 4 -> 2 reviews left." in body
+
+
+def test_an_unreadable_remaining_is_recorded_as_null(tmp_path: Path) -> None:
+    fake = _Fake(review=(0, _ndjson(_DONE), ""))
+    result, _ = _run(tmp_path, fake)
+    assert result["remaining_before"] is None and result["remaining_after"] is None
+    [body] = fake.posted
+    [record] = reviewer_state.local_review_records(
+        [{"body": body, "created_at": "2026-10-14T05:00:00Z"}]
+    )
+    assert record["remaining_before"] is None and record["remaining_after"] is None
+    assert "reviews left" not in body
+
+
+def test_a_half_readable_allowance_is_shown_with_a_question_mark(
+    tmp_path: Path,
+) -> None:
+    fake = _Fake(review=(0, _ndjson(_DONE), ""), remaining=[4, None])
+    _run(tmp_path, fake)
+    [body] = fake.posted
+    assert "Local allowance: 4 -> ? reviews left." in body
+
+
+def test_a_record_without_the_remaining_keys_still_parses_and_budgets() -> None:
+    """Records from older rounds on a PR keep counting."""
+    state = _state([_record(HEAD, "2026-10-14T01:00:00Z", findings=1)])
+    assert state["reviewed_head"] is True and state["before_final"]["used"] == 1
+
+
+def test_a_start_failure_at_low_remaining_is_exhausted(tmp_path: Path) -> None:
+    """One left cannot pay a two-review deep round: a wait, not a CLI failure."""
+    fake = _Fake(
+        review=(1, "", _START_FAILURE), remaining=[3, 1], after_status="exhausted"
+    )
+    result, code = _run(tmp_path, fake, _capacity_adapter(tmp_path))
+    assert (result["status"], code) == ("exhausted", 75)
+    assert result["remaining_before"] == 3
+    assert result["remaining_after"] == 1
+    assert result["recheck_after_seconds"] == 120  # the post-failure preflight's wait
+    assert "failed to start" in result["detail"]
+    assert fake.posted == []
+
+
+def test_a_start_failure_with_a_pool_still_above_the_minimum_stays_failed(
+    tmp_path: Path,
+) -> None:
+    """A real CLI or network failure must not be masked as a wait."""
+    fake = _Fake(review=(1, "", _START_FAILURE), remaining=[3, 3])
+    result, code = _run(tmp_path, fake, _capacity_adapter(tmp_path))
+    assert (result["status"], code) == ("failed", 1)
+    assert result["remaining_before"] == 3 and result["remaining_after"] == 3
+
+
+def test_a_start_failure_is_read_from_stdout_too(tmp_path: Path) -> None:
+    fake = _Fake(review=(1, _START_FAILURE, ""), remaining=[3, 1])
+    result, _ = _run(tmp_path, fake, _capacity_adapter(tmp_path))
+    assert result["status"] == "exhausted"
+
+
+def test_a_start_failure_at_high_remaining_stays_failed(tmp_path: Path) -> None:
+    fake = _Fake(review=(1, "", _START_FAILURE), remaining=[10, 10])
+    result, code = _run(tmp_path, fake, _capacity_adapter(tmp_path))
+    assert (result["status"], code) == ("failed", 1)
+    assert result["remaining_before"] == 10
+
+
+def test_a_start_failure_reread_as_exhausted_waits_its_recheck(
+    tmp_path: Path,
+) -> None:
+    fake = _Fake(
+        review=(1, "", _START_FAILURE), remaining=[10, 1], after_status="exhausted"
+    )
+    result, _ = _run(tmp_path, fake, _capacity_adapter(tmp_path))
+    assert result["status"] == "exhausted"
+    assert result["recheck_after_seconds"] == 120
+
+
+def test_a_capacity_wait_without_a_reread_wait_uses_the_adapters_cap(
+    tmp_path: Path,
+) -> None:
+    """An ``unknown`` re-read has no wait of its own; the adapter's cap applies."""
+    fake = _Fake(
+        review=(1, "", _START_FAILURE), remaining=[3, 1], after_status="unknown"
+    )
+    result, _ = _run(tmp_path, fake, _capacity_adapter(tmp_path))
+    assert result["status"] == "exhausted"
+    assert result["recheck_after_seconds"] == 300
+
+
+@pytest.mark.parametrize("after_remaining", [10, 2, None])
+def test_an_exhausted_state_without_a_low_count_stays_failed(
+    tmp_path: Path, after_remaining: int | None
+) -> None:
+    """The state can be unavailable with plenty left (or the count unreadable)."""
+    fake = _Fake(
+        review=(1, "", _START_FAILURE),
+        remaining=[10, after_remaining],
+        after_status="exhausted",
+    )
+    result, code = _run(tmp_path, fake, _capacity_adapter(tmp_path))
+    assert (result["status"], code) == ("failed", 1)
+
+
+def test_a_start_failure_that_drained_the_pool_is_exhausted(tmp_path: Path) -> None:
+    """The pool is shared: a re-read below the minimum proves it ran dry."""
+    fake = _Fake(review=(1, "", _START_FAILURE), remaining=[10, 1])
+    result, _ = _run(tmp_path, fake, _capacity_adapter(tmp_path))
+    assert result["status"] == "exhausted"
+
+
+def test_a_start_failure_with_no_readable_remaining_stays_failed(
+    tmp_path: Path,
+) -> None:
+    fake = _Fake(review=(1, "", _START_FAILURE))
+    result, _ = _run(tmp_path, fake, _capacity_adapter(tmp_path))
+    assert result["status"] == "failed"
+
+
+def test_another_failure_at_low_remaining_stays_failed(tmp_path: Path) -> None:
+    fake = _Fake(review=(1, "", "Error: boom"), remaining=[3, 1])
+    result, _ = _run(tmp_path, fake, _capacity_adapter(tmp_path))
+    assert result["status"] == "failed"
+
+
+def test_the_start_failure_is_matched_on_the_adapters_pattern(
+    tmp_path: Path,
+) -> None:
+    adapter = _adapter(
+        tmp_path,
+        local_review=_local_review(start_failure_pattern="could not begin"),
+        local_preflight=_preflight(min_remaining=2),
+    )
+    pool_short = _Fake(review=(1, "", "Error: could not begin"), remaining=[3, 1])
+    assert _run(tmp_path, pool_short, adapter)[0]["status"] == "exhausted"
+    other_text = _Fake(review=(1, "", _START_FAILURE), remaining=[3, 1])
+    assert _run(tmp_path, other_text, adapter)[0]["status"] == "failed"
+
+
+def test_a_start_failure_with_the_default_minimum_is_exhausted_only_when_empty(
+    tmp_path: Path,
+) -> None:
+    adapter = _capacity_adapter(tmp_path, min_remaining=1)
+    empty = _Fake(review=(1, "", _START_FAILURE), remaining=[1, 0])
+    assert _run(tmp_path, empty, adapter)[0]["status"] == "exhausted"
+    one_left = _Fake(review=(1, "", _START_FAILURE), remaining=[2, 1])
+    assert _run(tmp_path, one_left, adapter)[0]["status"] == "failed"
+
+
+def test_no_start_failure_pattern_never_reads_exhausted(tmp_path: Path) -> None:
+    """Without an adapter pattern a start failure is a plain failure, however low."""
+    adapter = _adapter(tmp_path, local_preflight=_preflight(min_remaining=2))
+    assert adapter.local_review.start_failure_pattern is None
+    fake = _Fake(review=(1, "", _START_FAILURE), remaining=[1, 0])
+    result, code = _run(tmp_path, fake, adapter)
+    assert (result["status"], code) == ("failed", 1)
+
+
+def test_a_failing_post_round_read_still_records_the_round(tmp_path: Path) -> None:
+    """The round already ran: a usage read that raises must not fail it."""
+    fake = _Fake(review=(0, _ndjson(_FINDING, _DONE), ""), remaining=[4])
+    reads = {"n": 0}
+    original = fake.preflight
+
+    def flaky(adapter: Any) -> dict[str, Any]:
+        reads["n"] += 1
+        if reads["n"] > 1:
+            raise PermissionError("usage is not readable")
+        return original(adapter)
+
+    fake.preflight = flaky  # type: ignore[method-assign]
+    result, code = _run(tmp_path, fake)
+    assert (result["status"], code) == ("reviewed", 0)
+    assert result["remaining_before"] == 4 and result["remaining_after"] is None
+    [body] = fake.posted
+    [record] = reviewer_state.local_review_records(
+        [{"body": body, "created_at": "2026-10-14T05:00:00Z"}]
+    )
+    assert record["remaining_after"] is None and record["findings"] == 1
+
+
+@pytest.mark.parametrize(
+    ("after_status", "after_remaining"), [("unknown", None), ("exhausted", 0)]
+)
+def test_an_unreadable_or_empty_post_round_read_still_reviews(
+    tmp_path: Path, after_status: str, after_remaining: int | None
+) -> None:
+    """``unknown`` carries no count (the real preflight returns None); empty is 0."""
+    fake = _Fake(
+        review=(0, _ndjson(_DONE), ""),
+        remaining=[4, after_remaining],
+        after_status=after_status,
+    )
+    result, code = _run(tmp_path, fake)
+    assert (result["status"], code) == ("reviewed", 0)
+    assert result["remaining_after"] == after_remaining
+    assert len(fake.posted) == 1
+
+
+def test_a_failing_post_failure_read_stays_failed(tmp_path: Path) -> None:
+    fake = _Fake(review=(1, "", _START_FAILURE), remaining=[3])
+
+    def boom(adapter: Any) -> dict[str, Any]:
+        if fake.preflights:
+            raise OSError("no usage")
+        fake.preflights += 1
+        return {"status": "available", "remaining": 3, "remedy": None, "detail": "x"}
+
+    fake.preflight = boom  # type: ignore[method-assign]
+    result, code = _run(tmp_path, fake, _capacity_adapter(tmp_path))
+    assert (result["status"], code) == ("failed", 1)
+    assert result["remaining_after"] is None
+
+
+def test_the_early_exhausted_result_carries_remaining_before(tmp_path: Path) -> None:
+    fake = _Fake(preflight="exhausted", remaining=[1])
+    result, code = _run(tmp_path, fake)
+    assert (result["status"], code) == ("exhausted", 75)
+    assert result["remaining_before"] == 1
+    assert fake.ran == []
+
+
+def test_a_capacity_wait_needs_a_preflight_to_say_how_long() -> None:
+    """A capacity failure with no preflight is a bug: it raises, never asserts."""
+    adapter = BUGBOT._replace(local_preflight=None)
+    with pytest.raises(ValueError, match="preflight"):
+        local_review._recheck_after(adapter, {"status": "unknown"})

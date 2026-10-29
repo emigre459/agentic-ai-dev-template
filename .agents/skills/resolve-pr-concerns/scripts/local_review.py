@@ -17,14 +17,21 @@ status:
 - ``already_reviewed`` (0): this head already has a local round; push new commits
   first.
 - ``not_configured`` (0): the reviewer has no local review; use PR rounds.
-- ``exhausted`` (75): the local allowance is spent (``review_preflight``); wait
-  ``recheck_after_seconds`` and run this again.
+- ``exhausted`` (75): the local allowance is spent or under the adapter's
+  ``min_remaining`` (``review_preflight``), or the review command failed to start
+  with the adapter's ``start_failure_pattern`` while a re-read shows the allowance
+  under that minimum; wait ``recheck_after_seconds`` and run this again. A reviewer
+  with no ``start_failure_pattern`` never reads a start failure as ``exhausted``.
 - ``budget_spent`` (65): this phase's local rounds are used up; never run past the
   cap silently.
 - ``head_mismatch`` (65): the local HEAD isn't the PR head; push, or check it out.
 - ``failed`` (1): the review command, git or GitHub failed; ``detail`` and
   ``remedy`` say why. If the round ran but recording it failed, the result carries
   the ``findings`` and the ``record_body`` to post by hand: don't re-run.
+
+Every result that ran a preflight carries ``remaining_before`` and, once the review
+command ran, ``remaining_after``: the reviews left per the preflight before and
+after it (``null`` when unreadable). The PR record carries both too.
 
 A usage error or a bad reviewer config exits 64.
 """
@@ -146,6 +153,103 @@ def _stderr(exc: subprocess.CalledProcessError) -> str:
     return str(exc.stderr or "").strip()[-500:]
 
 
+def _reread(deps: Deps, adapter: ReviewerAdapter) -> dict[str, Any]:
+    """Re-run the preflight after a round; an unreadable one reads as ``unknown``.
+
+    The round has already run (and spent its allowance), so a failing usage read must
+    never turn it into a failure: it is logged and ``remaining`` is ``None``.
+
+    Parameters
+    ----------
+    deps : Deps
+        Injected calls; ``preflight`` is the one used.
+    adapter : ReviewerAdapter
+        The reviewer adapter to check.
+
+    Returns
+    -------
+    dict[str, Any]
+        The preflight verdict, or an ``unknown`` one with no count.
+    """
+    try:
+        return deps.preflight(adapter)
+    except Exception as exc:  # noqa: BLE001 -- best-effort read after a finished round
+        print(f"post-round preflight failed: {exc!r}", file=sys.stderr)
+        return {"status": "unknown", "remaining": None, "recheck_after_seconds": None}
+
+
+def _start_failed_for_capacity(
+    adapter: ReviewerAdapter, output: str, after_check: dict[str, Any]
+) -> bool:
+    """Return whether a start failure is the local allowance running short.
+
+    The adapter must name its start failure (``local_review.start_failure_pattern``)
+    and that pattern must appear in ``output``. Then the failure is capacity only when
+    the preflight re-read after it gives a readable ``remaining`` under the adapter's
+    ``min_remaining``: the pool provably cannot pay for a round. An ``exhausted``
+    state with the count at or above the minimum (the state can be unavailable with
+    plenty left), an unreadable count, or the pre-round reading is not enough: a start
+    failure with the pool otherwise fine is a real CLI or network failure and must not
+    be masked as a wait, so it stays ``failed``.
+
+    Parameters
+    ----------
+    adapter : ReviewerAdapter
+        The reviewer adapter (supplies the pattern and ``min_remaining``).
+    output : str
+        The review command's stdout and stderr.
+    after_check : dict[str, Any]
+        The preflight verdict re-read after the failure.
+
+    Returns
+    -------
+    bool
+        ``True`` to classify the failure as ``exhausted``.
+    """
+    preflight, spec = adapter.local_preflight, adapter.local_review
+    if preflight is None or spec is None or spec.start_failure_pattern is None:
+        return False
+    if not spec.start_failure_pattern.search(output):
+        return False
+    after = after_check.get("remaining")
+    return (
+        isinstance(after, int)
+        and not isinstance(after, bool)
+        and after < preflight.min_remaining
+    )
+
+
+def _recheck_after(adapter: ReviewerAdapter, verdict: dict[str, Any]) -> int:
+    """Return the seconds to wait after a capacity start failure.
+
+    Uses the post-failure preflight's own wait when it reads ``exhausted`` (it knows
+    when the pool refills); otherwise the adapter's ``max_recheck_seconds`` cap.
+
+    Parameters
+    ----------
+    adapter : ReviewerAdapter
+        The reviewer adapter; its ``local_preflight`` supplies the cap.
+    verdict : dict[str, Any]
+        The preflight verdict re-read after the failure.
+
+    Returns
+    -------
+    int
+        Seconds to wait before running again.
+
+    Raises
+    ------
+    ValueError
+        If the adapter has no ``local_preflight``: a capacity failure needs one.
+    """
+    recheck = verdict.get("recheck_after_seconds")
+    if verdict.get("status") == "exhausted" and isinstance(recheck, int):
+        return recheck
+    if adapter.local_preflight is None:
+        raise ValueError("a capacity failure needs a local_preflight to wait on")
+    return adapter.local_preflight.max_recheck_seconds
+
+
 def parse_events(
     stdout: str, spec: LocalReviewSpec
 ) -> tuple[list[dict[str, Any]], bool]:
@@ -203,6 +307,13 @@ def _record_body(
         )
     if len(findings) > _MAX_LISTED:
         lines.append(f"- …and {len(findings) - _MAX_LISTED} more")
+    before, after = record.get("remaining_before"), record.get("remaining_after")
+    if before is not None or after is not None:
+        lines += [
+            "",
+            f"Local allowance: {'?' if before is None else before} -> "
+            f"{'?' if after is None else after} reviews left.",
+        ]
     lines += [
         "",
         "<sub>Recorded by `local_review.py`: fix rounds run locally, so this PR's one "
@@ -310,11 +421,13 @@ def review(
             cap=cap,
         )
     allowance = deps.preflight(adapter)
+    remaining_before = allowance.get("remaining")
     if allowance["status"] == "exhausted":
         return done(
             "exhausted",
             allowance["detail"],
             recheck_after_seconds=allowance["recheck_after_seconds"],
+            remaining_before=remaining_before,
         )
     try:
         deps.git(["fetch", "--quiet", "origin", base_ref])
@@ -341,12 +454,28 @@ def review(
             remedy=remedies.get("failed"),
         )
     findings, completed = parse_events(stdout, spec)
+    # What the round left in the allowance (the CLI reports no cost of its own).
+    after_check = _reread(deps, adapter)
+    remaining_after = after_check.get("remaining")
     if code != 0 or not completed:
+        if _start_failed_for_capacity(adapter, stdout + stderr, after_check):
+            recheck = _recheck_after(adapter, after_check)
+            return done(
+                "exhausted",
+                f"`{' '.join(argv)}` failed to start with {remaining_before} "
+                f"review(s) left before and {remaining_after} after: the allowance "
+                f"is too low for a round; check again in {recheck}s",
+                recheck_after_seconds=recheck,
+                remaining_before=remaining_before,
+                remaining_after=remaining_after,
+            )
         return done(
             "failed",
             f"`{' '.join(argv)}` exited {code} without completing: "
             f"{stderr.strip()[-500:]}",
             remedy=allowance.get("remedy") or remedies.get("failed"),
+            remaining_before=remaining_before,
+            remaining_after=remaining_after,
         )
     record = {
         "reviewer": adapter.key,
@@ -355,6 +484,8 @@ def review(
         "round": used + 1,
         "phase": phase,
         "findings": len(findings),
+        "remaining_before": remaining_before,
+        "remaining_after": remaining_after,
     }
     body = _record_body(record, phase, findings)
     try:
@@ -369,6 +500,8 @@ def review(
             "re-run",
             findings=findings,
             record_body=body,
+            remaining_before=remaining_before,
+            remaining_after=remaining_after,
         )
     return done(
         "reviewed",
@@ -381,6 +514,8 @@ def review(
         base=base,
         findings=findings,
         comment_url=url,
+        remaining_before=remaining_before,
+        remaining_after=remaining_after,
     )
 
 
