@@ -437,3 +437,87 @@ def test_every_loader_accepts_the_real_config_with_test_speed() -> None:
     for key in _KEYS:
         assert state.load_reviewer(_CONFIG, key=key).key == key
     assert state.load_round_caps(_CONFIG).local_before_final >= 1
+
+
+# --- The downstream review handling the prose must carry (helpers are bundled) ---
+
+_STACK_REF = _SKILLS / "resolve-pr-concerns" / "references" / "stacked-prs.md"
+_SH_HELPER_RE = re.compile(
+    r"\b(?:human_review|wait_for_pr_checks)\.sh\b|scripts/\S+\.sh\b"
+)
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "merge_gate.py",
+        "round_budget",
+        "incremental_review_outcome",
+        "unthreaded_findings",
+        "needs_trigger",
+        "exit 3",
+        "references/stacked-prs.md",
+        "60 minutes",
+        "trigger_allowed",
+        "final_review_due",
+        "min_remaining",
+        "test_speed_check",
+    ],
+)
+def test_the_skill_names_each_bundled_review_signal(phrase: str) -> None:
+    assert phrase in _flat(_SKILL), phrase
+
+
+def test_an_empty_live_set_is_not_proof_of_a_review() -> None:
+    loop_guards = _section(_flat(_SKILL), "## Loop guards")
+    assert "an empty" in loop_guards.lower() and "not proof" in loop_guards
+
+
+def test_the_skill_points_at_the_python_helpers_not_the_retired_scripts() -> None:
+    text = _SKILL.read_text()
+    assert not _SH_HELPER_RE.search(text), _SH_HELPER_RE.findall(text)
+    assert "scripts/human_review.py --repo" in text
+    assert "scripts/wait_for_pr_checks.py <pr-number>" in text
+    for path in _tracked(".agents/skills/resolve-pr-concerns"):
+        if path.suffix == ".md":
+            assert not _SH_HELPER_RE.search(path.read_text()), path.name
+
+
+def test_merge_readiness_is_a_report_never_a_merge() -> None:
+    step7 = _section(_flat(_SKILL), "## Step 7:")
+    assert "merge_gate.py" in step7
+    assert "one-off" in step7
+    assert "never permission" in step7
+
+
+def test_behind_blocks_only_under_the_up_to_date_rule() -> None:
+    """merge_gate.py treats BEHIND as a blocker only while the rules are strict."""
+    step2f = _section(_flat(_SKILL), "### 2f.")
+    assert "up to date" in step2f and "merge queue" in step2f
+    assert "CONFLICTING" in step2f and "DIRTY" in step2f
+
+
+def test_the_stack_reference_keeps_landing_with_the_human() -> None:
+    text = _flat(_STACK_REF)
+    for phrase in (
+        "merge_gate.py --stack",
+        "gh stack merge",
+        "never `gh pr merge`",
+        "bottom-up",
+        "one-off",
+        "never installs",
+        "4 layers",
+        "300 files",
+        "merge queue",
+    ):
+        assert phrase in text, phrase
+
+
+def test_coderabbit_notes_hedge_the_status_type_and_cap_review_size() -> None:
+    text = _flat(_NOTES_DIR / "coderabbit.md")
+    assert "commit status" in text
+    assert "300 files" in text
+
+
+def test_bugbot_notes_explain_the_stale_summary() -> None:
+    assert "BUGBOT_REVIEW_STALE" in (_NOTES_DIR / "bugbot.md").read_text()
