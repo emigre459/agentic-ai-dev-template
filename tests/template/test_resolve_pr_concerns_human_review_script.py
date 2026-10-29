@@ -183,6 +183,7 @@ def _run(
         ["bash", str(_SCRIPT), "7", "o/r", "--config", str(cfg)],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
         cwd=tmp_path,
         timeout=30,
@@ -202,14 +203,18 @@ def _roots(state: dict[str, Any]) -> list[int]:
 
 def test_script_parses() -> None:
     result = subprocess.run(  # nosec B603 B607 -- fixed argv, no shell
-        ["bash", "-n", str(_SCRIPT)], capture_output=True, text=True, timeout=30
+        ["bash", "-n", str(_SCRIPT)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
     )
     assert result.returncode == 0, result.stderr
 
 
 def test_usage_error_without_a_pr() -> None:
     result = subprocess.run(  # nosec B603 B607 -- fixed argv, no shell
-        ["bash", str(_SCRIPT)], capture_output=True, text=True, timeout=30
+        ["bash", str(_SCRIPT)], capture_output=True, text=True, check=False, timeout=30
     )
     assert result.returncode == 64
 
