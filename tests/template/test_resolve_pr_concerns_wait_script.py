@@ -44,7 +44,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _config(tmp_path: Path, active: str = "coderabbit", **drop: bool) -> Path:
+def _config(tmp_path: Path, active: str | None = "coderabbit", **drop: bool) -> Path:
     config = json.loads(_CONFIG.read_text())
     config["active"] = active
     for field in drop:
@@ -108,6 +108,28 @@ def test_repo_without_a_reviewer_config_still_settles(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "no PR reviewer configured" in result.stderr
     assert "not yet registered" not in result.stderr
+
+
+def test_no_active_reviewer_waits_on_ci_only(tmp_path: Path) -> None:
+    """``"active": null`` settles CI with no expected reviewer bot, like no config."""
+    result = _run(
+        tmp_path, [LINT_PASS], _config(tmp_path, active=None), "--bot-window-sec", "600"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "no PR reviewer active" in result.stderr
+    assert "not yet registered" not in result.stderr
+
+
+def test_no_active_reviewer_still_treats_adapter_checks_as_soft(tmp_path: Path) -> None:
+    """A still-installed reviewer app's pending check must not block the wait."""
+    result = _run(
+        tmp_path,
+        [LINT_PASS, _pending("Cursor Bugbot")],
+        _config(tmp_path, active=None),
+        "--bot-window-sec",
+        "0",
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_default_config_is_used_when_present(tmp_path: Path) -> None:

@@ -282,9 +282,47 @@ def _config_with(**entry_overrides: Any) -> dict[str, Any]:
     return {"active": "x", "reviewers": {"x": entry}}
 
 
-def test_loader_reads_the_active_reviewer_by_default() -> None:
-    active = json.loads(reviewer_state.DEFAULT_CONFIG_PATH.read_text())["active"]
-    assert load_reviewer().key == active
+def test_loader_reads_the_active_reviewer_by_default(tmp_path: Path) -> None:
+    assert load_reviewer(_write(tmp_path, _config_with())).key == "x"
+
+
+def test_loader_null_active_means_no_reviewer(tmp_path: Path) -> None:
+    """``"active": null`` is a deliberate "no reviewer", not a config error."""
+    config = {**_config_with(), "active": None}
+    with pytest.raises(reviewer_state.NoActiveReviewer, match="no PR reviewer"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_no_active_reviewer_is_not_a_config_error() -> None:
+    """Callers map ValueError to a usage error; no reviewer must not look like one."""
+    assert not issubclass(reviewer_state.NoActiveReviewer, ValueError)
+
+
+def test_loader_reads_a_named_adapter_when_none_is_active(tmp_path: Path) -> None:
+    config = {**_config_with(), "active": None}
+    assert load_reviewer(_write(tmp_path, config), key="x").key == "x"
+
+
+def test_loader_missing_active_is_still_an_error(tmp_path: Path) -> None:
+    """Only an explicit null turns the reviewer off; a missing key is a typo."""
+    config = _config_with()
+    del config["active"]
+    with pytest.raises(ValueError, match="None"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_main_reports_no_active_reviewer(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    path = _write(tmp_path, {**_config_with(), "active": None})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["reviewer_state.py", "--repo", "o/r", "--pr", "7", "--config", str(path)],
+    )
+    reviewer_state.main()
+    out = json.loads(capsys.readouterr().out)
+    assert out["reviewer"] is None and out["configured"] is False
 
 
 def test_loader_missing_file_raises(tmp_path: Path) -> None:

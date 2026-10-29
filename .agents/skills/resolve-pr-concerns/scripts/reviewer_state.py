@@ -48,6 +48,15 @@ DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[4] / ".github" / "pr-reviewer.json"
 )
 
+
+class NoActiveReviewer(Exception):
+    """The config sets ``"active": null``: the repo has no PR reviewer.
+
+    Deliberately not a ``ValueError``: callers report a bad config as a usage error,
+    while no reviewer is a supported setup (resolve-pr-concerns Step 1b).
+    """
+
+
 _REQUIRED_STRINGS = (
     "display_name",
     "check_name",
@@ -370,6 +379,8 @@ def load_reviewer(
     ------
     FileNotFoundError
         The config file does not exist.
+    NoActiveReviewer
+        ``active`` is null and no ``key`` was given.
     ValueError
         Invalid JSON, an unknown reviewer key, or a missing/mistyped field.
     """
@@ -391,6 +402,11 @@ def load_reviewer(
             f"{path}: 'reviewers' must be a non-empty object keyed by reviewer name."
         )
     chosen = key if key is not None else config.get("active")
+    if chosen is None and "active" in config:
+        raise NoActiveReviewer(
+            f"{path}: no PR reviewer is active ('active' is null). Set it to one of "
+            f"{sorted(reviewers)} once that reviewer is installed on the repo."
+        )
     if chosen not in reviewers:
         raise ValueError(
             f"{path}: reviewer {chosen!r} is not configured. "
@@ -1146,7 +1162,11 @@ def main() -> None:
         help=f"reviewer config (default: {DEFAULT_CONFIG_PATH})",
     )
     args = parser.parse_args()
-    adapter = load_reviewer(args.config)
+    try:
+        adapter = load_reviewer(args.config)
+    except NoActiveReviewer as exc:
+        print(json.dumps({"reviewer": None, "configured": False, "detail": str(exc)}))
+        return
     caps = load_round_caps(args.config)
     print(json.dumps(collect_state(args.repo, args.pr, adapter, caps), indent=2))
 

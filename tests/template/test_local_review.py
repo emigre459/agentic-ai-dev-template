@@ -680,3 +680,14 @@ def test_main_reports_a_bad_config_as_a_usage_error(tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text("{")
     assert local_review.main(["--repo", "o/r", "--pr", "7", "--config", str(bad)]) == 64
+
+
+def test_main_with_no_active_reviewer_is_not_configured(
+    tmp_path: Path, capsys: Any
+) -> None:
+    config = json.loads(reviewer_state.DEFAULT_CONFIG_PATH.read_text())
+    config["active"] = None
+    path = _write(tmp_path, config)
+    assert local_review.main(["--repo", "o/r", "--pr", "7", "--config", str(path)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert (result["reviewer"], result["status"]) == (None, "not_configured")

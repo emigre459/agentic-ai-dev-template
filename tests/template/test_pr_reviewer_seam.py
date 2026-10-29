@@ -106,10 +106,13 @@ def _seam_files() -> list[Path]:
 
 
 def test_active_reviewer_is_configured() -> None:
+    """``active`` names an adapter, or is null for a repo with no reviewer."""
     config = _load_config()
-    assert (
-        config["active"] in config["reviewers"]
-    ), f"{_CONFIG.relative_to(_REPO)}: 'active' must name a key in 'reviewers'."
+    assert "active" in config, f"{_CONFIG.relative_to(_REPO)}: 'active' is missing."
+    assert config["active"] is None or config["active"] in config["reviewers"], (
+        f"{_CONFIG.relative_to(_REPO)}: 'active' must name a key in 'reviewers' "
+        "(or be null for no reviewer)."
+    )
 
 
 @pytest.mark.parametrize("key", _KEYS)

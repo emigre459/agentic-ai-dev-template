@@ -225,10 +225,18 @@ def main() -> None:
     args = parser.parse_args()
     if args.merge_group_sha:
         post_for_merge_group(args.repo, args.merge_group_sha)
-    elif args.all_open:
-        post_for_all_open_prs(args.repo, reviewer_state.load_reviewer(args.config))
+        return
+    try:
+        adapter = reviewer_state.load_reviewer(args.config)
+    except reviewer_state.NoActiveReviewer as exc:
+        # Nothing to gate. Post nothing: a ruleset that requires review-gate with no
+        # reviewer active stays blocked, which is the right signal.
+        print(f"::notice::{exc}")
+        return
+    if args.all_open:
+        post_for_all_open_prs(args.repo, adapter)
     else:
-        post_for_pr(args.repo, args.pr, reviewer_state.load_reviewer(args.config))
+        post_for_pr(args.repo, args.pr, adapter)
 
 
 if __name__ == "__main__":
