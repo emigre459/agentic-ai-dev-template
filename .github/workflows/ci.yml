@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Merge-queue commits: the required jobs must report on the
+  # gh-readonly-queue/main/* commit or a merge queue never merges it.
+  merge_group:
+    types: [checks_requested]
 
 # >>> STACK:template
 # Each stack runs lint / tests / security as separate parallel jobs. Job ids

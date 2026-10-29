@@ -229,3 +229,43 @@ def test_a_value_flag_without_its_value_is_a_usage_error(
     result = _run(tmp_path, [LINT_PASS], None, flag)
     assert result.returncode == 64
     assert f"{flag} needs a value" in result.stderr
+
+
+def _check(name: str, bucket: str) -> dict[str, str]:
+    return {"name": name, "bucket": bucket, "state": bucket.upper(), "link": ""}
+
+
+def test_a_superseded_review_gate_run_is_not_a_failure(tmp_path: Path) -> None:
+    """review-gate.yml cancels superseded runs; the cancelled run is noise.
+
+    Its verdict is the `review-gate` commit status, so a cancelled run of the job
+    that posts it must not read as a failed CI check.
+    """
+    checks = [
+        LINT_PASS,
+        _check("CodeRabbit", "pass"),
+        _check("compute review gate status", "cancel"),
+        _check("review-gate", "pass"),
+    ]
+    result = _run(tmp_path, checks, _config(tmp_path))
+    assert result.returncode == 0, result.stderr
+
+
+def test_any_other_cancelled_check_still_fails(tmp_path: Path) -> None:
+    checks = [LINT_PASS, _check("CodeRabbit", "pass"), _check("tests", "cancel")]
+    result = _run(tmp_path, checks, _config(tmp_path))
+    assert result.returncode == 1
+
+
+def test_a_cancelled_review_gate_run_needs_a_passing_review_gate_status(
+    tmp_path: Path,
+) -> None:
+    """Cancelled gate runs are noise only if a run that finished posted a pass."""
+    checks = [
+        LINT_PASS,
+        _check("CodeRabbit", "pass"),
+        _check("compute review gate status", "cancel"),
+    ]
+    result = _run(tmp_path, checks, _config(tmp_path))
+    assert result.returncode == 1
+    assert "review-gate" in result.stderr

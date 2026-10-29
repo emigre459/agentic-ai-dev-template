@@ -1,0 +1,1155 @@
+#!/usr/bin/env python3
+"""Authoritative state of the configured PR reviewer for a PR's current head SHA.
+
+The active reviewer is declared in ``.github/pr-reviewer.json``: its check name,
+trigger comment, bot logins, summary marker, and verdict patterns all live there,
+so this script names no vendor. Vendor quirks that don't fit a config field live
+in the resolve-pr-concerns skill's ``references/reviewers/<key>.md``.
+
+A reviewer's verdict lives in its *review*, which is decoupled from its status
+check: the check can read skipping/neutral/pending while a complete review with
+findings already exists. Findings never appear in issue-comments, so reading
+those always looks empty.
+
+Also returns ``merge_state_status``, despite the module's name, so one call hands an
+agent everything it needs to decide its next step (a ``BEHIND`` base is one of them).
+``UNKNOWN`` means "not computed yet, or already merged" -- never "not BEHIND".
+
+Also returns ``final_review_outcome``: the reviewer's one final full review, requested
+with the adapter's ``final_review_comment`` once incremental reviews are clean. It is
+judged from the reviewer's reply to that command (``command_reply_marker``), which the
+reviewer edits in place when the review ends -- never from its status check.
+
+Also returns ``rate_limit``: whether the reviewer refused the newest review request
+(trigger or final-review comment) for its rate limit, and when to retry. Such a
+request never ran: it is waited out and re-posted unchanged, never escalated.
+
+Also returns ``local_review``: for a reviewer whose adapter declares ``local_review``
+(a command-line review of the committed changes, run on the developer's machine
+against an allowance separate from the PR quota), the fix rounds run locally through
+``local_review.py`` and are budgeted here from the records it leaves on the PR
+(``review_rounds`` in the config). Such a reviewer never needs a PR trigger: the PR's
+one review request is the final full review.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess  # nosec B404 -- fixed gh argv, no shell
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, NamedTuple
+
+# scripts/ -> resolve-pr-concerns/ -> skills/ -> .agents/ -> repo root
+DEFAULT_CONFIG_PATH = (
+    Path(__file__).resolve().parents[4] / ".github" / "pr-reviewer.json"
+)
+
+_REQUIRED_STRINGS = (
+    "display_name",
+    "check_name",
+    "trigger_comment",
+    "clean_pattern",
+    "findings_pattern",
+)
+# Present-but-nullable: an absent key is a typo, not a deliberate null.
+_NULLABLE_STRINGS = ("summary_marker", "reviewed_sha_pattern")
+# The final full review: all set, or all null for a reviewer agents can't ask for one.
+_FINAL_REVIEW_FIELDS = (
+    "final_review_comment",
+    "command_reply_marker",
+    "final_review_done_pattern",
+    "final_review_failed_pattern",
+    "final_review_partial_pattern",
+)
+
+
+class PreflightSpec(NamedTuple):
+    """A local, read-only command that reports the local review's remaining capacity.
+
+    ``review_preflight.py`` runs it before every local review round, so a round never
+    starts while the local allowance is spent. It reads the local pool only, never
+    the PR quota. The paths are dotted keys into the command's JSON. When the command
+    can't be read, ``auth_command`` tells a logged-out CLI from a broken one, and
+    ``remedies`` holds what to tell the user for each cause.
+    """
+
+    command: tuple[str, ...]
+    state_path: str
+    available_states: frozenset[str]
+    remaining_path: str
+    full_capacity_ms_path: str
+    max_recheck_seconds: int
+    auth_command: tuple[str, ...]
+    authenticated_path: str
+    remedies: dict[str, str]
+
+
+_PREFLIGHT_PATHS = (
+    "state_path",
+    "remaining_path",
+    "full_capacity_ms_path",
+    "authenticated_path",
+)
+_PREFLIGHT_KEYS = frozenset(
+    {
+        "command",
+        "auth_command",
+        "available_states",
+        "max_recheck_seconds",
+        "remedies",
+        *_PREFLIGHT_PATHS,
+    }
+)
+#: Why a preflight couldn't be read; each needs its own remedy text.
+PREFLIGHT_FAILURES = ("not_installed", "not_authenticated", "failed")
+
+
+def _argv(value: Any) -> bool:
+    """Return whether ``value`` is a non-empty list of non-empty string arguments."""
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(arg, str) and arg for arg in value)
+    )
+
+
+def _positive_int(value: Any) -> bool:
+    """Return whether ``value`` is a positive integer (``true`` is not a number)."""
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 1
+
+
+def _load_preflight(path: Path, key: str, value: Any) -> PreflightSpec | None:
+    """Validate one adapter's ``local_preflight`` block; ``None`` means no gate."""
+    if value is None:
+        return None
+    where = f"{path}: reviewers.{key}.local_preflight"
+    if not isinstance(value, dict) or set(value) != _PREFLIGHT_KEYS:
+        raise ValueError(
+            f"{where} must be null or an object with exactly the keys "
+            f"{sorted(_PREFLIGHT_KEYS)}."
+        )
+    for field in ("command", "auth_command"):
+        if not _argv(value[field]):
+            raise ValueError(f"{where}.{field} must be a non-empty list of arguments.")
+    remedies = value["remedies"]
+    if (
+        not isinstance(remedies, dict)
+        or set(remedies) != set(PREFLIGHT_FAILURES)
+        or not all(isinstance(text, str) and text for text in remedies.values())
+    ):
+        raise ValueError(
+            f"{where}.remedies must map each of {list(PREFLIGHT_FAILURES)} to the "
+            "instruction the user needs."
+        )
+    for field in _PREFLIGHT_PATHS:
+        if not isinstance(value[field], str) or not value[field]:
+            raise ValueError(f"{where}.{field} must be a non-empty dotted path.")
+    if not _argv(value["available_states"]):
+        raise ValueError(f"{where}.available_states must be a non-empty list.")
+    if not _positive_int(value["max_recheck_seconds"]):
+        raise ValueError(f"{where}.max_recheck_seconds must be a positive integer.")
+    return PreflightSpec(
+        command=tuple(value["command"]),
+        state_path=value["state_path"],
+        available_states=frozenset(value["available_states"]),
+        remaining_path=value["remaining_path"],
+        full_capacity_ms_path=value["full_capacity_ms_path"],
+        max_recheck_seconds=value["max_recheck_seconds"],
+        auth_command=tuple(value["auth_command"]),
+        authenticated_path=value["authenticated_path"],
+        remedies=dict(remedies),
+    )
+
+
+class LocalReviewSpec(NamedTuple):
+    """A local command-line review of the committed changes against a base.
+
+    A PR review request spends the developer's scarce PR quota; a local review draws
+    on a separate allowance, so fix rounds run here and the PR gets one final full
+    review. ``command`` is the argv, with ``{base}`` standing for the base commit.
+    The command prints one JSON event per line: the event type sits at
+    ``event_type_path``, findings are ``finding_event`` lines whose fields
+    ``finding_fields`` maps (``severity``, ``path``, ``line``, ``title``, ``body``),
+    and a ``complete_event`` line ends a finished review.
+    """
+
+    command: tuple[str, ...]
+    event_type_path: str
+    finding_event: str
+    complete_event: str
+    finding_fields: dict[str, str]
+    timeout_seconds: int
+
+
+_LOCAL_REVIEW_KEYS = frozenset(
+    {
+        "command",
+        "event_type_path",
+        "finding_event",
+        "complete_event",
+        "finding_fields",
+        "timeout_seconds",
+    }
+)
+#: The normalised finding fields every local review must map.
+LOCAL_FINDING_FIELDS = ("severity", "path", "line", "title", "body")
+#: Stands for the base commit in ``LocalReviewSpec.command``.
+BASE_PLACEHOLDER = "{base}"
+
+
+def _load_local_review(path: Path, key: str, value: Any) -> LocalReviewSpec | None:
+    """Validate one adapter's ``local_review`` block; ``None`` means no local review."""
+    if value is None:
+        return None
+    where = f"{path}: reviewers.{key}.local_review"
+    if not isinstance(value, dict) or set(value) != _LOCAL_REVIEW_KEYS:
+        raise ValueError(
+            f"{where} must be null or an object with exactly the keys "
+            f"{sorted(_LOCAL_REVIEW_KEYS)}."
+        )
+    command = value["command"]
+    if not _argv(command):
+        raise ValueError(f"{where}.command must be a non-empty list of arguments.")
+    if not any(BASE_PLACEHOLDER in arg for arg in command):
+        raise ValueError(
+            f"{where}.command must name the base commit as {BASE_PLACEHOLDER}."
+        )
+    for field in ("event_type_path", "finding_event", "complete_event"):
+        if not isinstance(value[field], str) or not value[field]:
+            raise ValueError(f"{where}.{field} must be a non-empty string.")
+    fields = value["finding_fields"]
+    if (
+        not isinstance(fields, dict)
+        or set(fields) != set(LOCAL_FINDING_FIELDS)
+        or not all(isinstance(p, str) and p for p in fields.values())
+    ):
+        raise ValueError(
+            f"{where}.finding_fields must map each of {list(LOCAL_FINDING_FIELDS)} "
+            "to a dotted path in a finding event."
+        )
+    if not _positive_int(value["timeout_seconds"]):
+        raise ValueError(f"{where}.timeout_seconds must be a positive integer.")
+    return LocalReviewSpec(
+        command=tuple(command),
+        event_type_path=value["event_type_path"],
+        finding_event=value["finding_event"],
+        complete_event=value["complete_event"],
+        finding_fields=dict(fields),
+        timeout_seconds=value["timeout_seconds"],
+    )
+
+
+class ReviewerAdapter(NamedTuple):
+    """One reviewer's entry from ``.github/pr-reviewer.json``, validated + compiled."""
+
+    key: str
+    display_name: str
+    check_name: str
+    trigger_comment: str
+    bot_logins: frozenset[str]
+    summary_marker: str | None
+    clean_pattern: re.Pattern[str]
+    findings_pattern: re.Pattern[str]
+    reviewed_sha_pattern: re.Pattern[str] | None
+    self_resolves_threads: bool
+    summary_in_issue_comments: bool
+    final_review_comment: str | None
+    command_reply_marker: str | None
+    final_review_done_pattern: re.Pattern[str] | None
+    final_review_failed_pattern: re.Pattern[str] | None
+    final_review_partial_pattern: re.Pattern[str] | None
+    # A command reply saying the request was refused for the rate limit (it never
+    # ran, so it is a wait, not a review), the wait it states (one group, minutes),
+    # the wait to assume when it states none, and the notice comment the reviewer
+    # edits in place on a refused attempt (it can state the wait when the reply
+    # doesn't).
+    rate_limited_pattern: re.Pattern[str] | None
+    rate_limit_wait_pattern: re.Pattern[str] | None
+    rate_limit_default_wait_minutes: int | None
+    rate_limit_notice_marker: str | None
+    # The capacity check for ``local_review``'s allowance, run before every local
+    # round (it reads the local pool, not the PR quota), and the local review itself.
+    local_preflight: PreflightSpec | None
+    local_review: LocalReviewSpec | None
+
+
+class RoundCaps(NamedTuple):
+    """How many local review rounds a PR gets around its final full review.
+
+    Set in ``.github/pr-reviewer.json`` under ``review_rounds``. They apply only to a
+    reviewer that declares ``local_review``: its fix rounds run locally, before the
+    PR's one final full review and after it.
+    """
+
+    local_before_final: int = 3
+    local_after_final: int = 3
+
+
+DEFAULT_ROUND_CAPS = RoundCaps()
+_ROUND_CAP_KEYS = {
+    "max_local_before_final": "local_before_final",
+    "max_local_after_final": "local_after_final",
+}
+
+
+def load_round_caps(config_path: Path | None = None) -> RoundCaps:
+    """Read ``review_rounds`` from the reviewer config; absent means the defaults.
+
+    Parameters
+    ----------
+    config_path : Path or None
+        Reviewer config path, or ``None`` for the default.
+
+    Returns
+    -------
+    RoundCaps
+        The configured caps, or ``DEFAULT_ROUND_CAPS`` when ``review_rounds`` is
+        absent.
+
+    Raises
+    ------
+    ValueError
+        An unknown key (a misspelled knob must not fall back silently) or a value
+        that is not a non-negative integer.
+    """
+    path = config_path or DEFAULT_CONFIG_PATH
+    config = json.loads(path.read_text())
+    block = config.get("review_rounds") if isinstance(config, dict) else None
+    if block is None:
+        return DEFAULT_ROUND_CAPS
+    if not isinstance(block, dict):
+        raise ValueError(f"{path}: review_rounds must be an object.")
+    unknown = sorted(set(block) - set(_ROUND_CAP_KEYS))
+    if unknown:
+        raise ValueError(
+            f"{path}: unknown review_rounds key(s) {unknown}; "
+            f"expected {sorted(_ROUND_CAP_KEYS)}."
+        )
+    values = DEFAULT_ROUND_CAPS._asdict()
+    for key, field in _ROUND_CAP_KEYS.items():
+        if key not in block:
+            continue
+        value = block[key]
+        # bool is an int subclass; `true` is not a round count.
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(
+                f"{path}: review_rounds.{key} must be a non-negative integer, "
+                f"got {value!r}."
+            )
+        values[field] = value
+    return RoundCaps(**values)
+
+
+def _compile(path: Path, key: str, field: str, pattern: str) -> re.Pattern[str]:
+    try:
+        return re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        raise ValueError(
+            f"{path}: reviewers.{key}.{field} is not a valid regex: {exc}"
+        ) from exc
+
+
+def _one_group(path: Path, key: str, field: str, compiled: re.Pattern[str]) -> None:
+    if compiled.groups != 1:
+        raise ValueError(
+            f"{path}: reviewers.{key}.{field} must have exactly one capture group "
+            f"(found {compiled.groups})."
+        )
+
+
+def load_reviewer(
+    config_path: Path | None = None, key: str | None = None
+) -> ReviewerAdapter:
+    """Load and validate one reviewer adapter (the ``active`` one unless ``key``).
+
+    Raises
+    ------
+    FileNotFoundError
+        The config file does not exist.
+    ValueError
+        Invalid JSON, an unknown reviewer key, or a missing/mistyped field.
+    """
+    path = config_path or DEFAULT_CONFIG_PATH
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"PR-reviewer config not found at {path}. Create .github/pr-reviewer.json "
+            "naming the active reviewer (see the resolve-pr-concerns skill's "
+            "references/reviewers/), or pass --config."
+        )
+    try:
+        config = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path} is not valid JSON: {exc}") from exc
+
+    reviewers = config.get("reviewers") if isinstance(config, dict) else None
+    if not isinstance(reviewers, dict) or not reviewers:
+        raise ValueError(
+            f"{path}: 'reviewers' must be a non-empty object keyed by reviewer name."
+        )
+    chosen = key if key is not None else config.get("active")
+    if chosen not in reviewers:
+        raise ValueError(
+            f"{path}: reviewer {chosen!r} is not configured. "
+            f"Expected one of {sorted(reviewers)}."
+        )
+    raw = reviewers[chosen]
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: reviewers.{chosen} must be an object.")
+
+    for field in _REQUIRED_STRINGS:
+        if not isinstance(raw.get(field), str) or not raw[field]:
+            raise ValueError(
+                f"{path}: reviewers.{chosen}.{field} must be a non-empty string."
+            )
+    for field in _NULLABLE_STRINGS:
+        value = raw.get(field, ...)
+        if not (value is None or (isinstance(value, str) and value)):
+            raise ValueError(
+                f"{path}: reviewers.{chosen}.{field} must be a non-empty string "
+                "or null (and must be present)."
+            )
+    logins = raw.get("bot_logins")
+    if (
+        not isinstance(logins, list)
+        or not logins
+        or not all(isinstance(login, str) and login for login in logins)
+    ):
+        raise ValueError(
+            f"{path}: reviewers.{chosen}.bot_logins must be a non-empty list of "
+            "logins (list both the `x` and `x[bot]` forms)."
+        )
+    for field in ("self_resolves_threads", "summary_in_issue_comments"):
+        if not isinstance(raw.get(field), bool):
+            raise ValueError(
+                f"{path}: reviewers.{chosen}.{field} must be true or false."
+            )
+    for field in _FINAL_REVIEW_FIELDS:
+        value = raw.get(field, ...)
+        if not (value is None or (isinstance(value, str) and value)):
+            raise ValueError(
+                f"{path}: reviewers.{chosen}.{field} must be a non-empty string "
+                "or null (and must be present)."
+            )
+    if len({raw[field] is None for field in _FINAL_REVIEW_FIELDS}) != 1:
+        raise ValueError(
+            f"{path}: reviewers.{chosen}: {', '.join(_FINAL_REVIEW_FIELDS)} must all "
+            "be set or all be null."
+        )
+    final_done, final_failed, final_partial = (
+        None if raw[field] is None else _compile(path, chosen, field, raw[field])
+        for field in (
+            "final_review_done_pattern",
+            "final_review_failed_pattern",
+            "final_review_partial_pattern",
+        )
+    )
+
+    rate_limited = raw.get("rate_limited_pattern", ...)
+    if not (rate_limited is None or (isinstance(rate_limited, str) and rate_limited)):
+        raise ValueError(
+            f"{path}: reviewers.{chosen}.rate_limited_pattern must be a non-empty "
+            "string or null (and must be present)."
+        )
+    if rate_limited is not None and raw["command_reply_marker"] is None:
+        raise ValueError(
+            f"{path}: reviewers.{chosen}: rate_limited_pattern classifies command "
+            "replies, so command_reply_marker must be set too."
+        )
+    wait = raw.get("rate_limit_wait_pattern", ...)
+    if not (wait is None or (isinstance(wait, str) and wait)):
+        raise ValueError(
+            f"{path}: reviewers.{chosen}.rate_limit_wait_pattern must be a non-empty "
+            "regex or null (and must be present)."
+        )
+    if wait is not None and rate_limited is None:
+        raise ValueError(
+            f"{path}: reviewers.{chosen}: rate_limit_wait_pattern reads a refusal, so "
+            "rate_limited_pattern must be set too."
+        )
+    wait_pattern = None
+    if wait is not None:
+        wait_pattern = _compile(path, chosen, "rate_limit_wait_pattern", wait)
+        _one_group(path, chosen, "rate_limit_wait_pattern", wait_pattern)
+    default_wait = raw.get("rate_limit_default_wait_minutes", ...)
+    if rate_limited is None:
+        if default_wait is not None:
+            raise ValueError(
+                f"{path}: reviewers.{chosen}.rate_limit_default_wait_minutes must be "
+                "null (and present) when rate_limited_pattern is null."
+            )
+    elif not _positive_int(default_wait):
+        raise ValueError(
+            f"{path}: reviewers.{chosen}.rate_limit_default_wait_minutes must be a "
+            "positive number of minutes: the wait for a refusal that states none."
+        )
+    notice = raw.get("rate_limit_notice_marker", ...)
+    if not (notice is None or (isinstance(notice, str) and notice)):
+        raise ValueError(
+            f"{path}: reviewers.{chosen}.rate_limit_notice_marker must be a non-empty "
+            "string or null (and must be present)."
+        )
+    if notice is not None and rate_limited is None:
+        raise ValueError(
+            f"{path}: reviewers.{chosen}: rate_limit_notice_marker reads a refusal's "
+            "wait, so rate_limited_pattern must be set too."
+        )
+    for field in ("local_preflight", "local_review"):
+        if field not in raw:
+            raise ValueError(
+                f"{path}: reviewers.{chosen}.{field} must be present "
+                "(an object, or null for a reviewer with no local review)."
+            )
+    local_review = _load_local_review(path, chosen, raw["local_review"])
+    preflight = _load_preflight(path, chosen, raw["local_preflight"])
+    if local_review is not None and raw["final_review_comment"] is None:
+        raise ValueError(
+            f"{path}: reviewers.{chosen}.local_review needs a final full review: the "
+            "PR's one review request is final_review_comment, and the gate for a "
+            "local reviewer relies on it."
+        )
+    if preflight is not None and local_review is None:
+        raise ValueError(
+            f"{path}: reviewers.{chosen}.local_preflight checks the local review's "
+            "allowance, so local_review must be set too (or local_preflight null)."
+        )
+
+    findings = _compile(path, chosen, "findings_pattern", raw["findings_pattern"])
+    _one_group(path, chosen, "findings_pattern", findings)
+    reviewed_sha = None
+    if raw["reviewed_sha_pattern"] is not None:
+        reviewed_sha = _compile(
+            path, chosen, "reviewed_sha_pattern", raw["reviewed_sha_pattern"]
+        )
+        _one_group(path, chosen, "reviewed_sha_pattern", reviewed_sha)
+
+    return ReviewerAdapter(
+        key=chosen,
+        display_name=raw["display_name"],
+        check_name=raw["check_name"],
+        trigger_comment=raw["trigger_comment"],
+        bot_logins=frozenset(logins),
+        summary_marker=raw["summary_marker"],
+        clean_pattern=_compile(path, chosen, "clean_pattern", raw["clean_pattern"]),
+        findings_pattern=findings,
+        reviewed_sha_pattern=reviewed_sha,
+        self_resolves_threads=raw["self_resolves_threads"],
+        summary_in_issue_comments=raw["summary_in_issue_comments"],
+        final_review_comment=raw["final_review_comment"],
+        command_reply_marker=raw["command_reply_marker"],
+        final_review_done_pattern=final_done,
+        final_review_failed_pattern=final_failed,
+        final_review_partial_pattern=final_partial,
+        rate_limited_pattern=(
+            None
+            if rate_limited is None
+            else _compile(path, chosen, "rate_limited_pattern", rate_limited)
+        ),
+        rate_limit_wait_pattern=wait_pattern,
+        rate_limit_default_wait_minutes=default_wait,
+        rate_limit_notice_marker=notice,
+        local_preflight=preflight,
+        local_review=local_review,
+    )
+
+
+_THREADS_QUERY = """
+query($owner:String!, $name:String!, $pr:Int!) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$pr) {
+      headRefOid
+      mergeStateStatus
+      reviewThreads(first:100) {
+        nodes {
+          id
+          isResolved
+          comments(first:1) {
+            nodes { author { login } path line body }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _is_summary(body: str, adapter: ReviewerAdapter) -> bool:
+    """Return whether this review is the summary, not a reply or inline container."""
+    if adapter.summary_marker is not None:
+        return adapter.summary_marker in body
+    # No marker: only a review carrying a verdict counts, so a later reply-style
+    # review can't shadow the real summary and flip the verdict to "none".
+    return bool(
+        adapter.clean_pattern.search(body) or adapter.findings_pattern.search(body)
+    )
+
+
+def _on_head(
+    review: Mapping[str, Any], head_sha: str | None, adapter: ReviewerAdapter
+) -> bool:
+    if head_sha is None or review.get("commit_id") == head_sha:
+        return True
+    if adapter.reviewed_sha_pattern is None:
+        return False
+    match = adapter.reviewed_sha_pattern.search(review.get("body") or "")
+    if match is None:
+        return False
+    return head_sha.lower().startswith(match.group(1).lower())
+
+
+def _live(review: Mapping[str, Any]) -> bool:
+    """Return whether a review still stands: a dismissed review is not a verdict."""
+    return str(review.get("state") or "").upper() != "DISMISSED"
+
+
+def review_verdict(
+    reviews: Iterable[Mapping[str, Any]],
+    head_sha: str | None,
+    adapter: ReviewerAdapter,
+) -> tuple[str, int]:
+    """Return (verdict, finding_count) for the newest reviewer summary on head_sha.
+
+    verdict is "pass" (clean), "findings" (N inline findings), or "none"
+    (the reviewer has not reviewed this SHA — trigger it).
+    """
+    candidates = [
+        r
+        for r in reviews
+        if (r.get("user") or {}).get("login") in adapter.bot_logins
+        and _live(r)
+        and _is_summary(r.get("body") or "", adapter)
+        and _on_head(r, head_sha, adapter)
+    ]
+    if not candidates:
+        return ("none", 0)
+    newest = max(candidates, key=lambda r: r.get("submitted_at") or "")
+    body = newest.get("body") or ""
+    if adapter.clean_pattern.search(body):
+        return ("pass", 0)
+    match = adapter.findings_pattern.search(body)
+    if match:
+        return ("findings", int(match.group(1)))
+    return ("none", 0)
+
+
+def open_findings(
+    threads: Iterable[Mapping[str, Any]], adapter: ReviewerAdapter
+) -> list[dict[str, Any]]:
+    """Unresolved inline reviewer findings from GraphQL reviewThreads nodes."""
+    found: list[dict[str, Any]] = []
+    for thread in threads:
+        if thread.get("isResolved"):
+            continue
+        nodes = ((thread.get("comments") or {}).get("nodes")) or []
+        if not nodes:
+            continue
+        first = nodes[0]
+        if ((first.get("author") or {}).get("login")) not in adapter.bot_logins:
+            continue
+        found.append(
+            {
+                "thread_id": thread.get("id"),
+                "path": first.get("path"),
+                "line": first.get("line"),
+                "body": first.get("body"),
+            }
+        )
+    return found
+
+
+def _replies_between(
+    start: str,
+    end: str | None,
+    comments: Sequence[Mapping[str, Any]],
+    adapter: ReviewerAdapter,
+) -> list[Mapping[str, Any]]:
+    """Return the reviewer's command replies created in ``[start, end)``.
+
+    Every reply in the window, not just the first: an incremental command posted
+    around the same time gets a reply with the same marker.
+    """
+    marker = adapter.command_reply_marker or ""
+    return [
+        c
+        for c in comments
+        if start <= (c.get("created_at") or "")
+        and (end is None or (c.get("created_at") or "") < end)
+        and ((c.get("user") or {}).get("login")) in adapter.bot_logins
+        and marker in (c.get("body") or "")
+    ]
+
+
+def _classify(
+    start: str,
+    end: str | None,
+    comments: Sequence[Mapping[str, Any]],
+    reviews: Sequence[Mapping[str, Any]],
+    adapter: ReviewerAdapter,
+) -> str:
+    """Classify one full-review request from the replies before the next request."""
+    done = adapter.final_review_done_pattern
+    failed = adapter.final_review_failed_pattern
+    partial = adapter.final_review_partial_pattern
+    if done is None or failed is None or partial is None:  # all set with the comment
+        raise ValueError(f"reviewer {adapter.key!r}: final-review patterns are unset")
+    replies = _replies_between(start, end, comments, adapter)
+    bodies = [r.get("body") or "" for r in replies]
+    if any(done.search(b) for b in bodies):
+        return "finished"
+    # "Action not completed": the review can post while only its summary fails, so a
+    # verdict-bearing review between the request and that reply's last edit counts --
+    # unless an incremental command (or another command's reply) shares the window,
+    # since that review may be the other command's (errs on blocking: stays pending).
+    incremental = any(
+        start <= (c.get("created_at") or "")
+        and (end is None or (c.get("created_at") or "") < end)
+        and (c.get("body") or "").strip() == adapter.trigger_comment
+        for c in comments
+    )
+    # A request refused for the rate limit never ran: a review in its window belongs
+    # to some other request.
+    limited = adapter.rate_limited_pattern
+    refused = limited is not None and any(limited.search(b) for b in bodies)
+    if refused or incremental or any(not partial.search(b) for b in bodies):
+        replies = []
+    for reply in replies:
+        if not partial.search(reply.get("body") or ""):
+            continue
+        edited = reply.get("updated_at") or reply.get("created_at") or ""
+        for review in reviews:
+            if (
+                ((review.get("user") or {}).get("login")) in adapter.bot_logins
+                and _live(review)
+                and _is_summary(review.get("body") or "", adapter)
+                and start <= (review.get("submitted_at") or "") <= edited
+            ):
+                return "finished"
+    if any(failed.search(b) for b in bodies):
+        return "failed"
+    return "pending"
+
+
+def final_review_outcome(
+    comments: Iterable[Mapping[str, Any]],
+    reviews: Iterable[Mapping[str, Any]],
+    adapter: ReviewerAdapter,
+) -> str:
+    """Return the state of the reviewer's final full review on this PR.
+
+    ``"not_required"`` when the adapter has no final review; ``"not_requested"``
+    when nobody posted ``final_review_comment`` as a whole comment; otherwise
+    ``"finished"`` if any request finished, else the newest request's ``"failed"``
+    or ``"pending"``. Not tied to the head SHA: fixes after the full review are
+    re-checked incrementally, through ``review_verdict``.
+    """
+    if adapter.final_review_comment is None:
+        return "not_required"
+    ordered = sorted(comments, key=lambda c: c.get("created_at") or "")
+    review_list = list(reviews)
+    commands = [
+        c
+        for c in ordered
+        if (c.get("body") or "").strip() == adapter.final_review_comment
+    ]
+    if not commands:
+        return "not_requested"
+    starts = [c.get("created_at") or "" for c in commands]
+    outcomes = [
+        _classify(start, end, ordered, review_list, adapter)
+        for start, end in zip(starts, [*starts[1:], None])
+    ]
+    return "finished" if "finished" in outcomes else outcomes[-1]
+
+
+def _created(comment: Mapping[str, Any]) -> str:
+    return comment.get("created_at") or ""
+
+
+def _edited(comment: Mapping[str, Any]) -> str:
+    return comment.get("updated_at") or comment.get("created_at") or ""
+
+
+_ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _iso(moment: datetime) -> str:
+    return moment.strftime(_ISO_FORMAT)
+
+
+def rate_limit_state(
+    comments: Iterable[Mapping[str, Any]], adapter: ReviewerAdapter
+) -> dict[str, Any]:
+    """Return whether the reviewer refused the newest review request for its rate limit.
+
+    The newest request is the newest exact trigger or final-review comment. A refusal
+    is a command reply after it matching ``rate_limited_pattern``. ``retry_after`` is
+    the reply's time plus the wait it states (``rate_limit_wait_pattern``, minutes);
+    when it states none, the edit time of the rate-limit notice plus the wait the
+    notice states (only a notice edited at or after the request describes it); else
+    the reply's time plus ``rate_limit_default_wait_minutes``. The agent waits until
+    then and re-posts the SAME request (``request``); a refusal never calls for a
+    different one.
+
+    Parameters
+    ----------
+    comments : Iterable[Mapping[str, Any]]
+        PR issue comments.
+    adapter : ReviewerAdapter
+        Configured reviewer adapter.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``refused``, ``request`` (``trigger``, ``final`` or ``None``),
+        ``replied_at``, ``retry_after`` and ``wait_source`` (``reply``, ``notice``,
+        ``default`` or ``None``).
+    """
+    ordered = sorted(comments, key=_created)
+    kinds = {adapter.trigger_comment: "trigger"}
+    if adapter.final_review_comment is not None:
+        kinds[adapter.final_review_comment] = "final"
+    newest = next(
+        (c for c in reversed(ordered) if (c.get("body") or "").strip() in kinds), None
+    )
+    state: dict[str, Any] = {
+        "refused": False,
+        "request": None,
+        "replied_at": None,
+        "retry_after": None,
+        "wait_source": None,
+    }
+    if newest is None:
+        return state
+    state["request"] = kinds[(newest.get("body") or "").strip()]
+    limited = adapter.rate_limited_pattern
+    if limited is None:
+        return state
+    refusal = next(
+        (
+            r
+            for r in _replies_between(_created(newest), None, ordered, adapter)
+            if limited.search(r.get("body") or "")
+        ),
+        None,
+    )
+    if refusal is None:
+        return state
+    replied = datetime.strptime(_created(refusal), _ISO_FORMAT)
+    wait = adapter.rate_limit_wait_pattern
+    stated = wait.search(refusal.get("body") or "") if wait is not None else None
+    if stated:
+        start, minutes, source = replied, int(stated.group(1)), "reply"
+    else:
+        start, minutes, source = (
+            replied,
+            adapter.rate_limit_default_wait_minutes or 0,
+            "default",
+        )
+        notice = _rate_limit_notice(ordered, adapter, since=_created(newest))
+        if notice is not None:
+            start, minutes, source = notice[0], notice[1], "notice"
+    state.update(
+        refused=True,
+        replied_at=_iso(replied),
+        retry_after=_iso(start + timedelta(minutes=minutes)),
+        wait_source=source,
+    )
+    return state
+
+
+def _rate_limit_notice(
+    ordered: Sequence[Mapping[str, Any]], adapter: ReviewerAdapter, since: str
+) -> tuple[datetime, int] | None:
+    """Return ``(edited at, minutes)`` from a rate-limit notice edited since ``since``.
+
+    The reviewer edits one notice comment in place on each refused attempt, so only
+    an edit at or after the request describes it; a notice left from an earlier
+    attempt doesn't.
+    """
+    marker, wait = adapter.rate_limit_notice_marker, adapter.rate_limit_wait_pattern
+    if marker is None or wait is None:
+        return None
+    for comment in reversed(ordered):
+        body = comment.get("body") or ""
+        if (
+            ((comment.get("user") or {}).get("login")) in adapter.bot_logins
+            and marker in body
+            and _edited(comment) >= since
+        ):
+            match = wait.search(body)
+            if match:
+                edited = datetime.strptime(_edited(comment), _ISO_FORMAT)
+                return edited, int(match.group(1))
+    return None
+
+
+#: Opens the hidden record a local review leaves on the PR (``local_review.py``).
+LOCAL_REVIEW_MARKER = "<!-- local-review:v1 "
+_LOCAL_RECORD_RE = re.compile(r"<!-- local-review:v1 (\{.*?\}) -->", re.DOTALL)
+
+
+def local_review_marker(record: Mapping[str, Any]) -> str:
+    """Return the hidden marker that records one local review round on the PR.
+
+    Parameters
+    ----------
+    record : Mapping[str, Any]
+        ``reviewer``, ``head``, ``base``, ``round``, ``phase`` and ``findings``.
+
+    Returns
+    -------
+    str
+        An HTML comment the PR renders invisibly.
+    """
+    return f"{LOCAL_REVIEW_MARKER}{json.dumps(dict(record), sort_keys=True)} -->"
+
+
+def local_review_records(
+    comments: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return every local review recorded on the PR, oldest first, with its ``at``.
+
+    Parameters
+    ----------
+    comments : Iterable[Mapping[str, Any]]
+        PR issue comments.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        The parsed records; a malformed marker is skipped.
+    """
+    records = []
+    for comment in sorted(comments, key=_created):
+        match = _LOCAL_RECORD_RE.search(comment.get("body") or "")
+        if not match:
+            continue
+        try:
+            record = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and isinstance(record.get("head"), str):
+            records.append(dict(record, at=_created(comment)))
+    return records
+
+
+def _first_final_at(
+    ordered: Sequence[Mapping[str, Any]], adapter: ReviewerAdapter
+) -> str | None:
+    """Return when the first final-review request the reviewer didn't refuse was made.
+
+    A refused request never ran, so it doesn't start the after-final phase.
+    """
+    command = adapter.final_review_comment
+    if command is None:
+        return None
+    requests = [
+        c
+        for c in ordered
+        if (c.get("body") or "").strip() in (command, adapter.trigger_comment)
+    ]
+    limited = adapter.rate_limited_pattern
+    for position, comment in enumerate(requests):
+        if (comment.get("body") or "").strip() != command:
+            continue
+        end = _created(requests[position + 1]) if position + 1 < len(requests) else None
+        replies = _replies_between(_created(comment), end, ordered, adapter)
+        if limited is None or not any(
+            limited.search(r.get("body") or "") for r in replies
+        ):
+            return _created(comment)
+    return None
+
+
+def local_review_state(
+    comments: Iterable[Mapping[str, Any]],
+    adapter: ReviewerAdapter,
+    caps: RoundCaps,
+    head_sha: str,
+) -> dict[str, Any]:
+    """Budget the PR's local review rounds from their records.
+
+    Rounds before the first final-review request the reviewer didn't refuse, and
+    rounds after it, are capped separately (``local_before_final`` /
+    ``local_after_final``).
+
+    Parameters
+    ----------
+    comments : Iterable[Mapping[str, Any]]
+        PR issue comments.
+    adapter : ReviewerAdapter
+        Configured reviewer adapter.
+    caps : RoundCaps
+        Round caps.
+    head_sha : str
+        The PR's current head.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"configured": False}`` with no local review; otherwise ``phase``,
+        ``before_final`` / ``after_final`` ``{used, cap}``, ``allowed``,
+        ``reviewed_head`` and ``head_findings``.
+    """
+    if adapter.local_review is None:
+        return {"configured": False}
+    ordered = sorted(comments, key=_created)
+    first_final = _first_final_at(ordered, adapter)
+    records = local_review_records(ordered)
+    before = sum(1 for r in records if first_final is None or r["at"] < first_final)
+    after = len(records) - before
+    phase = "after_final" if first_final is not None else "before_final"
+    budget = {
+        "before_final": {"used": before, "cap": caps.local_before_final},
+        "after_final": {"used": after, "cap": caps.local_after_final},
+    }
+    current = budget[phase]
+    on_head = [r for r in records if r["head"] == head_sha]
+    return {
+        "configured": True,
+        "phase": phase,
+        **budget,
+        "allowed": current["used"] < current["cap"],
+        "reviewed_head": bool(on_head),
+        "head_findings": on_head[-1].get("findings") if on_head else None,
+    }
+
+
+def _comment_as_review(comment: Mapping[str, Any]) -> dict[str, Any]:
+    """Shape an issue-comment like a review so ``review_verdict`` can judge it.
+
+    A summary comment is edited in place, so ``updated_at`` is its recency, and it
+    carries no ``commit_id`` -- the adapter's ``reviewed_sha_pattern`` must say which
+    head it covers.
+    """
+    return {
+        "body": comment.get("body"),
+        "user": comment.get("user"),
+        "commit_id": None,
+        "submitted_at": comment.get("updated_at") or comment.get("created_at"),
+    }
+
+
+def _gh_json(args: Sequence[str]) -> Any:
+    out = subprocess.run(  # nosec B603 B607 -- fixed gh argv, no shell
+        ["gh", *args], check=True, capture_output=True, text=True
+    ).stdout
+    return json.loads(out) if out.strip() else None
+
+
+def collect_state(
+    repo: str,
+    pr: int,
+    adapter: ReviewerAdapter,
+    caps: RoundCaps = DEFAULT_ROUND_CAPS,
+) -> dict[str, Any]:
+    """Fetch one PR's reviews, threads and comments and return the reviewer state.
+
+    Parameters
+    ----------
+    repo : str
+        Repository as ``owner/name``.
+    pr : int
+        Pull request number.
+    adapter : ReviewerAdapter
+        Configured reviewer adapter.
+    caps : RoundCaps
+        Local review round caps (``review_rounds`` in the config).
+
+    Returns
+    -------
+    dict[str, Any]
+        The reviewer state agents and ``review_gate.py`` act on.
+    """
+    owner, name = repo.split("/", 1)
+    graph = _gh_json(
+        [
+            "api",
+            "graphql",
+            "-f",
+            f"query={_THREADS_QUERY}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"pr={pr}",
+        ]
+    )
+    pull = graph["data"]["repository"]["pullRequest"]
+    head_sha = pull["headRefOid"]
+    threads = pull["reviewThreads"]["nodes"]
+    raw_reviews = (
+        _gh_json(["api", f"repos/{repo}/pulls/{pr}/reviews", "--paginate"]) or []
+    )
+    comments: list[Any] = []
+    if (
+        adapter.summary_in_issue_comments
+        or adapter.final_review_comment is not None
+        or adapter.rate_limited_pattern is not None
+        or adapter.local_review is not None
+    ):
+        comments = (
+            _gh_json(["api", f"repos/{repo}/issues/{pr}/comments", "--paginate"]) or []
+        )
+    reviews = list(raw_reviews)
+    if adapter.summary_in_issue_comments:
+        # Some reviewers post a clean re-review as an empty review and keep the
+        # verdict in an issue-comment they edit in place (see the adapter notes).
+        reviews += [_comment_as_review(c) for c in comments]
+    final = final_review_outcome(comments, raw_reviews, adapter)
+
+    verdict, count = review_verdict(reviews, head_sha, adapter)
+    findings = open_findings(threads, adapter)
+    unresolved_total = sum(1 for t in threads if not t.get("isResolved"))
+    return {
+        "head_sha": head_sha,
+        # UNKNOWN when GitHub has not computed it yet, or when the PR is MERGED.
+        # Treat UNKNOWN as "do not act", never as "not BEHIND".
+        "merge_state_status": pull["mergeStateStatus"],
+        "reviewer": adapter.key,
+        "reviewer_name": adapter.display_name,
+        "check_name": adapter.check_name,
+        "trigger_comment": adapter.trigger_comment,
+        "self_resolves_threads": adapter.self_resolves_threads,
+        "verdict": verdict,
+        "reported_finding_count": count,
+        "open_findings": findings,
+        "unresolved_thread_total": unresolved_total,
+        # A reviewer with a local review never takes a trigger on the PR: its fix
+        # rounds run locally (``local_review.py``) and the PR's one review request
+        # is the final full review.
+        "needs_trigger": verdict == "none" and adapter.local_review is None,
+        "final_review_comment": adapter.final_review_comment,
+        "final_review_outcome": final,
+        "needs_final_review": final not in ("finished", "not_required"),
+        # The newest request was refused for the rate limit: wait until
+        # retry_after, then re-post the SAME request. Never escalate.
+        "rate_limit": rate_limit_state(comments, adapter),
+        "local_review": local_review_state(comments, adapter, caps, head_sha),
+    }
+
+
+def main() -> None:
+    """Print ``collect_state`` for ``--repo`` / ``--pr`` as JSON."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", required=True, help="owner/name")
+    parser.add_argument("--pr", required=True, type=int)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=f"reviewer config (default: {DEFAULT_CONFIG_PATH})",
+    )
+    args = parser.parse_args()
+    adapter = load_reviewer(args.config)
+    caps = load_round_caps(args.config)
+    print(json.dumps(collect_state(args.repo, args.pr, adapter, caps), indent=2))
+
+
+if __name__ == "__main__":
+    main()

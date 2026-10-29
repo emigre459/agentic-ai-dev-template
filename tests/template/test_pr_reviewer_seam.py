@@ -11,10 +11,13 @@ notes files).
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
+import sys
 import subprocess  # nosec B404 -- fixed argv, in-repo git, no shell
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -24,6 +27,9 @@ _CONFIG = _REPO / ".github" / "pr-reviewer.json"
 _SKILLS = _REPO / ".agents" / "skills"
 _NOTES_DIR = _SKILLS / "resolve-pr-concerns" / "references" / "reviewers"
 _RULE = _REPO / ".agents" / "rules" / "shared" / "pr-reviewer-auto-trigger.md"
+_SKILL = _SKILLS / "resolve-pr-concerns" / "SKILL.md"
+_STATE_SCRIPT = _SKILLS / "resolve-pr-concerns" / "scripts" / "reviewer_state.py"
+_GUIDELINES = _REPO / ".github" / "review-guidelines.md"
 
 # Whole skill directories, not a file list, so a newly-added file is covered too.
 _SEAM_DIRS = ("resolve-pr-concerns", "build-from-issue")
@@ -41,7 +47,33 @@ _FIELDS: dict[str, tuple[type | None, ...]] = {
     "reviewed_sha_pattern": (str, None),
     "self_resolves_threads": (bool,),
     "summary_in_issue_comments": (bool,),
+    # The final full review: all set, or all null for a reviewer agents can't ask
+    # for one (reviewer_state.py enforces the all-or-none rule too).
+    "final_review_comment": (str, None),
+    "command_reply_marker": (str, None),
+    "final_review_done_pattern": (str, None),
+    "final_review_failed_pattern": (str, None),
+    "final_review_partial_pattern": (str, None),
+    # A refused (rate-limited) request: how to recognise it and how long to wait.
+    "rate_limited_pattern": (str, None),
+    "rate_limit_wait_pattern": (str, None),
+    "rate_limit_default_wait_minutes": (int, None),
+    "rate_limit_notice_marker": (str, None),
+    # Local review rounds and the local allowance check (null = PR rounds only).
+    "local_preflight": (dict, None),
+    "local_review": (dict, None),
 }
+_FINAL_REVIEW_FIELDS = tuple(f for f in _FIELDS if f.startswith(("final_", "command_")))
+
+
+def _load_state() -> ModuleType:
+    """Load the standalone reviewer_state script (not an importable package)."""
+    spec = importlib.util.spec_from_file_location("reviewer_state", _STATE_SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["reviewer_state"] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_config() -> dict[str, Any]:
@@ -91,9 +123,20 @@ def test_every_adapter_is_well_formed(key: str) -> None:
     assert adapter["bot_logins"] and all(
         isinstance(login, str) and login for login in adapter["bot_logins"]
     ), f"reviewer {key!r}: bot_logins must be a non-empty list of logins"
-    for field in ("clean_pattern", "findings_pattern", "reviewed_sha_pattern"):
+    for field in (
+        "clean_pattern",
+        "findings_pattern",
+        "reviewed_sha_pattern",
+        "final_review_done_pattern",
+        "final_review_failed_pattern",
+        "final_review_partial_pattern",
+    ):
         if adapter[field] is not None:
             re.compile(adapter[field])
+    assert len({adapter[f] is None for f in _FINAL_REVIEW_FIELDS}) == 1, (
+        f"reviewer {key!r}: {', '.join(_FINAL_REVIEW_FIELDS)} must all be set or "
+        "all be null"
+    )
     assert re.compile(adapter["findings_pattern"]).groups == 1, (
         f"reviewer {key!r}: findings_pattern needs exactly one capture group "
         "(the finding count)"
@@ -124,6 +167,80 @@ def test_every_trigger_comment_is_allow_listed(key: str) -> None:
     )
 
 
+@pytest.mark.parametrize("key", _KEYS)
+def test_every_adapter_loads_through_reviewer_state(key: str) -> None:
+    """The script agents and the review-gate workflow run must accept every adapter."""
+    assert _load_state().load_reviewer(key=key).key == key
+
+
+@pytest.mark.parametrize("key", _KEYS)
+def test_every_final_review_comment_is_allow_listed(key: str) -> None:
+    comment = _load_config()["reviewers"][key]["final_review_comment"]
+    if comment is None:
+        pytest.skip(f"{key} has no final full review")
+    settings = json.loads((_REPO / ".claude" / "settings.json").read_text())
+    expected = f"Bash(gh pr comment * {comment}*)"
+    assert expected in settings["permissions"]["allow"], (
+        f"Add {expected!r} to .claude/settings.json permissions.allow so agents can "
+        f"request the {key} reviewer's final full review without a prompt."
+    )
+
+
+@pytest.mark.parametrize("key", _KEYS)
+def test_reviewer_notes_carry_the_switching_caveat(key: str) -> None:
+    """An agent asked to switch reviewers reads these notes first."""
+    text = (_NOTES_DIR / f"{key}.md").read_text().lower()
+    assert "merge queue" in text and "review-gate" in text, (
+        f"{key}.md must say that review-gate is the check to require and that a "
+        "vendor's own check must never be required (it can wedge a merge queue)."
+    )
+
+
+@pytest.mark.parametrize("key", _KEYS)
+def test_reviewer_notes_say_how_to_wire_in_the_guidelines(key: str) -> None:
+    text = (_NOTES_DIR / f"{key}.md").read_text()
+    assert ".github/review-guidelines.md" in text, (
+        f"{key}.md must say how to wire the vendor-neutral noise filters "
+        "(.github/review-guidelines.md) into that reviewer's own config."
+    )
+
+
+def test_no_vendor_config_directory_ships() -> None:
+    """Noise filters live in a vendor-neutral file; no reviewer's own dir ships."""
+    assert _GUIDELINES.is_file()
+    assert not _tracked(".cursor"), "Keep vendor dirs out; see the reviewer notes."
+    assert not _VENDOR_RE.search(_GUIDELINES.read_text())
+
+
+@pytest.mark.parametrize("path", [_SKILL, _RULE], ids=lambda p: p.name)
+def test_final_review_is_not_gated_on_a_pass_verdict_alone(path: Path) -> None:
+    """A finding answered with pushback leaves the verdict at `findings` for good.
+
+    If the final full review waited for `pass`, such a PR could never get it and the
+    gate would stay red, so the prose must also allow "every finding fixed or
+    answered".
+    """
+    assert "fixed or answered" in path.read_text()
+
+
+def test_step_5_does_not_read_a_registered_check_as_a_started_review() -> None:
+    """A vendor check can register at once as "Review skipped" and pass.
+
+    So the start-check must look for review activity via reviewer_state.py, and a
+    check that merely registered must not count as a started review.
+    """
+    skill = _SKILL.read_text()
+    step5 = skill[skill.index("## Step 5: ") : skill.index("## Step 5a")]
+    assert "reviewer_state.py" in step5
+    assert "not evidence that a review started" in step5
+
+
+def test_final_settle_accepts_answered_findings() -> None:
+    skill = _SKILL.read_text()
+    step6 = skill[skill.index("## Step 6: ") : skill.index("## Step 7: ")]
+    assert "fixed or answered" in step6
+
+
 @pytest.mark.parametrize("path", _seam_files(), ids=lambda p: str(p.relative_to(_REPO)))
 def test_seam_files_do_not_name_a_vendor(path: Path) -> None:
     hits = [
@@ -147,3 +264,98 @@ def test_old_vendor_named_rule_is_gone() -> None:
         if path.is_file() and old in path.read_text(errors="ignore")
     ]
     assert not stale, f"References to the renamed rule {old!r} remain: {stale}"
+
+
+@pytest.mark.parametrize("key", _KEYS)
+def test_every_preflight_command_is_allow_listed(key: str) -> None:
+    """The allowance check runs before every local round, so it must never prompt."""
+    preflight = _load_state().load_reviewer(key=key).local_preflight
+    if preflight is None:
+        pytest.skip(f"{key} declares no preflight")
+    allow = json.loads((_REPO / ".claude" / "settings.json").read_text())[
+        "permissions"
+    ]["allow"]
+    for command in (preflight.command, preflight.auth_command):
+        expected = f"Bash({' '.join(command)}*)"
+        assert expected in allow, (
+            f"Add {expected!r} to .claude/settings.json permissions.allow so "
+            f"review_preflight.py can read the {key} reviewer's capacity unprompted."
+        )
+
+
+def test_the_repo_config_loads_its_round_caps() -> None:
+    """A misspelled review_rounds knob fails loudly instead of falling back."""
+    caps = _load_state().load_round_caps()
+    assert caps.local_before_final >= 1 and caps.local_after_final >= 1
+
+
+# --- Wiring: the prose agents follow names the local rounds and the rate limit ---
+
+_BUILD = _SKILLS / "build-from-issue" / "SKILL.md"
+
+
+def _flat(path: Path) -> str:
+    return " ".join(path.read_text().split())
+
+
+def _section(text: str, heading: str) -> str:
+    """Return ``heading``'s section, up to the next heading of any level."""
+    section = text[text.index(heading) :]
+    rest = section[len(heading) :]
+    ends = [i for i in (rest.find(" ### "), rest.find(" ## ")) if i >= 0]
+    return section[: len(heading) + min(ends)] if ends else section
+
+
+def test_fix_rounds_run_locally_and_refusals_are_waited_out() -> None:
+    for path in (_SKILL, _RULE, _BUILD):
+        text = _flat(path)
+        assert "local_review.py" in text, path.name
+        assert "review_preflight.py" in text, path.name
+    for path in (_SKILL, _RULE):
+        text = _flat(path)
+        assert "rate_limit.refused" in text, path.name
+        assert "SAME request" in text, path.name
+
+
+def test_the_rate_limit_rule_forbids_escalating_a_refused_request() -> None:
+    section = _section(_flat(_SKILL), "### Review requests and the rate limit")
+    assert "never escalate" in section.lower()
+    assert "retry_after" in section
+    assert "remedy" in section
+    assert "recheck_after_seconds" in section
+    # The local check reads a different pool, so it must never gate a PR request.
+    assert "separate pool" in section
+    assert "never PR requests" in section
+
+
+def test_the_local_rounds_section_covers_every_status() -> None:
+    section = _section(_flat(_SKILL), "### Local review rounds")
+    for status in (
+        "reviewed",
+        "already_reviewed",
+        "exhausted",
+        "budget_spent",
+        "head_mismatch",
+        "failed",
+        "not_configured",
+    ):
+        assert f"`{status}`" in section, status
+    assert "max_local_before_final" in section
+    assert "max_local_after_final" in section
+    assert "draft" in section
+    assert "record_body" in section
+
+
+def test_a_local_reviewer_skips_the_trigger_step() -> None:
+    skill = _SKILL.read_text()
+    step5 = skill[skill.index("## Step 5: ") : skill.index("## Step 5a")]
+    assert "local review skips this step" in step5
+    step4d = skill[skill.index("### 4d.") : skill.index("## Step 5: ")]
+    assert "local round on the new head" in step4d
+
+
+def test_the_preflight_documents_that_it_never_gates_a_pr_request() -> None:
+    script = _SKILLS / "resolve-pr-concerns" / "scripts" / "review_preflight.py"
+    doc = " ".join(script.read_text().split('"""')[1].split())
+    assert "never gates a PR review request" in doc
+    assert "separate pool" in doc
