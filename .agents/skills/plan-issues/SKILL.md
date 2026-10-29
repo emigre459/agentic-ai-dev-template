@@ -43,6 +43,7 @@ fuzzy idea / problem domain
 * Code edits. Same.
 * Deletion of any GitHub artifact. Closure-with-comment only — see "Rule enforcement."
 * Cross-*repo* GitHub planning. The skill operates on whatever repo is auto-detected from CWD.
+* Moving any card to In Progress (or any later Status). `/build-from-issue` owns that the moment work starts; this skill only creates, amends, or closes cards.
 
 **Announce at start:** "Using the plan-issues skill to plan work at the kanban-issue level."
 
@@ -57,15 +58,18 @@ fuzzy idea / problem domain
 * **Worktree mechanics** → `superpowers:using-git-worktrees` (which itself prefers the native `EnterWorktree` tool over `git worktree add`).
 * **Library-doc lookups during planning** → `context7-mcp` whenever a proposed acceptance criterion depends on a third-party library API. For any spec section depending on a third-party library API, fetch current docs *before* drafting; don't conflate general knowledge with current specifics.
 * **End-of-session worktree disposal** → `superpowers:finishing-a-development-branch` or `/clean_gone` (manual, after the session).
-* **GitHub CLI / API** → `gh` for issues, project boards, labels; `gh api` for the dependencies endpoint and any beta surfaces (sub-issues).
+* **GitHub CLI / API** → `gh` for issues, project boards, labels; `gh api` for the dependencies endpoint and any beta surfaces (sub-issues). When GraphQL is unavailable (e.g. a sandboxed or cloud harness proxy), every step runs as `gh api` REST — see "REST-only fallback."
 * **User decisions** → `AskUserQuestion` for every irreversible action (epic creation, card creation, closure approval, new-label creation).
 
 ## Core rules (encoded directly — read these first)
 
 The skill enforces these rules. They are NOT memory references — they are the actual rules:
 
+* **Existing-card-first (minimize new cards).** When the user describes a scope, FIRST map it onto existing open cards and surface the overlap set — then confirm per card via `AskUserQuestion` (including cards you judge out-of-scope, so the user can pull them in) BEFORE designing any net-new card. Prefer **amending an existing card** over creating a new one; a net-new card must be justified by the absence of an existing home. This is the lever for "minimize the number of branches/PRs we open." See Phase 3 step 0.
 * **No orphan issues.** Every issue created has a parent epic, OR a one-sentence justification recorded in the issue body explaining why it stands alone. The first Phase 3 question is "parent epic?" with detected candidates + "propose new" + "none (justify)". **Would-be-epic escape hatch:** when the only honest parent would be a 1-card epic (the main historical cause of orphans), do NOT create the epic — record `Would-be epic: <title>` in the card body instead; the clean-up-kanban orphan sweep promotes it to a real epic once a second member appears.
-* **The epic template + hygiene rules live in `clean-up-kanban`.** Read `.claude/skills/clean-up-kanban/SKILL.md` early (it's small): §1 is the epic-body template this skill's Phase 5 MUST follow (cross-child story + **product outcome + lifecycle stage (0 POC / 1 Hardening / 2 Later) + temporally-drainable execution order**, plus the Project `Stage` field), §5 is the duplicate-hunt behind Phase 3 step 0, and §2's staleness rules drive the Phase 3 scan.
+* **The epic template + hygiene rules live in `clean-up-kanban`.** Read `../clean-up-kanban/SKILL.md` early (it's small): §1 is the epic-body template this skill's Phase 5 MUST follow (cross-child story + **product outcome + lifecycle stage (0 POC / 1 Hardening / 2 Later) + temporally-drainable execution order**, plus the Project `Stage` field), §5 is the duplicate-hunt behind Phase 3 step 0, and §2's staleness rules drive the Phase 3 scan.
+* **The epic body IS the cross-child map (not a bare child list).** An epic narrates how its children fit together: a vision line, the tracks/ladder they form, the merged **foundation** they build on, each child's one-line role + blockers, and the **end-state** they converge on. This is the map `/build-from-issue` reads to understand how a single card fits the larger project, so it must stay current. **Whenever you create an epic, OR nest/re-home cards under an existing one, (re)write that narrative and reconcile it against merged reality.** When nesting under an existing epic, first verify its body actually tells the children's story; if not, decide: **(a) amend the epic** (the usual case — it is just out of date), or **(b)** if the children don't genuinely cohere under it, treat it as the **wrong home** — raise it via `AskUserQuestion` (different epic, new epic, or standalone-with-justification) rather than forcing an incoherent parent. See Phase 5.
+* **One card = one independently mergeable PR.** Size every card so it ships as exactly one PR; never let one PR's work span two cards or one card's scope require two PRs. If the whole project is only one PR's worth of work, do not decompose it — a single card is the right answer.
 * **Issue card brevity.** Cards are bullet-based: Title + Why (1 bullet) + Acceptance (≤5 bullets, present-tense like "X is implemented and tested") + optional Out-of-scope (1 bullet) + optional Dependencies (1 bullet). No long-form narrative. Review-friendly and build-ready.
 * **GH-native blocked-by enforcement.** Every blocked-by relationship is wired via the REST dependencies endpoint, not just stated in the issue body. Stating it in body text without wiring it makes it invisible to GitHub's dependency-graph UI. Verify by readback after each wire call.
 * **Database ID, not issue number, for dependencies.** GitHub's dependencies API requires the integer database ID of the blocker, not the issue number. Capture it with `gh api repos/<o>/<r>/issues/<n> --jq '.id'` immediately after creating any issue.
@@ -131,12 +135,14 @@ gh repo view --json nameWithOwner -q .nameWithOwner
 Auto-detect the project board:
 
 ```bash
-gh project list --owner <org> --format json
+gh project list --owner <org> --format json     # GraphQL — see "REST-only fallback" if unavailable
 ```
 
 * If exactly one project is linked to the detected repo, use it.
 * If multiple, ask the user via `AskUserQuestion` (one-pick).
 * If none, ask once: "no project board found — skip project attachment, or specify a project number?"
+
+**Board auto-add.** A board may carry an "Auto-add to project" workflow (GitHub scopes each such workflow to one repository), in which case every new issue lands on the board by itself. Ask the user once when the board is chosen, and hold "board auto-adds" as a session fact. When it does, Phase 5's attach step is a no-op and is never reported as a failed step.
 
 **Labels — live-fetch once per session.** This skill does not persist a label cache. Fetch the current label set at the start of every session:
 
@@ -186,8 +192,9 @@ Followed by a terse listing of epics (one line each: `#<num> <title>`) and relat
 
 Use `AskUserQuestion` for each focused question, one at a time, multi-choice when possible:
 
+0. **Existing-card overlap confirmation (run FIRST, before any new-card design).** Map the user's described scope onto the Phase 2 inventory and present the overlapping existing cards back in prose: for each, your read on whether it is the right home (use **as-is** or **amend-to-fit**), plus a suggested topological build order. Then `AskUserQuestion` — `multiSelect`, grouped by sub-scope (≤4 options per question; split across multiple calls as needed) — to confirm or deny inclusion of **EVERY identified card, including ones you judge out-of-scope** (default those OUT and let the user check any to pull IN). Only after this gate do you design net-new cards, and only for scope with no existing home (see "Existing-card-first" in Core rules). When a confirmed card needs an acceptance/scope change to fit, treat it as an **amendment** in Phases 4–5 (append a dated, auditable amendment block — never silently rewrite) rather than a new card. Re-check the blocked-by edges of confirmed cards against the agreed bundle: a card blocked by something the user dropped needs rewiring or the dropped blocker pulled back in — surface it as its own decision.
 1. **Parent epic?** Offer the detected open epics (the unioned inventory from Phase 2 — both `EPIC`-labeled and any `[EPIC]`-titled-but-unlabeled containers) + "propose a new epic" + "none (justify)". Picking "none" requires a one-sentence justification that goes into the issue body — see "No orphan issues" in Core rules. **No evergreen epics** (clean-up-kanban §1a): trackers cap an epic's children (GitHub: 100 sub-issues), so prefer proposing a new, drainable epic scoped to this push over nesting under a long-lived broad one, and check a candidate's child count before offering it (past ~60 children, offer a successor epic instead).
-2. **Scope shape:** single card or N decomposed cards? If N, how many roughly?
+2. **Scope shape:** single card or N decomposed cards? If N, how many roughly? Each card must be one independently mergeable PR; if the whole project is one PR's worth, don't decompose it.
 3. **Acceptance criteria** per proposed card: terse bullets, max ~5 items, written in the present tense ("X is implemented and tested"). Ask the user to validate each card's acceptance bullets before moving on.
 4. **Blocked-by relationships:** for each card, which existing issues block it, and which other proposed cards block it? Capture both kinds of edges.
 5. **Labels:** offer from the session's live-fetched list. If nothing fits, ask via `AskUserQuestion`: "create new label `<name>`?" If yes, `gh label create` and refresh the in-memory list. If no, drop the label or pick another.
@@ -215,7 +222,7 @@ Labels: <l1>, <l2>
 Blocked by: <list of issue numbers or other draft cards>
 
 Body:
-- **Why:** <one bullet>
+- **Why:** <one bullet — and the one PR that delivers it>
 - **Acceptance:**
   - <bullet 1>
   - <bullet 2>
@@ -244,7 +251,7 @@ If Yes, optionally prompt for one-line additional context the user wants in the 
 
 Order of operations matters — do the structural pieces first, then wire dependencies, then close.
 
-1. **Create the new epic (if any) — with the would-be-epic guard.** If the user proposed a new epic in Phase 3, first count how many cards will ACTUALLY nest under it this session: GitHub-tracker cards being created in step 2 **plus** existing issues approved for re-homing under it in this plan — cards that never nest here (e.g. Jira-routed twins) do NOT count. **If the count is exactly one, do NOT create the epic** — apply the would-be-epic escape hatch: skip epic creation, and in step 2 include `Would-be epic: <title>` in that card's body at creation time (it stays unparented; step 4 skips it); the clean-up-kanban orphan sweep mints the epic when a second member appears. (Create a 1-member epic only on the user's explicit insistence.) **If the count is zero**, do NOT create the epic either — nothing would nest under it. Say WHY to the user, matched to the cause: every member routed to another tracker → a wrong-home signal (the concept lives there); members were dropped or re-homed to existing epics during approval → the epic proposal is moot this session (note it as a `Would-be epic:` on any surviving card that still wants it). For epics with ≥2 actually-nesting members, create the epic first. A new epic MUST get the `EPIC` label (the canonical discovery signal) AND an `[EPIC] ` title prefix — both, every time. **Normalize the prefix:** prepend `[EPIC] ` only if the approved title doesn't already start with it (case-insensitive), so an already-prefixed title isn't doubled into `[EPIC] [EPIC] …`:
+1. **Create the new epic (if any) — with the would-be-epic guard.** If the user proposed a new epic in Phase 3, first count how many cards will ACTUALLY nest under it this session: cards being created in step 2 **plus** existing issues approved for re-homing under it in this plan — cards that never nest here do NOT count. **If the count is exactly one, do NOT create the epic** — apply the would-be-epic escape hatch: skip epic creation, and in step 2 include `Would-be epic: <title>` in that card's body at creation time (it stays unparented; step 4 skips it); the clean-up-kanban orphan sweep mints the epic when a second member appears. (Create a 1-member epic only on the user's explicit insistence.) **If the count is zero**, do NOT create the epic either — nothing would nest under it. Say WHY to the user: members were dropped or re-homed to existing epics during approval, so the epic proposal is moot this session (note it as a `Would-be epic:` on any surviving card that still wants it). For epics with ≥2 actually-nesting members, create the epic first. A new epic MUST get the `EPIC` label (the canonical discovery signal) AND an `[EPIC] ` title prefix — both, every time. **Normalize the prefix:** prepend `[EPIC] ` only if the approved title doesn't already start with it (case-insensitive), so an already-prefixed title isn't doubled into `[EPIC] [EPIC] …`:
    ```bash
    gh issue create --repo <owner>/<repo> --title "[EPIC] <epic title>" \
      --body "<epic body>" --label EPIC [--label <other>]…
@@ -253,9 +260,9 @@ Order of operations matters — do the structural pieces first, then wire depend
    ```bash
    gh api repos/<owner>/<repo>/issues/<number> --jq '.id'
    ```
-   **Write the `<epic body>` per the clean-up-kanban §1 template** — the epic body IS the cross-child map `/build-from-issue` reads for meta-context: `## Product outcome` (customer value + **lifecycle stage: 0 — POC / 1 — Hardening / 2 — Later** + a note that it is temporally drainable — no evergreen epics, see clean-up-kanban §1a), `## Foundation` (merged decisions children must not reopen), `## The story` (each child's one-line role + blockers + sequential/parallel execution order), `## End-state` (what "drained" observably looks like). If the Project board has a `Stage` single-select field, set it on the epic item after attaching.
+   **Write the `<epic body>` per the clean-up-kanban §1 template** — the epic body IS the cross-child map `/build-from-issue` reads for meta-context: `## Product outcome` (customer value + **lifecycle stage: 0 — POC / 1 — Hardening / 2 — Later** + a note that it is temporally drainable — no evergreen epics, see clean-up-kanban §1a), `## Foundation` (merged decisions children must not reopen), `## The story` (each child's one-line role + blockers + sequential/parallel execution order), `## End-state` (what "drained" observably looks like). If the Project board has a `Stage` single-select field, set it on the epic item after attaching. This is what `/build-from-issue` reads for meta-context, so it must read as a self-contained story.
 
-2. **Create child cards.** For each approved card in Loop A whose tracker is GitHub (for a card under ANY step-1 would-be-epic decision — the one-member hatch OR the zero-count moot path — append `Would-be epic: <title>` to its body BEFORE this create call; for an EXISTING surviving issue on the zero-count path, append the marker via `gh issue edit` now — the marker always lands on the board, never as an afterthought):
+2. **Create child cards.** For each approved card in Loop A (for a card under ANY step-1 would-be-epic decision — the one-member hatch OR the zero-count moot path — append `Would-be epic: <title>` to its body BEFORE this create call; for an EXISTING surviving issue on the zero-count path, append the marker via `gh issue edit` now — the marker always lands on the board, never as an afterthought):
    ```bash
    gh issue create --repo <owner>/<repo> --title "<title>" \
      --body "<body>" --label <l1> --label <l2>…
@@ -272,7 +279,7 @@ Order of operations matters — do the structural pieces first, then wire depend
    ```bash
    gh api repos/<owner>/<repo>/issues/<dependent-number>/dependencies/blocked_by --jq '.[].id'
    ```
-   Confirm the expected ID is present. **Fail hard** if not.
+   Confirm the expected ID is present. **Fail hard** if not. To drop an edge: `gh api -X DELETE repos/<owner>/<repo>/issues/<dependent-number>/dependencies/blocked_by/<blocker-db-id>` — delete the old edge BEFORE wiring its reverse, or GitHub rejects the cycle.
 
 4. **Nest under epic — SKIP for would-be-epic cards.** A card whose approved parent decision was the would-be-epic escape hatch (its body carries `Would-be epic: <title>`) is **intentionally left unparented** — do not nest it anywhere; the clean-up-kanban orphan sweep promotes the would-be epic to a real one once a second member appears, and nests the card then. For every other card, feature-probe the sub-issues API on the first call. `sub_issue_id` is also a JSON integer — use `-F`:
    ```bash
@@ -281,15 +288,18 @@ Order of operations matters — do the structural pieces first, then wire depend
    ```
    If the endpoint returns 404 on the first call, silently fall back for the rest of the session: append a task-list checkbox to the epic body referencing each child issue's number, via `gh issue edit <epic-number> --body-file -`. Decide once per session.
 
+   **Refresh the epic's cross-child narrative.** After nesting new children under an *existing* epic, `gh issue view <epic-number>` and confirm its body still tells the whole children's story with the new card(s) given a place in it (the "epic body IS the cross-child map" rule). If the narrative is missing or stale, **amend the epic body** (`gh issue edit <epic-number> --body-file -`) to fold the new child into the tracks/ladder + end-state. (Parent-epic fit is chosen upstream in Phase 3's no-orphan question, so this step normally just refreshes the story.) In the rare case you only realize *here* that a child doesn't cohere under this epic, the sub-issue link already exists — so **un-nest it first** (`gh api -X DELETE repos/<owner>/<repo>/issues/<epic-number>/sub_issue -F sub_issue_id=<child-db-id>`, or remove its checkbox in the fallback body-list) and then raise the **wrong-home** decision with the user via `AskUserQuestion` before continuing.
+
    **Self-heal the parent's label.** If the parent epic came from the title-prefix sweep without the `EPIC` label (the `[needs EPIC label]` marker from Phase 2), apply it now so the container becomes discoverable via the canonical query:
    ```bash
    gh issue edit <epic-number> --repo <owner>/<repo> --add-label EPIC
    ```
 
-5. **Attach to project board.** For each created issue:
+5. **Attach to project board — skip when the board auto-adds** (Phase 2 session fact): there is nothing to run and nothing to report as skipped. Otherwise, for each created issue:
    ```bash
    gh project item-add <project-number> --owner <org> --url <issue-url>
    ```
+   If this cannot run (GraphQL unavailable), name the command for the user — never list it under *Failed steps* when the board auto-adds.
 
 6. **Close approved-for-closure issues.** For each issue approved in Loop B:
    ```bash
@@ -331,7 +341,7 @@ Quick reference for the commands this skill runs, in the order they typically ap
 | Step | Command | Notes |
 |---|---|---|
 | Detect repo | `gh repo view --json nameWithOwner -q .nameWithOwner` | Uses origin remote of CWD |
-| Detect projects | `gh project list --owner <org> --format json` | Filter to repo-linked; AskUserQuestion if >1 |
+| Detect projects | `gh project list --owner <org> --format json` | Filter to repo-linked; AskUserQuestion if >1. GraphQL — see "REST-only fallback" |
 | Fetch labels | `gh label list --repo <r> --limit 200 --json name,description,color` | Live-fetched once per session; held in-memory only |
 | Open epics | `gh issue list --repo <r> --label EPIC --state open --json number,title,body,labels --limit 100` | Label is uppercase `EPIC` (case-sensitive). Also sweep `--search "[EPIC] in:title"` to catch any unlabeled epic container. |
 | Create epic | `gh issue create --repo <r> --title "[EPIC] <t>" --body <b> --label EPIC …` | New epics get BOTH the `EPIC` label and `[EPIC]` title prefix |
@@ -341,15 +351,36 @@ Quick reference for the commands this skill runs, in the order they typically ap
 | Wire blocked-by | `gh api -X POST repos/<o>/<r>/issues/<n>/dependencies/blocked_by -F issue_id=<id>` | DB ID (integer), not issue number. `-F` (typed) not `-f` (string), else 422. |
 | Verify blocked-by | `gh api repos/<o>/<r>/issues/<n>/dependencies/blocked_by --jq '.[].id'` | Fail hard if missing |
 | Nest sub-issue | `gh api -X POST repos/<o>/<r>/issues/<epic>/sub_issues -F sub_issue_id=<id>` | Beta; `-F` for integer; fallback to task-list on 404 |
-| Edit body | `gh issue edit <n> --body-file -` | For task-list fallback or twin-link update |
-| Attach to project | `gh project item-add <p> --owner <o> --url <url>` | One call per issue |
+| Edit body | `gh issue edit <n> --body-file -` | For task-list fallback or epic-narrative refresh |
+| Attach to project | `gh project item-add <p> --owner <o> --url <url>` | One call per issue; a no-op when the board auto-adds. GraphQL — see "REST-only fallback" |
 | Comment | `gh issue comment <n> --body <b>` | Required precursor to close |
 | Close | `gh issue close <n>` | NEVER `gh issue delete` |
+
+## REST-only fallback (when GraphQL is unavailable)
+
+Some environments — e.g. a sandboxed or cloud harness whose GitHub proxy forwards only repository-scoped REST (`repos/{owner}/{repo}/…`) — refuse **GraphQL**. `gh issue …`, `gh label …`, `gh project …` and `gh search …` use GraphQL under the hood and fail, as does the org-wide `search/issues` REST endpoint. The token is still the invoking user's own, so this is transport, not permissions. Detect it once (the first `gh issue list` fails with an error such as `HTTP 403 … GraphQL is not available`, or `gh auth status` reports the token invalid) and substitute for the rest of the session. Everything this skill needs has a REST route — the dependencies and sub-issues steps already use it:
+
+| Skill step | Default (`gh` subcommand) | REST via `gh api` |
+|---|---|---|
+| Labels | `gh label list …` | `gh api repos/<o>/<r>/labels --paginate --jq '.[].name'` |
+| Open epics / related issues | `gh issue list --label EPIC …` / `--search` | `gh api 'repos/<o>/<r>/issues?labels=EPIC&state=open&per_page=100'`; for keyword matching pull `issues?state=open&per_page=100&page=N` and filter with `jq` locally |
+| Read an issue | `gh issue view <n>` | `gh api repos/<o>/<r>/issues/<n>` (`--jq .body`, `.id`, `.labels`) |
+| Create issue / epic | `gh issue create …` | `gh api -X POST repos/<o>/<r>/issues -f title=… -F body=@file.md -f 'labels[]=a' -f 'labels[]=b'` — the response carries `number`, `id`, `html_url` |
+| Edit body / retitle / add label | `gh issue edit …` | `gh api -X PATCH repos/<o>/<r>/issues/<n> -F body=@file.md [-f title=…]`; labels: `gh api -X POST repos/<o>/<r>/issues/<n>/labels -f 'labels[]=EPIC'` |
+| Comment | `gh issue comment <n> --body …` | `gh api -X POST repos/<o>/<r>/issues/<n>/comments -F body=@file.md` |
+| Close | `gh issue close <n>` | `gh api -X PATCH repos/<o>/<r>/issues/<n> -f state=closed -f state_reason=completed` (or `not_planned`) |
+| Blocked-by, sub-issues, parent | already `gh api` | unchanged — `…/dependencies/blocked_by`, `…/sub_issues`, `…/parent` |
+| Project board | `gh project item-add …` | not possible — if the board auto-adds, report "auto-added"; otherwise name the command for the user. Never a failed step |
+
+Write long bodies to a scratch file and pass `-F body=@file`. Append amendment blocks by fetching the current body (`--jq .body`), concatenating, and PATCHing — never retype a body. Approvals, readbacks and fail-hard are unchanged.
 
 ## Rule enforcement map
 
 | Rule | Phase | Mechanism |
 |---|---|---|
+| Existing-card-first (minimize new cards) | 2 + 3 | Phase 2 surfaces related open cards as a candidate-overlap set; Phase 3 step 0 confirms inclusion of every identified card (incl. out-of-scope) via `AskUserQuestion` BEFORE any net-new card is designed. Amend an existing card rather than create a new one wherever a home exists. |
+| Epic body IS the cross-child map | 5 | On epic creation (step 1) the body is written as vision + foundation + tracks/ladder + per-child role/blockers + end-state, not a bare checklist. On nesting under an existing epic (step 4), its narrative is re-read + refreshed so each new child has a place; an incoherent parent triggers the amend-vs-wrong-home `AskUserQuestion`. |
+| One card = one mergeable PR | 3 + 4 | Phase 3 scope-shape question and each Loop A draft's Why bullet name the single PR that delivers the card; a one-PR project is not decomposed. |
 | No orphan issues | 3 | First dialogue question is "parent epic?" with detected candidates + "propose new" + "none (justify)". "None" requires a one-sentence justification written into the issue body. |
 | GH-native blocking | 5 | Every blocked-by edge is wired via the REST dependencies endpoint, not just stated in the body text. Verified by readback after each call. |
 | GH dependencies use database ID | 5 | Each issue's DB ID is captured at creation (`gh api … --jq '.id'`). The dependencies API call never uses issue numbers. |
@@ -371,17 +402,17 @@ Quick reference for the commands this skill runs, in the order they typically ap
 * Any 4xx/5xx from the dependencies API → stop at Phase 5, report which dependency edge failed and the issue numbers involved.
 * Verification readback shows expected ID missing → stop at Phase 5, same.
 * `gh issue close` fails after `gh issue comment` succeeded → stop, surface both facts.
-* Jira create call fails for a routed card → stop, surface stderr; the GH twin (if any) is already created and is not rolled back.
 
 **Graceful degradation** (warn once, continue):
 
+* GraphQL refused (e.g. `HTTP 403 … GraphQL is not available`) → switch to the REST-only fallback substitutions for the rest of the session; a board attach that cannot run is named for the user, not a failure.
 * Sub-issues API returns 404 on first call → silently fall back to task-list checkboxes in the epic body for the rest of the session.
 * Project board count is 0 under the org → ask once: "skip project attachment, or specify a project number?"
 
 **Partial-success reporting (Phase 5).** If issue creation succeeds but blocked-by wiring or epic-nesting fails, the issue still exists. Don't roll back — that's destructive and we don't know what the user wants. Report:
 
 ```
-Created N issues, wired M of K dependencies, attached L of N to project.
+Created N issues, wired M of K dependencies, nested J of N under epics, attached L of N to project.
 Failed steps:
   - <issue #x>: <command that would re-run the failed step manually>
   …
@@ -402,6 +433,7 @@ Explicit non-goals — surface these to the user if a request brushes against th
 * **Cross-repo planning** (multiple GitHub repos in one session). The skill operates on the auto-detected GitHub repo only. If the user wants issues in another GitHub repo, they should re-run the skill from that repo's checkout.
 * **Deletion of any GitHub artifact.** Closure-with-comment only.
 * **Effort estimation, point assignment, sprint planning.** Out of layer — those are kanban-tooling concerns, not issue-content concerns.
+* **Moving any card to In Progress.** `/build-from-issue` owns that transition when work starts; this skill never changes a card's Status.
 * **Owner / assignee assignment.** The skill can suggest, but doesn't `gh issue edit --add-assignee` without explicit `AskUserQuestion` approval per assignee.
 * **Spec writing or design docs.** That belongs inside `/build-from-issue`, which has the brainstorming + writing-plans skills baked in.
 * **Code edits.** Same. The planning worktree is a safe place to read and explore, not to commit feature code.
@@ -418,6 +450,7 @@ Explicit non-goals — surface these to the user if a request brushes against th
 | Possible duplicate detected | Chat broadly first; per-issue Yes/No before any closure. |
 | Stale issue detected | Same — Yes/No per item; closure pairs comment + close. |
 | `gh` command fails | Fail hard; surface stderr. Don't silently retry or continue. |
+| GraphQL refused (`gh` 403) | Use the REST-only fallback substitutions; a board attach that cannot run is named for the user, not a failed step. |
 | Sub-issues API 404 | Fall back to task-list checkboxes in the epic body. |
 | User invokes mid-session (not at start) | Skill is idempotent — handles smart-force the same way. |
 | End of session | Worktree stays alive. User runs `/finishing-a-development-branch` or `/clean_gone` later. |
@@ -433,6 +466,9 @@ Explicit non-goals — surface these to the user if a request brushes against th
 * State a blocked-by relationship in the issue body without also wiring it via the REST API.
 * Use a label that's not in the session's live-fetched list without `AskUserQuestion` approval to create it.
 * Auto-close an issue without per-issue user approval.
+* Move a card to In Progress or any later Status — `/build-from-issue` owns that.
+* Split one PR's work across two cards, or decompose a project that is only one PR's worth.
+* Design a net-new card before the Phase 3 step 0 overlap confirmation.
 * Write a spec doc or design doc to disk — that belongs inside `/build-from-issue`.
 
 **Always:**
