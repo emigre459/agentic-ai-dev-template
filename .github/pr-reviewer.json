@@ -10,8 +10,13 @@
       "clean_pattern": "found\\s+no\\s+new\\s+issues",
       "findings_pattern": "found\\s+(\\d+)\\s+potential\\s+issue",
       "reviewed_sha_pattern": null,
-      "self_resolves_threads": false,
-      "summary_in_issue_comments": false
+      "self_resolves_threads": true,
+      "summary_in_issue_comments": false,
+      "final_review_comment": null,
+      "command_reply_marker": null,
+      "final_review_done_pattern": null,
+      "final_review_failed_pattern": null,
+      "final_review_partial_pattern": null
     },
     "coderabbit": {
       "display_name": "CodeRabbit",
@@ -23,7 +28,12 @@
       "findings_pattern": "(?:Actionable comments posted:\\s*|Outside diff range comments \\()(\\d+)",
       "reviewed_sha_pattern": "between\\s+[0-9a-f]{7,40}\\s+and\\s+([0-9a-f]{7,40})",
       "self_resolves_threads": true,
-      "summary_in_issue_comments": true
+      "summary_in_issue_comments": true,
+      "final_review_comment": "@coderabbitai full review",
+      "command_reply_marker": "<!-- This is an auto-generated reply by CodeRabbit -->",
+      "final_review_done_pattern": "\\bFull review finished\\b",
+      "final_review_failed_pattern": "(?s)^(?!.*incremental review system).*\\b(?:Review failed|Head commit changed|base or head changed)\\b",
+      "final_review_partial_pattern": "(?s)^(?!.*incremental review system).*\\bAction not completed\\b"
     }
   }
 }
