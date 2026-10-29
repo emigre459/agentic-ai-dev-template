@@ -124,6 +124,17 @@ def test_a_cross_skill_script_invocation_fails(tmp_path: Path) -> None:
         "../other-skill/scripts/tool.py --flag",
         "cat in.json | python3 ../other-skill/scripts/tool.py",
         "scripts/not_bundled_here.py --flag",
+        "bash .agents/skills/other-skill/scripts/tool.sh",
+        "python3 .agents/skills/other-skill/scripts/tool.py",
+        "python3 .claude/skills/other-skill/scripts/tool.py",
+        "python3 skills/other-skill/scripts/tool.py",
+        "python3 /repo/.agents/skills/other-skill/scripts/tool.py",
+        ".agents/skills/other-skill/scripts/tool.sh --flag",
+        "python3 tool_not_shipped.py",
+        "python3 .agents/skills/my-skill/scripts/not_shipped.py",
+        "source ../other-skill/scripts/env.sh",
+        ". ../other-skill/scripts/env.sh",
+        "cd x && . ../other-skill/scripts/env.sh",
     ],
 )
 def test_every_run_form_that_leaves_the_skill_fails(
@@ -133,6 +144,35 @@ def test_every_run_form_that_leaves_the_skill_fails(
     code, results = run_validator(skill, tmp_path)
     assert code == 1, command
     assert levels(results, EXTERNAL_CHECK) == ["FAIL"], command
+
+
+def test_the_skills_own_repo_relative_path_passes(tmp_path: Path) -> None:
+    skill = make_skill(
+        tmp_path,
+        "my-skill",
+        "```\npython3 .agents/skills/my-skill/scripts/tool.py --flag\n"
+        "python3 .claude/skills/my-skill/scripts/tool.py\n"
+        "source scripts/env.sh\n. scripts/env.sh\n```\n",
+        {
+            "scripts/tool.py": "#!/usr/bin/env python3\n",
+            "scripts/env.sh": "export X=1\n",
+        },
+    )
+    (skill / "scripts" / "tool.py").chmod(0o755)
+    code, results = run_validator(skill, tmp_path)
+    assert code == 0, results
+    assert levels(results, EXTERNAL_CHECK) == ["PASS"]
+
+
+def test_an_end_of_sentence_dot_is_not_a_source_command(tmp_path: Path) -> None:
+    skill = make_skill(
+        tmp_path,
+        "my-skill",
+        "Read `notes`. ../other-skill/SKILL.md is the pointer, as in `x`. ../a/b.md",
+    )
+    code, results = run_validator(skill, tmp_path)
+    assert code == 0, results
+    assert levels(results, EXTERNAL_CHECK) == ["PASS"]
 
 
 def test_an_inline_instruction_in_prose_fails(tmp_path: Path) -> None:

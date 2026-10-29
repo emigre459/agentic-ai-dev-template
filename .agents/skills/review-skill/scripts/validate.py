@@ -551,12 +551,17 @@ def check_scripts(skill_dir: str) -> None:
 
 # Words that run a script: `python3 x`, `uv run x`, `bash x`, ... The lookbehind
 # keeps `uv run` from matching inside a longer word or path.
-_RUN_VERB_RE = re.compile(r"(?<![\w./$-])(uv\s+run|python3?|bash|sh)(?=\s)")
+_RUN_VERB_RE = re.compile(r"(?<![\w./$-])(uv\s+run|python3?|bash|sh|source)(?=\s)")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 # A command position inside a shell snippet: line start (after a `$ ` prompt)
 # or right after a control operator.
 _COMMAND_START_RE = re.compile(r"(?:^|&&|\|\||[;|])\s*(?:\$\s+)?([^\s&|;]+)")
+# The POSIX `. path` spelling of `source path`; only at a command position, since
+# a lone "." elsewhere is just the end of a sentence.
+_DOT_SOURCE_RE = re.compile(r"(?:^|&&|\|\||[;|])\s*(?:\$\s+)?\.\s+([^\s&|;]+)")
+# A `skills/<name>/` path segment (`.agents/skills/<name>/...` and friends).
+_SKILLS_SEGMENT_RE = re.compile(r"(?:^|/)skills/([^/]+)/")
 _PLACEHOLDER_CHARS = ("<", ">", "$", "{", "}", "*", "?")
 _LEADING_QUOTES = "\"'`("
 _TRAILING_JUNK = "\"'`),.;:"
@@ -577,12 +582,15 @@ def _is_pathlike(token: str) -> bool:
 def _is_bare_script(token: str) -> bool:
     """Return whether a command word is a script path run without a runner.
 
-    ``scripts/x``, ``./x`` and ``../x`` qualify; an absolute path only when it
-    names a script file, so a slash command such as ``/plan-issues`` does not.
+    ``scripts/x``, ``./x`` and ``../x`` qualify; any other path only when it
+    names a script file and is absolute or has a ``skills/<name>/`` segment, so
+    a slash command such as ``/plan-issues`` does not.
     """
     if token.startswith(("scripts/", "./", "../")):
         return True
-    return token.startswith("/") and token.endswith(_SCRIPT_SUFFIXES)
+    if not token.endswith(_SCRIPT_SUFFIXES):
+        return False
+    return token.startswith("/") or bool(_SKILLS_SEGMENT_RE.search(token))
 
 
 def _runner_target(verb: str, rest: str) -> str | None:
@@ -591,8 +599,8 @@ def _runner_target(verb: str, rest: str) -> str | None:
     Parameters
     ----------
     verb : str
-        The matched run word: ``uv run``, ``python``, ``python3``, ``bash``
-        or ``sh``.
+        The matched run word: ``uv run``, ``python``, ``python3``, ``bash``,
+        ``sh`` or ``source``.
     rest : str
         The remainder of the line after ``verb``.
 
@@ -603,7 +611,11 @@ def _runner_target(verb: str, rest: str) -> str | None:
         runner is given a module (``-m``), inline code (``-c``) or a plain
         command name such as ``pytest``.
     """
-    kind = "uv run" if verb.startswith("uv") else "bash" if "sh" in verb else "python"
+    kind = "uv run" if verb.startswith("uv") else "python"
+    if verb.startswith("python"):
+        kind = "python"
+    elif not verb.startswith("uv"):
+        kind = "bash"
     tokens = rest.split()
     skip_value = False
     i = 0
@@ -631,9 +643,10 @@ def _script_invocations(text: str) -> set[str]:
     """Return every script path ``text`` tells the reader to run.
 
     Two shapes count as an instruction to run something: a run word
-    (``python3``, ``python``, ``bash``, ``sh``, ``uv run``) followed by a path,
-    anywhere in the text; and a bare path-like command (``scripts/x.py --flag``)
-    in a fenced block or as the start of an inline code span with arguments.
+    (``python3``, ``python``, ``bash``, ``sh``, ``uv run``, ``source``, or ``.``
+    at a command position) followed by a path, anywhere in the text; and a bare
+    path-like command (``scripts/x.py --flag``) in a fenced block or as the
+    start of an inline code span with arguments.
     A prose pointer such as ``../sibling/SKILL.md`` is neither.
 
     Parameters
@@ -660,6 +673,10 @@ def _script_invocations(text: str) -> set[str]:
         snippets = [line] if in_fence else []
         snippets += [m.group(1) for m in _INLINE_CODE_RE.finditer(line)]
         for snippet in snippets:
+            for match in _DOT_SOURCE_RE.finditer(snippet):
+                token = match.group(1).rstrip(_TRAILING_JUNK)
+                if _is_pathlike(token):
+                    found.add(token)
             for match in _COMMAND_START_RE.finditer(snippet):
                 token = match.group(1).rstrip(_TRAILING_JUNK)
                 is_command = in_fence or snippet.strip().startswith(token + " ")
@@ -668,13 +685,56 @@ def _script_invocations(text: str) -> set[str]:
     return found
 
 
-def _resolves_inside(skill_dir: Path, target: str) -> bool:
+def _lexically_inside(skill_dir: Path, target: str) -> bool:
     """Return whether ``target`` (relative to ``skill_dir``) stays in the skill."""
     if target.startswith("~"):
         return False
     roots = {os.path.abspath(skill_dir), os.path.realpath(skill_dir)}
     resolved = os.path.normpath(os.path.join(skill_dir, target))
     return any(resolved == root or resolved.startswith(root + os.sep) for root in roots)
+
+
+def _problem_with(skill_dir: Path, target: str) -> str | None:
+    """Return why running ``target`` leaves the skill, or ``None`` when it is fine.
+
+    A relative path is read against the skill root, so ``./x`` and ``../x``
+    are checked lexically. Any other relative path (``scripts/x``, ``x.py`` or
+    a repo-root-relative ``.agents/skills/<name>/scripts/x``) must name a file
+    this skill ships. A ``skills/<name>/`` segment must name this skill, and
+    the rest of the path is then read against the skill root.
+
+    Parameters
+    ----------
+    skill_dir : Path
+        The skill directory.
+    target : str
+        The path operand of a run instruction, with placeholders already
+        filtered out.
+
+    Returns
+    -------
+    str | None
+        A short reason, or ``None`` when ``target`` is inside the skill.
+    """
+    own_names = {os.path.basename(os.path.abspath(skill_dir))}
+    own_names.add(os.path.basename(os.path.realpath(skill_dir)))
+    relative = not (os.path.isabs(target) or target.startswith("~"))
+    segment = _SKILLS_SEGMENT_RE.search(target)
+    if segment:
+        if segment.group(1) not in own_names:
+            return f"another skill's folder ('{segment.group(1)}')"
+        if relative:
+            target = target[segment.end() :]
+    if not relative or target.startswith(("./", "../")):
+        if not _lexically_inside(skill_dir, target):
+            return "resolves outside the skill"
+        return None
+    if not (skill_dir / target).exists():
+        return (
+            "not shipped in this skill (a relative path is read against the "
+            "skill root; the repository root's scripts/ is not part of a skill)"
+        )
+    return None
 
 
 def check_external_script_references(skill_dir: Path, body: str) -> None:
@@ -684,13 +744,16 @@ def check_external_script_references(skill_dir: Path, body: str) -> None:
     own ``scripts/`` and is invoked as ``python3 <skill-dir>/scripts/<name>.py``.
     Scanned text is the ``SKILL.md`` body plus every ``.md`` file under
     ``references/``. An instruction to run is a run word (``python3``,
-    ``python``, ``bash``, ``sh``, ``uv run``) followed by a path, or a bare
-    ``scripts/x`` command. It fails when the path resolves outside
-    ``skill_dir`` or, for a bare ``scripts/x``, names a file the skill does not
-    ship (the repository's root ``scripts/`` is machinery, not part of any
-    skill; reach it through ``make``). Paths containing a placeholder
-    (``<skill-dir>/...``, ``${VAR}/...``) or a glob are exempt, and prose
-    pointers such as ``../<sibling>/SKILL.md`` are allowed.
+    ``python``, ``bash``, ``sh``, ``uv run``, ``source``, or ``.`` at a command
+    position) followed by a path, or a bare ``scripts/x`` command. It fails
+    when the path resolves outside ``skill_dir``, names a file the skill does
+    not ship (relative paths are read against the skill root, so this also
+    catches the repository root's ``scripts/``, which is machinery, not part of
+    any skill; reach it through ``make``), or has a ``skills/<name>/`` segment
+    naming another skill (``.agents/skills/other/scripts/x.py``). Paths
+    containing a placeholder (``<skill-dir>/...``, ``${VAR}/...``) or a glob
+    are exempt, and prose pointers such as ``../<sibling>/SKILL.md`` are
+    allowed.
 
     Parameters
     ----------
@@ -717,13 +780,9 @@ def check_external_script_references(skill_dir: Path, body: str) -> None:
         for target in sorted(_script_invocations(text)):
             if any(c in target for c in _PLACEHOLDER_CHARS):
                 continue
-            if not _resolves_inside(skill_dir, target):
-                offenders.append(f"{source}: {target} (resolves outside the skill)")
-            elif target.startswith("scripts/") and not (skill_dir / target).exists():
-                offenders.append(
-                    f"{source}: {target} (not in this skill's scripts/; a bare "
-                    "scripts/ path is relative to the skill root)"
-                )
+            problem = _problem_with(skill_dir, target)
+            if problem:
+                offenders.append(f"{source}: {target} ({problem})")
 
     if offenders:
         record(
