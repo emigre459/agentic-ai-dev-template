@@ -47,7 +47,8 @@ This is a **React + TypeScript frontend** project built with Vite and managed wi
 
 ## Quality Gates
 
-Every change must pass `make pr_check` (lint + tests) before a PR is opened.
+Every change must pass `make pr_check` (lint + security + coverage + the per-test
+speed check) before a PR is opened.
 
 | Command | What it runs |
 |---------|--------------|
@@ -57,7 +58,8 @@ Every change must pass `make pr_check` (lint + tests) before a PR is opened.
 | `make tests` | Unit tests |
 | `make coverage` | Tests with an 80% coverage gate |
 | `make security` | Dependency / SAST scan |
-| `make pr_check` | `lint` + `tests` |
+| `make test_speed_check` | Per-test speed guard over the last `make coverage` run (budget in `.github/pr-reviewer.json` → `test_speed`) |
+| `make pr_check` | `lint` + `security`, then `coverage` + `test_speed_check` |
 | `make apply_repo_settings_bootstrap TARGET_REPO=owner/repo` | Apply setup-safe repository settings before the initialization PR |
 | `make finalize_repo_settings TARGET_REPO=owner/repo` | Enable final required CI checks and the merge queue after the initialization PR merges |
 | `make cc` | Launch Claude Code with this repo's settings |

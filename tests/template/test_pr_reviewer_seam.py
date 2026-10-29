@@ -44,7 +44,7 @@ _FIELDS: dict[str, tuple[type | None, ...]] = {
     "summary_marker": (str, None),
     "clean_pattern": (str,),
     "findings_pattern": (str,),
-    "reviewed_sha_pattern": (str, None),
+    "reviewed_sha_pattern": (str, list, None),
     "self_resolves_threads": (bool,),
     "summary_in_issue_comments": (bool,),
     # The final full review: all set, or all null for a reviewer agents can't ask
@@ -54,6 +54,13 @@ _FIELDS: dict[str, tuple[type | None, ...]] = {
     "final_review_done_pattern": (str, None),
     "final_review_failed_pattern": (str, None),
     "final_review_partial_pattern": (str, None),
+    # The reviewer's replies to the trigger comment: all set, or all null.
+    "incremental_review_done_pattern": (str, None),
+    "incremental_review_no_changes_pattern": (str, None),
+    "incremental_review_failed_pattern": (str, None),
+    "incremental_review_partial_pattern": (str, None),
+    # Findings stated with no thread to reply on (one capture group each).
+    "unthreaded_finding_patterns": (list,),
     # A refused (rate-limited) request: how to recognise it and how long to wait.
     "rate_limited_pattern": (str, None),
     "rate_limit_wait_pattern": (str, None),
@@ -63,6 +70,7 @@ _FIELDS: dict[str, tuple[type | None, ...]] = {
     "local_preflight": (dict, None),
     "local_review": (dict, None),
 }
+_INCREMENTAL_FIELDS = tuple(f for f in _FIELDS if f.startswith("incremental_"))
 _FINAL_REVIEW_FIELDS = tuple(f for f in _FIELDS if f.startswith(("final_", "command_")))
 
 
@@ -129,13 +137,17 @@ def test_every_adapter_is_well_formed(key: str) -> None:
     for field in (
         "clean_pattern",
         "findings_pattern",
-        "reviewed_sha_pattern",
         "final_review_done_pattern",
         "final_review_failed_pattern",
         "final_review_partial_pattern",
+        *_INCREMENTAL_FIELDS,
     ):
         if adapter[field] is not None:
             re.compile(adapter[field])
+    assert len({adapter[f] is None for f in _INCREMENTAL_FIELDS}) == 1, (
+        f"reviewer {key!r}: {', '.join(_INCREMENTAL_FIELDS)} must all be set or "
+        "all be null"
+    )
     assert len({adapter[f] is None for f in _FINAL_REVIEW_FIELDS}) == 1, (
         f"reviewer {key!r}: {', '.join(_FINAL_REVIEW_FIELDS)} must all be set or "
         "all be null"
@@ -144,10 +156,18 @@ def test_every_adapter_is_well_formed(key: str) -> None:
         f"reviewer {key!r}: findings_pattern needs exactly one capture group "
         "(the finding count)"
     )
-    if adapter["reviewed_sha_pattern"] is not None:
-        assert re.compile(adapter["reviewed_sha_pattern"]).groups == 1, (
-            f"reviewer {key!r}: reviewed_sha_pattern needs exactly one capture "
+    sha_patterns = adapter["reviewed_sha_pattern"] or []
+    if isinstance(sha_patterns, str):
+        sha_patterns = [sha_patterns]
+    for pattern in sha_patterns:
+        assert re.compile(pattern).groups == 1, (
+            f"reviewer {key!r}: each reviewed_sha_pattern needs exactly one capture "
             "group (the reviewed SHA)"
+        )
+    for pattern in adapter["unthreaded_finding_patterns"]:
+        assert re.compile(pattern).groups == 1, (
+            f"reviewer {key!r}: each unthreaded_finding_patterns entry needs exactly "
+            "one capture group (the finding's text)"
         )
 
 
@@ -362,3 +382,238 @@ def test_the_preflight_documents_that_it_never_gates_a_pr_request() -> None:
     doc = " ".join(script.read_text().split('"""')[1].split())
     assert "never gates a PR review request" in doc
     assert "separate pool" in doc
+
+
+# --- The speed guard's section shares this file (stack-neutral settings) ---
+
+# test_speed field -> allowed JSON types. Numbers may be written as ints or floats.
+_SPEED_FIELDS: dict[str, tuple[type, ...]] = {
+    "budget_seconds": (int, float),
+    "recheck_fraction": (int, float),
+    "factor_low": (int, float),
+    "factor_high": (int, float),
+    "shared_setup_budget_seconds": (int, float),
+    "default_runner_class": (str,),
+    "reference_seconds": (dict,),
+    "_note": (str,),
+}
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def test_the_test_speed_section_is_well_formed() -> None:
+    """``scripts/check_test_speed.py`` reads its budgets from here, both stacks."""
+    speed = _load_config()["test_speed"]
+    assert set(speed) == set(_SPEED_FIELDS), sorted(set(speed) ^ set(_SPEED_FIELDS))
+    for field, types in _SPEED_FIELDS.items():
+        value = speed[field]
+        assert isinstance(value, types) and not isinstance(value, bool), field
+    for field in ("budget_seconds", "shared_setup_budget_seconds", "factor_low"):
+        assert speed[field] > 0, field
+    assert 0 < speed["recheck_fraction"] <= 1
+    assert speed["factor_low"] <= 1 <= speed["factor_high"]
+    references = speed["reference_seconds"]
+    assert references and all(
+        isinstance(name, str) and name and _is_number(secs) and secs > 0
+        for name, secs in references.items()
+    ), references
+    assert speed["default_runner_class"] in references
+    assert "\n" not in speed["_note"] and speed["_note"].strip()
+
+
+def test_the_test_speed_section_holds_the_agreed_budget() -> None:
+    speed = _load_config()["test_speed"]
+    assert speed["budget_seconds"] == 10
+    assert (speed["factor_low"], speed["factor_high"]) == (0.5, 2.0)
+    assert speed["default_runner_class"] == "ubuntu-latest"
+
+
+def test_every_loader_accepts_the_real_config_with_test_speed() -> None:
+    """The reviewer loaders ignore the speed guard's section in the real file."""
+    assert "test_speed" in _load_config()
+    state = _load_state()
+    for key in _KEYS:
+        assert state.load_reviewer(_CONFIG, key=key).key == key
+    assert state.load_round_caps(_CONFIG).local_before_final >= 1
+
+
+# --- The downstream review handling the prose must carry (helpers are bundled) ---
+
+_STACK_REF = _SKILLS / "resolve-pr-concerns" / "references" / "stacked-prs.md"
+_SH_HELPER_RE = re.compile(
+    r"\b(?:human_review|wait_for_pr_checks)\.sh\b|scripts/\S+\.sh\b"
+)
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "merge_gate.py",
+        "round_budget",
+        "incremental_review_outcome",
+        "unthreaded_findings",
+        "needs_trigger",
+        "exit 3",
+        "references/stacked-prs.md",
+        "60 minutes",
+        "trigger_allowed",
+        "final_review_due",
+        "min_remaining",
+        "test_speed_check",
+    ],
+)
+def test_the_skill_names_each_bundled_review_signal(phrase: str) -> None:
+    assert phrase in _flat(_SKILL), phrase
+
+
+def test_an_empty_live_set_is_not_proof_of_a_review() -> None:
+    loop_guards = _section(_flat(_SKILL), "## Loop guards")
+    assert "an empty" in loop_guards.lower() and "not proof" in loop_guards
+
+
+def test_the_skill_points_at_the_python_helpers_not_the_retired_scripts() -> None:
+    text = _SKILL.read_text()
+    assert not _SH_HELPER_RE.search(text), _SH_HELPER_RE.findall(text)
+    assert "scripts/human_review.py --repo" in text
+    assert "scripts/wait_for_pr_checks.py <pr-number>" in text
+    for path in _tracked(".agents/skills/resolve-pr-concerns"):
+        if path.suffix == ".md":
+            assert not _SH_HELPER_RE.search(path.read_text()), path.name
+
+
+def test_merge_readiness_is_a_report_never_a_merge() -> None:
+    step7 = _section(_flat(_SKILL), "## Step 7:")
+    assert "merge_gate.py" in step7
+    assert "one-off" in step7
+    assert "never permission" in step7
+
+
+def test_behind_blocks_only_under_the_up_to_date_rule() -> None:
+    """merge_gate.py treats BEHIND as a blocker only while the rules are strict."""
+    step2f = _section(_flat(_SKILL), "### 2f.")
+    assert "up to date" in step2f and "merge queue" in step2f
+    assert "CONFLICTING" in step2f and "DIRTY" in step2f
+
+
+def test_the_stack_reference_keeps_landing_with_the_human() -> None:
+    text = _flat(_STACK_REF)
+    for phrase in (
+        "merge_gate.py --stack",
+        "gh stack merge",
+        "never `gh pr merge`",
+        "bottom-up",
+        "one-off",
+        "never installs",
+        "4 layers",
+        "300 files",
+        "merge queue",
+    ):
+        assert phrase in text, phrase
+
+
+def test_coderabbit_notes_hedge_the_status_type_and_cap_review_size() -> None:
+    text = _flat(_NOTES_DIR / "coderabbit.md")
+    assert "commit status" in text
+    assert "300 files" in text
+
+
+def test_bugbot_notes_explain_the_stale_summary() -> None:
+    assert "BUGBOT_REVIEW_STALE" in (_NOTES_DIR / "bugbot.md").read_text()
+
+
+def test_the_pr_round_budget_is_scoped_away_from_a_local_reviewer() -> None:
+    """pr_round_caps zeroes a local reviewer's PR caps.
+
+    So ``final_review_due`` reads true from the first read and ``trigger_allowed``
+    false: the prose must route a local reviewer to ``local_review`` instead, or it
+    would post its final review before any local round and stop fixing after it.
+    """
+    section = _section(_flat(_SKILL), "### Review-round budget")
+    assert "govern PR-round reviewers only" in section
+    assert "local_review.configured: true" in section
+    step5a = _section(_flat(_SKILL), "## Step 5a:")
+    assert "for a reviewer without a local review, `round_budget.final_review_due`" in (
+        step5a
+    )
+
+
+# --- build-from-issue: the downstream improvements, and opt-in stacked PRs ---
+
+_BUILD_STACK_REF = _SKILLS / "build-from-issue" / "references" / "stacked-prs.md"
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        # Step 1: a number the user names wins over the branch's number.
+        "target issue number",
+        "branch-derived issue number",
+        # Step 11: Closes only when the PR completes the card.
+        "`Refs #N`",
+        # Step 11: the local CI mirror gates PR creation; make tests is not the gate.
+        "make pr_check",
+        "`make tests` is not the PR gate",
+        # Step 7b: the kit lands in the PR diff; the self-review rides alongside.
+        "docs/superpowers/test-kits/",
+        "explain-diff-merge-review",
+        # Step 11b: posting to Slack is opt-in.
+        "off by default",
+        # Stacked PRs are opt-in, documented in this skill's own reference.
+        "references/stacked-prs.md",
+        "gh stack --help",
+        # Step 12: merge-ready is a report built from actual check results.
+        "wait_for_pr_checks.py",
+        "one-off",
+        # Canonical-ahead items that must survive the port.
+        "There is no changelog step",
+        '"active": null',
+        "retry_after",
+        "CONFLICTING",
+        "DIRTY",
+        "[Other tracks ready next:",
+        ".agents/rules/shared/push-every-commit.md",
+        ".agents/skills/clean-up-kanban/SKILL.md",
+        ".agents/rules/shared/checkpoint-commits.md",
+    ],
+)
+def test_build_from_issue_names_each_ported_behavior(phrase: str) -> None:
+    assert phrase in _flat(_BUILD), phrase
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "4-option menu",
+        "no — merged/kept/discarded",
+        "run_quicktest",
+    ],
+)
+def test_build_from_issue_drops_the_finishing_menu_and_product_leftovers(
+    phrase: str,
+) -> None:
+    assert phrase not in _flat(_BUILD), phrase
+
+
+def test_build_from_issue_stack_reference_keeps_the_policy() -> None:
+    text = _flat(_BUILD_STACK_REF)
+    for phrase in (
+        "One PR is the default",
+        "4 layers",
+        "300 files",
+        "/plan-issues",
+        "## Stack",
+        "gh stack --help",
+        "gh extension install github/gh-stack",
+        "npx skills add github/gh-stack",
+        "never installs",
+        "make pr_check",
+        "gh stack submit",
+        "Refs #N",
+        "Closes #N",
+        "merge queue",
+        "never `gh pr merge`",
+        "resolve-pr-concerns",
+    ):
+        assert phrase in text, phrase

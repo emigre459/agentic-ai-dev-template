@@ -30,7 +30,11 @@ verdict patterns) live in the config — this file covers what a field can't say
   - **Manual** — reviews only when someone comments `bugbot run` (the config's
     `trigger_comment`; `cursor review` also works) on the PR.
   Teams sometimes switch automatic mode off to control usage-based cost, so detect
-  the mode per PR (`resolve-pr-concerns` Step 1a) rather than assuming it.
+  the mode per PR (`resolve-pr-concerns` Step 1a) rather than assuming it, and
+  after each push check that a review started before deciding to comment (Step 5).
+  An old rule of thumb, "don't comment `bugbot run`, it subscribes to pushes on its
+  own", was wrong: agents withheld the trigger and a human ended up running Bugbot
+  by hand on every PR.
 - Reviews typically land within a couple of minutes of the trigger.
 
 ## Detecting a result — do NOT trust the status check alone
@@ -45,18 +49,27 @@ verdict patterns) live in the config — this file covers what a field can't say
   `bot_logins` lists both; key on the summary marker.
 - **Summary marker:** `<!-- BUGBOT_REVIEW -->`. Verdict: `found no new issues` =
   pass; `found N potential issue(s)` = N inline findings to enumerate.
+- **A superseded summary goes stale.** Bugbot rewrites an older run's summary as a
+  `<!-- BUGBOT_REVIEW_STALE -->` "Stale Bugbot comment from a previous run" review.
+  It matches neither verdict pattern, so a head whose newest Bugbot review is stale
+  reads `verdict: none`: trigger a fresh review.
 - **Findings are NEVER in issue-comments** — the PR's issue-comments hold only the
-  `bugbot run` trigger comments.
+  `bugbot run` trigger comments (hence `summary_in_issue_comments: false`).
 - **`commit_id` is `null` on `gh pr view --json reviews`**, so a monitor filtering
   that output by head SHA never matches. Identify a fresh review by author +
   `submittedAt` newer than your trigger + the marker; the reviewed SHA is in the
   body's `Reviewed by Cursor Bugbot for commit <sha>` footer. The REST
-  `repos/<owner>/<repo>/pulls/<n>/reviews` endpoint (which `wait_for_pr_checks.sh`
-  reads) does carry `commit_id`, which is why the adapter's `reviewed_sha_pattern`
-  is `null`.
+  `repos/<owner>/<repo>/pulls/<n>/reviews` endpoint (which `reviewer_state.py` and
+  `wait_for_pr_checks.py` read) does carry `commit_id`, which is why the adapter's
+  `reviewed_sha_pattern` is `null`.
 - **Re-anchored findings:** a prior finding re-posted on a new head keeps its
   `BUGBOT_BUG_ID` while the footer references an older SHA — that is the
-  already-addressed finding, not a new one.
+  already-addressed finding awaiting human resolution, not a new one.
+- **No reply to the trigger, no thread-less findings.** Bugbot doesn't answer
+  `bugbot run` with a status reply and keeps every finding in a thread, so its
+  `incremental_review_*_pattern` fields are `null` and `unthreaded_finding_patterns`
+  is `[]`: `incremental_review_outcome` reads `not_tracked` (watch `verdict`
+  instead) and `unthreaded_findings` is always empty.
 
 - `rate_limited_pattern` and the rate-limit wait fields are `null`: Bugbot is
   usage-billed with no included-review quota to wait out, so `reviewer_state.py`
@@ -84,6 +97,17 @@ command with `{base}`, and how its output marks findings and completion) plus a
 (a local reviewer's one PR request is its final full review); the skills need no
 change.
 
+## CODEOWNERS and `review-gate`
+
+If the default branch has a CODEOWNERS file (`.github/CODEOWNERS`, `CODEOWNERS` or
+`docs/CODEOWNERS`), `review-gate` also fails while a changed path's owner hasn't
+approved the head (`@<owner> must approve: …`), whatever Bugbot's verdict. It resolves
+user logins only: a CODEOWNERS line naming a team (`@org/team`) or an email owner,
+alone or beside users, is skipped by this gate (as is a line with `!`, `[...]` or `\`
+in its pattern) and its paths are left to GitHub's own "Require review from Code
+Owners" rule, so turn that rule on if you rely on team owners. Without a CODEOWNERS
+file, or with one naming no user owner, the ownership half does nothing.
+
 ## Threads
 
 - `self_resolves_threads: true` — Bugbot resolves its own addressed threads once a
@@ -95,4 +119,5 @@ change.
 - Noise filters: Bugbot reads `.cursor/BUGBOT.md`, which this template does not
   ship (it keeps no vendor directory). The filters live in the vendor-neutral
   `.github/review-guidelines.md`; to wire them in, restore them as
-  `.cursor/BUGBOT.md` (a copy of that file).
+  `.cursor/BUGBOT.md` (a copy of that file), and re-copy it after each edit to the
+  guidelines.

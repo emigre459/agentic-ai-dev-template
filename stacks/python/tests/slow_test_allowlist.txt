@@ -1,0 +1,11 @@
+# Slow-test allowlist for the per-test speed guard (`make test_speed_check`).
+#
+# A test listed here may exceed the per-test budget (.github/pr-reviewer.json ->
+# test_speed, scaled by this machine's measured speed). One test per line, its id
+# exactly as the guard prints it, then the reason and a tracking issue:
+#
+#   <classname>::<name>  # <why it is slow>, <tracking issue>
+#
+# Blank lines and # comments are ignored. Before adding an entry, speed the test
+# up (usually by mocking a slow dependency) or move it to a slower test group.
+# This is a ratchet: the guard warns when a listed test is fast again; prune it.

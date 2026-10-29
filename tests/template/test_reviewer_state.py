@@ -503,6 +503,8 @@ def _fake_gh(reviews: list[Any], comments: list[Any], calls: list[str]) -> Any:
             return reviews
         if any(a.endswith("/comments") for a in args):
             return comments
+        if any(a.endswith("/statuses") for a in args):
+            return []
         raise AssertionError(f"unexpected gh call: {args}")
 
     return _gh_json
@@ -565,14 +567,20 @@ def test_a_walkthrough_naming_an_older_head_does_not_vouch_for_the_new_one(
     assert state["needs_trigger"] is True
 
 
-def test_bugbot_never_reads_issue_comments(monkeypatch: Any) -> None:
-    """Bugbot's summary is a review; fetching issue-comments would change its behavior."""
+def test_bugbot_never_takes_its_verdict_from_issue_comments(monkeypatch: Any) -> None:
+    """Bugbot's summary is a review, so an issue comment can't supply its verdict.
+
+    The issue comments ARE fetched for every reviewer: trigger comments are issue
+    comments, and the incremental outcome and round budget count them. They must
+    not be read as reviews.
+    """
     calls: list[str] = []
     comments = [_walkthrough(f"{MARKER}\nfound no new issues")]
     monkeypatch.setattr(reviewer_state, "_gh_json", _fake_gh([], comments, calls))
     state = reviewer_state.collect_state("octo/example", 1, BUGBOT)
     assert state["verdict"] == "none"
-    assert not any("issues/" in call for call in calls)
+    assert sum("issues/" in call for call in calls) == 1
+    assert state["round_budget"]["incremental_before_final"]["used"] == 0
 
 
 def test_loader_non_bool_summary_in_issue_comments_raises(tmp_path: Path) -> None:
@@ -1312,3 +1320,1052 @@ def test_loader_accepts_a_refusal_with_no_stated_wait(tmp_path: Path) -> None:
     adapter = load_reviewer(_write(tmp_path, config))
     assert adapter.rate_limit_wait_pattern is None
     assert adapter.rate_limit_default_wait_minutes == 30
+
+
+# --- List-valued reviewed-SHA patterns ----------------------------------------
+
+
+def test_loader_accepts_a_reviewed_sha_pattern_list(tmp_path: Path) -> None:
+    config = _config_with(reviewed_sha_pattern=["x(a)", "y(b)"])
+    adapter = load_reviewer(_write(tmp_path, config))
+    assert [p.pattern for p in adapter.reviewed_sha_patterns] == ["x(a)", "y(b)"]
+
+
+def test_loader_accepts_a_single_reviewed_sha_pattern(tmp_path: Path) -> None:
+    adapter = load_reviewer(_write(tmp_path, _config_with(reviewed_sha_pattern="x(a)")))
+    assert [p.pattern for p in adapter.reviewed_sha_patterns] == ["x(a)"]
+
+
+def test_a_null_reviewed_sha_pattern_means_no_patterns(tmp_path: Path) -> None:
+    adapter = load_reviewer(_write(tmp_path, _config_with(reviewed_sha_pattern=None)))
+    assert adapter.reviewed_sha_patterns == ()
+
+
+@pytest.mark.parametrize("value", [[], ["(a)(b)"], [""], 3, ""])
+def test_loader_rejects_a_bad_reviewed_sha_pattern(tmp_path: Path, value: Any) -> None:
+    config = _config_with(reviewed_sha_pattern=value)
+    with pytest.raises(ValueError, match="reviewed_sha_pattern"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_reviewed_sha_pattern_must_be_present(tmp_path: Path) -> None:
+    config = _config_with()
+    del config["reviewers"]["x"]["reviewed_sha_pattern"]
+    with pytest.raises(ValueError, match="reviewed_sha_pattern"):
+        load_reviewer(_write(tmp_path, config))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Reviewing files that changed between 1111111 and abc1234.",
+        '{"coveredCommitId": "abc1234"}',
+        'change_assessment_commit: "abc1234"',
+    ],
+    ids=["range", "covered-commit", "change-assessment"],
+)
+def test_coderabbit_reads_the_reviewed_sha_from_any_summary_format(body: str) -> None:
+    """The first matching pattern wins, so a changed summary format still resolves."""
+    head = "abc1234" + "0" * 33
+    reviews = [_rabbit(f"**Actionable comments posted: 1**\n{body}", commit=None)]
+    assert review_verdict(reviews, head, CODERABBIT) == ("findings", 1)
+
+
+# --- Incremental-review reply patterns ----------------------------------------
+
+
+def test_loader_incremental_fields_must_be_present(tmp_path: Path) -> None:
+    config = _config_with()
+    del config["reviewers"]["x"]["incremental_review_failed_pattern"]
+    with pytest.raises(ValueError, match="incremental_review_failed_pattern"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_incremental_fields_are_all_or_nothing(tmp_path: Path) -> None:
+    config = _config_with(**_MARKED, incremental_review_done_pattern="done")
+    with pytest.raises(ValueError, match="all be set or all be null"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_incremental_fields_need_the_reply_marker(tmp_path: Path) -> None:
+    fields = reviewer_state._INCREMENTAL_REVIEW_FIELDS
+    config = _config_with(**dict.fromkeys(fields, "x"))
+    with pytest.raises(ValueError, match="command_reply_marker"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_compiles_the_incremental_patterns(tmp_path: Path) -> None:
+    fields = reviewer_state._INCREMENTAL_REVIEW_FIELDS
+    adapter = load_reviewer(
+        _write(tmp_path, _config_with(**_MARKED, **dict.fromkeys(fields, "x")))
+    )
+    for field in fields:
+        pattern = getattr(adapter, field)
+        assert pattern is not None and pattern.search("X")
+
+
+def test_loader_rejects_an_invalid_incremental_pattern(tmp_path: Path) -> None:
+    fields = reviewer_state._INCREMENTAL_REVIEW_FIELDS
+    values = dict.fromkeys(fields, "x") | {fields[1]: "(unclosed"}
+    with pytest.raises(ValueError, match=fields[1]):
+        load_reviewer(_write(tmp_path, _config_with(**_MARKED, **values)))
+
+
+def test_coderabbit_declares_its_incremental_replies_and_bugbot_none() -> None:
+    reply = "I am an incremental review system.\n\nReview finished."
+    assert CODERABBIT.incremental_review_done_pattern is not None
+    assert CODERABBIT.incremental_review_done_pattern.search(reply)
+    assert CODERABBIT.incremental_review_no_changes_pattern is not None
+    assert CODERABBIT.incremental_review_failed_pattern is not None
+    assert CODERABBIT.incremental_review_partial_pattern is not None
+    for field in reviewer_state._INCREMENTAL_REVIEW_FIELDS:
+        assert getattr(BUGBOT, field) is None
+
+
+# --- Unthreaded-finding patterns ----------------------------------------------
+
+
+@pytest.mark.parametrize("value", [None, "x(a)", ["no group"], [""]])
+def test_loader_rejects_bad_unthreaded_finding_patterns(
+    tmp_path: Path, value: Any
+) -> None:
+    config = _config_with(unthreaded_finding_patterns=value)
+    with pytest.raises(ValueError, match="unthreaded_finding_patterns"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_loader_accepts_an_empty_unthreaded_finding_list(tmp_path: Path) -> None:
+    adapter = load_reviewer(
+        _write(tmp_path, _config_with(unthreaded_finding_patterns=[]))
+    )
+    assert adapter.unthreaded_finding_patterns == ()
+
+
+def test_loader_ignores_unknown_top_level_keys(tmp_path: Path) -> None:
+    """A later top-level section (e.g. ``test_speed``) must not break the loaders."""
+    config = _config_with() | {"test_speed": {"budget_seconds": 10}}
+    config["review_rounds"] = {"max_local_before_final": 2}
+    path = _write(tmp_path, config)
+    assert load_reviewer(path).key == "x"
+    assert reviewer_state.load_round_caps(path).local_before_final == 2
+
+
+_RISK = "<!-- final_review_risk_start -->{}<!-- final_review_risk_end -->"
+_OUTSIDE = (
+    "**Outside diff range comments (1)**\n\n<details>\n"
+    "<summary>src/app/mod.py (1)</summary>\n\n`10-20`: Handle the empty case.\n\n"
+    "</details>\n\n---\n\nOther text"
+)
+_HEAD = "abc1234" + "0" * 33
+
+
+def _risk_comment(text: str, comment_id: int = 7) -> dict[str, Any]:
+    body = f"Reviewing files between 1111111 and abc1234.\n{_RISK.format(text)}"
+    return {
+        "id": comment_id,
+        "body": body,
+        "user": {"login": "coderabbitai[bot]"},
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:05:00Z",
+    }
+
+
+def test_unthreaded_findings_carry_merge_risk_and_outside_diff() -> None:
+    reviews = [{"id": 5, **_rabbit(_OUTSIDE, commit=_HEAD)}]
+    comments = [_risk_comment("**Merge Risk:** the handler can return HTTP 500.")]
+    found = reviewer_state.unthreaded_findings(reviews, comments, _HEAD, CODERABBIT)
+    assert {(f["source"], f["id"]) for f in found} == {
+        ("summary_comment", 7),
+        ("review", 5),
+    }
+    merge_risk = next(f["text"] for f in found if f["source"] == "summary_comment")
+    assert merge_risk == "**Merge Risk:** the handler can return HTTP 500."
+    outside = next(f["text"] for f in found if f["source"] == "review")
+    assert "10-20" in outside and "Other text" not in outside
+
+
+def test_unthreaded_findings_skip_other_heads() -> None:
+    reviews = [{"id": 5, **_rabbit(_OUTSIDE, commit=_HEAD)}]
+    comments = [_risk_comment("**Merge Risk:** x")]
+    assert (
+        reviewer_state.unthreaded_findings(reviews, comments, "0" * 40, CODERABBIT)
+        == []
+    )
+
+
+def test_unthreaded_findings_skip_other_authors_and_dismissed_reviews() -> None:
+    reviews = [
+        {"id": 1, **_rabbit(_OUTSIDE, commit=_HEAD, login="octocat")},
+        {"id": 2, **_rabbit(_OUTSIDE, commit=_HEAD), "state": "DISMISSED"},
+    ]
+    comment = _risk_comment("**Merge Risk:** x")
+    comment["user"] = {"login": "octocat"}
+    assert (
+        reviewer_state.unthreaded_findings(reviews, [comment], _HEAD, CODERABBIT) == []
+    )
+
+
+def test_unthreaded_findings_ignore_empty_matches() -> None:
+    comments = [_risk_comment("   ")]
+    assert reviewer_state.unthreaded_findings([], comments, _HEAD, CODERABBIT) == []
+
+
+def test_bugbot_has_no_unthreaded_findings() -> None:
+    reviews = [{"id": 5, **_review(_OUTSIDE, commit=_HEAD)}]
+    assert reviewer_state.unthreaded_findings(reviews, [], _HEAD, BUGBOT) == []
+
+
+def test_a_summary_comment_keeps_its_id_when_shaped_as_a_review() -> None:
+    shaped = reviewer_state._comment_as_review(_risk_comment("x", comment_id=42))
+    assert shaped["id"] == 42
+
+
+# --- The local preflight's minimum and the start-failure pattern ---------------
+
+
+def test_min_remaining_is_optional_and_defaults_to_one(tmp_path: Path) -> None:
+    config = _config_with(
+        local_preflight=_preflight(), local_review=_LOCAL_REVIEW, **_MARKED
+    )
+    adapter = load_reviewer(_write(tmp_path, config))
+    assert adapter.local_preflight is not None
+    assert adapter.local_preflight.min_remaining == 1
+
+
+def test_loader_reads_min_remaining(tmp_path: Path) -> None:
+    config = _config_with(
+        local_preflight=_preflight(min_remaining=3),
+        local_review=_LOCAL_REVIEW,
+        **_MARKED,
+    )
+    adapter = load_reviewer(_write(tmp_path, config))
+    assert adapter.local_preflight is not None
+    assert adapter.local_preflight.min_remaining == 3
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, 1.5, "2", None])
+def test_loader_rejects_a_bad_min_remaining(tmp_path: Path, bad: Any) -> None:
+    config = _config_with(
+        local_preflight=_preflight(min_remaining=bad),
+        local_review=_LOCAL_REVIEW,
+        **_MARKED,
+    )
+    with pytest.raises(ValueError, match="min_remaining"):
+        load_reviewer(_write(tmp_path, config))
+
+
+def test_start_failure_pattern_is_optional(tmp_path: Path) -> None:
+    config = _config_with(local_review=_LOCAL_REVIEW, **_MARKED)
+    adapter = load_reviewer(_write(tmp_path, config))
+    assert adapter.local_review is not None
+    assert adapter.local_review.start_failure_pattern is None
+
+
+def test_loader_reads_start_failure_pattern(tmp_path: Path) -> None:
+    review = _LOCAL_REVIEW | {"start_failure_pattern": "Could not start"}
+    adapter = load_reviewer(
+        _write(tmp_path, _config_with(local_review=review, **_MARKED))
+    )
+    assert adapter.local_review is not None
+    pattern = adapter.local_review.start_failure_pattern
+    assert pattern is not None and pattern.search("could not start review")
+
+
+@pytest.mark.parametrize("bad", ["", 3, "(unclosed"])
+def test_loader_rejects_a_bad_start_failure_pattern(tmp_path: Path, bad: Any) -> None:
+    review = _LOCAL_REVIEW | {"start_failure_pattern": bad}
+    with pytest.raises(ValueError, match="start_failure_pattern"):
+        load_reviewer(_write(tmp_path, _config_with(local_review=review, **_MARKED)))
+
+
+def test_loader_still_rejects_an_unknown_local_review_key(tmp_path: Path) -> None:
+    review = _LOCAL_REVIEW | {"surprise": 1}
+    with pytest.raises(ValueError, match="local_review"):
+        load_reviewer(_write(tmp_path, _config_with(local_review=review, **_MARKED)))
+
+
+def test_coderabbit_declares_its_capacity_minimum_and_start_failure() -> None:
+    assert CODERABBIT.local_preflight is not None
+    assert CODERABBIT.local_preflight.min_remaining == 2
+    assert CODERABBIT.local_review is not None
+    pattern = CODERABBIT.local_review.start_failure_pattern
+    assert pattern is not None and pattern.search("Failed to start review")
+
+
+# --- The refreshed rate-limit pattern -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Review rate limited. Your next review will be available in 5 minutes.",
+        "Your included review limit is currently reached.",
+    ],
+)
+def test_coderabbit_recognises_both_refusal_wordings(reply: str) -> None:
+    pattern = CODERABBIT.rate_limited_pattern
+    assert pattern is not None and pattern.search(reply)
+
+
+def test_coderabbit_refusal_pattern_skips_a_reply_that_performed_an_action() -> None:
+    pattern = CODERABBIT.rate_limited_pattern
+    assert pattern is not None
+    reply = "Action performed: review triggered.\n\nReview rate limited earlier."
+    assert pattern.search(reply) is None
+
+
+# --- Round caps -----------------------------------------------------------------
+
+
+def test_the_repo_config_sets_the_incremental_and_fix_caps() -> None:
+    caps = reviewer_state.load_round_caps()
+    assert (caps.before_final, caps.after_final, caps.fix_iterations) == (1, 3, 5)
+
+
+def test_round_caps_read_incremental_and_fix_keys(tmp_path: Path) -> None:
+    config = _config_with()
+    config["review_rounds"] = {
+        "max_incremental_before_final": 4,
+        "max_incremental_after_final": 2,
+        "max_fix_iterations": 8,
+    }
+    caps = reviewer_state.load_round_caps(_write(tmp_path, config))
+    assert (caps.before_final, caps.after_final, caps.fix_iterations) == (4, 2, 8)
+    assert (caps.local_before_final, caps.local_after_final) == (3, 3)
+
+
+def test_round_cap_defaults_without_a_config_block(tmp_path: Path) -> None:
+    caps = reviewer_state.load_round_caps(_write(tmp_path, _config_with()))
+    assert (caps.before_final, caps.after_final, caps.fix_iterations) == (1, 3, 5)
+
+
+@pytest.mark.parametrize(
+    "rounds",
+    [
+        {"max_incremental_before_final": -1},
+        {"max_incremental_after_final": True},
+        {"max_fix_iterations": "5"},
+    ],
+)
+def test_bad_incremental_caps_are_rejected(
+    tmp_path: Path, rounds: dict[str, Any]
+) -> None:
+    config = _config_with()
+    config["review_rounds"] = rounds
+    with pytest.raises(ValueError, match="review_rounds"):
+        reviewer_state.load_round_caps(_write(tmp_path, config))
+
+
+# --- Paginated gh output ----------------------------------------------------------
+
+
+def _fake_run(stdout: str) -> Any:
+    class _Done:
+        pass
+
+    done = _Done()
+    done.stdout = stdout  # type: ignore[attr-defined]
+    return lambda *args, **kwargs: done
+
+
+def test_gh_json_flattens_one_array_per_page(monkeypatch: Any) -> None:
+    """A gh that prints each page's array separately must still parse."""
+    monkeypatch.setattr(
+        reviewer_state.subprocess,
+        "run",
+        _fake_run('[{"id": 1}, {"id": 2}]\n[{"id": 3}]\n'),
+    )
+    assert reviewer_state._gh_json(["api", "x", "--paginate"]) == [
+        {"id": 1},
+        {"id": 2},
+        {"id": 3},
+    ]
+
+
+def test_gh_json_reads_a_single_document(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        reviewer_state.subprocess, "run", _fake_run('{"data": {"a": 1}}')
+    )
+    assert reviewer_state._gh_json(["api", "graphql"]) == {"data": {"a": 1}}
+
+
+def test_gh_json_reads_a_single_array(monkeypatch: Any) -> None:
+    monkeypatch.setattr(reviewer_state.subprocess, "run", _fake_run('[{"id": 1}]'))
+    assert reviewer_state._gh_json(["api", "x"]) == [{"id": 1}]
+
+
+def test_gh_json_of_empty_output_is_none(monkeypatch: Any) -> None:
+    monkeypatch.setattr(reviewer_state.subprocess, "run", _fake_run("\n"))
+    assert reviewer_state._gh_json(["api", "x"]) is None
+
+
+# --- Incremental outcome, finished windows, on-head and running detection -------
+# Replayed from a synthetic PR timeline (fixtures/reviewer_state/synthetic-pr.json):
+# the reviewer's command replies, its walkthrough comment and every review, with
+# placeholder bodies that carry only the markers the adapter reads. A reply is
+# edited in place, so a comment whose recorded edit is later than the cutoff is
+# dropped: its body is the later state, not what the reviewer had said by then.
+
+_SYNTHETIC = json.loads(
+    (
+        Path(__file__).parent / "fixtures" / "reviewer_state" / "synthetic-pr.json"
+    ).read_text()
+)
+_REPO = _SYNTHETIC["repo"]
+_PR = _SYNTHETIC["pr"]
+_WALKTHROUGH_ID = 100
+_WALKTHROUGH = next(c for c in _SYNTHETIC["comments"] if c["id"] == _WALKTHROUGH_ID)
+_NO_CHANGES_REPLY_ID = 112
+_ABORTED_FULL_REPLY_ID = 110
+_LAGGING_REPLY_ID = 120
+HEAD_FAILED = "2b" * 20  # its review failed, then a re-trigger finished
+HEAD_NO_CHANGES = "4d" * 20  # answered "no files to review"
+HEAD_WINDOW = "5e" * 20  # only empty and nitpick reviews, inside a finished window
+HEAD_OUTSIDE = "6f" * 20  # one outside-diff finding; the walkthrough covers it
+HEAD_LAGGING = "7a" * 20  # the review lands before the reply moves
+
+
+def _at(clock: str) -> str:
+    return f"2026-01-15T{clock}Z"
+
+
+def _as_of(clock: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    cutoff = _at(clock)
+    comments = [
+        c
+        for c in _SYNTHETIC["comments"]
+        if (c.get("updated_at") or c["created_at"]) <= cutoff
+    ]
+    reviews = [r for r in _SYNTHETIC["reviews"] if r["submitted_at"] <= cutoff]
+    return comments, reviews
+
+
+def _windows(comments: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return list(reviewer_state.finished_windows(comments, CODERABBIT))
+
+
+def _reply_body(comment_id: int) -> str:
+    return str(next(c for c in _SYNTHETIC["comments"] if c["id"] == comment_id)["body"])
+
+
+def _committed(head: str) -> str:
+    return str(
+        next(k for k in _SYNTHETIC["commits"] if k["oid"] == head)["committedDate"]
+    )
+
+
+def _fake_gh_timeline(
+    comments: list[dict[str, Any]],
+    reviews: list[dict[str, Any]],
+    head: str,
+    committed: str,
+    statuses: list[dict[str, Any]],
+    calls: list[str] | None = None,
+) -> Any:
+    def _gh_json(args: list[str]) -> Any:
+        if calls is not None:
+            calls.append(" ".join(args))
+        if any(a.endswith("/statuses") for a in args):
+            assert any(f"commits/{head}/statuses" in a for a in args)
+            return statuses
+        if "graphql" in args:
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "headRefOid": head,
+                            "mergeStateStatus": "CLEAN",
+                            "commits": {
+                                "nodes": [{"commit": {"committedDate": committed}}]
+                            },
+                            "reviewThreads": {"nodes": []},
+                        }
+                    }
+                }
+            }
+        if any(a.endswith("/reviews") for a in args):
+            return reviews
+        if any(a.endswith("/comments") for a in args):
+            return comments
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    return _gh_json
+
+
+def _state_as_of(
+    monkeypatch: Any,
+    clock: str,
+    head: str,
+    committed: str | None = None,
+    statuses: list[dict[str, Any]] | None = None,
+) -> Any:
+    """Replay ``collect_state`` at ``clock`` against the synthetic timeline.
+
+    The head's commit time and statuses come from the timeline unless overridden.
+    """
+    comments, reviews = _as_of(clock)
+    if statuses is None:
+        statuses = [
+            s
+            for s in _SYNTHETIC["statuses"].get(head, [])
+            if s["created_at"] <= _at(clock)
+        ]
+    monkeypatch.setattr(
+        reviewer_state,
+        "_gh_json",
+        _fake_gh_timeline(
+            comments, reviews, head, committed or _committed(head), statuses
+        ),
+    )
+    return reviewer_state.collect_state(_REPO, _PR, CODERABBIT_PR)
+
+
+def test_synthetic_case_1_an_incremental_review_failed() -> None:
+    comments, _ = _as_of("10:05:00")
+    assert reviewer_state.incremental_review(comments, CODERABBIT) == (
+        "failed",
+        _at("10:01:00"),
+        _at("10:01:10"),
+    )
+
+
+def test_synthetic_empty_reviews_posted_during_a_failed_review_do_not_pass() -> None:
+    """Four empty-body thread-reply reviews land on the head as its review fails."""
+    comments, reviews = _as_of("10:05:00")
+    empty = [
+        r
+        for r in reviews
+        if r["commit_id"] == HEAD_FAILED
+        and not r["body"]
+        and r["user"]["login"] in CODERABBIT.bot_logins
+    ]
+    assert len(empty) == 4
+    assert review_verdict(reviews, HEAD_FAILED, CODERABBIT, _windows(comments)) == (
+        "none",
+        0,
+    )
+
+
+def test_synthetic_case_3_no_files_to_review() -> None:
+    comments, _ = _as_of("11:40:00")
+    outcome = reviewer_state.incremental_review(comments, CODERABBIT)
+    assert outcome.outcome == "no_changes"
+    assert outcome.replied_at == _at("11:30:00")
+
+
+def test_synthetic_a_full_review_reply_is_never_an_incremental_outcome() -> None:
+    """The "Head commit changed" reply answers `full review`, not `review`."""
+    head_changed = _reply_body(_ABORTED_FULL_REPLY_ID)
+    patterns = [
+        CODERABBIT.incremental_review_done_pattern,
+        CODERABBIT.incremental_review_no_changes_pattern,
+        CODERABBIT.incremental_review_failed_pattern,
+        CODERABBIT.incremental_review_partial_pattern,
+    ]
+    assert not any(p is not None and p.search(head_changed) for p in patterns)
+    comments, _ = _as_of("11:40:00")
+    assert reviewer_state.final_review_outcome(comments, [], CODERABBIT) == "failed"
+
+
+def test_synthetic_case_4_empty_and_nitpick_reviews_in_a_finished_window_pass() -> None:
+    """Two empty-body reviews and a nitpick-only one inside `Review finished`."""
+    comments, reviews = _as_of("13:15:00")
+    assert review_verdict(reviews, HEAD_WINDOW, CODERABBIT, _windows(comments)) == (
+        "pass",
+        0,
+    )
+    assert review_verdict(reviews, HEAD_WINDOW, CODERABBIT) == ("none", 0)
+
+
+def test_synthetic_outside_diff_findings_win_over_window_evidence() -> None:
+    comments, reviews = _as_of("14:15:00")
+    assert review_verdict(reviews, HEAD_OUTSIDE, CODERABBIT, _windows(comments)) == (
+        "findings",
+        1,
+    )
+
+
+def test_synthetic_walkthrough_coverage_counts_only_inside_a_finished_window() -> None:
+    comments, _ = _as_of("14:15:00")
+    walkthrough = [reviewer_state._comment_as_review(_WALKTHROUGH)]
+    windows = _windows(comments)
+    assert review_verdict(walkthrough, HEAD_OUTSIDE, CODERABBIT, windows) == (
+        "pass",
+        0,
+    )
+    assert review_verdict(walkthrough, HEAD_OUTSIDE, CODERABBIT) == ("none", 0)
+    assert review_verdict(walkthrough, "0" * 40, CODERABBIT, windows) == ("none", 0)
+
+
+def test_an_empty_review_alone_is_never_a_clean_verdict() -> None:
+    """An empty bot review on the head, outside every finished window, proves nothing.
+
+    The reviewer posts empty reviews to hold its thread replies even while its review
+    is failing, so on its own one must never read as a clean pass.
+    """
+    empty = _rabbit("", commit=SHA, submitted="2026-01-15T10:07:00Z")
+    assert review_verdict([empty], SHA, CODERABBIT) == ("none", 0)
+    elsewhere = [("2026-01-15T09:00:00Z", "2026-01-15T10:00:00Z")]
+    assert review_verdict([empty], SHA, CODERABBIT, elsewhere) == ("none", 0)
+    covering = [("2026-01-15T10:00:00Z", "2026-01-15T10:10:00Z")]
+    assert review_verdict([empty], SHA, CODERABBIT, covering) == ("pass", 0)
+
+
+def test_finished_windows_span_request_to_the_replys_last_edit() -> None:
+    comments, _ = _as_of("13:15:00")
+    windows = _windows(comments)
+    assert (_at("13:00:10"), _at("13:10:00")) in windows  # incremental
+    assert (_at("12:00:00"), _at("12:20:00")) in windows  # full review
+    assert not any(start == _at("10:01:00") for start, _ in windows)  # failed
+
+
+def test_a_window_ends_at_the_next_request_of_either_kind() -> None:
+    """Request A's late reply edit must not stretch its window over request B."""
+    comments = [
+        _command("2026-01-15T10:00:00Z", body="@coderabbitai review"),
+        _comment(_INCREMENTAL_DONE, "2026-01-15T10:00:10Z", "2026-01-15T10:10:00Z"),
+        _command("2026-01-15T10:05:00Z"),
+        _comment(_FULL_FAILED, "2026-01-15T10:05:10Z", "2026-01-15T10:05:13Z"),
+    ]
+    windows = reviewer_state.finished_windows(comments, CODERABBIT)
+    assert windows == [("2026-01-15T10:00:00Z", "2026-01-15T10:05:00Z")]
+    thread_reply = _rabbit("", commit=SHA, submitted="2026-01-15T10:07:00Z")
+    assert review_verdict([thread_reply], SHA, CODERABBIT, windows) == ("none", 0)
+
+
+def test_a_reviewer_without_reply_patterns_has_no_windows() -> None:
+    comments = [
+        _command("2026-01-15T10:00:00Z", body="bugbot run"),
+        _comment(_INCREMENTAL_DONE, "2026-01-15T10:00:10Z", login="cursor[bot]"),
+    ]
+    assert reviewer_state.finished_windows(comments, BUGBOT) == []
+
+
+def test_the_newest_trigger_owns_the_outcome() -> None:
+    comments, _ = _as_of("10:55:00")  # 10:01 failed, then 10:30 finished
+    assert reviewer_state.incremental_review(comments, CODERABBIT).outcome == (
+        "finished"
+    )
+
+
+def test_an_unanswered_trigger_is_pending() -> None:
+    comments, _ = _as_of("11:29:00")  # the 11:26 trigger, no reply yet
+    outcome = reviewer_state.incremental_review(comments, CODERABBIT)
+    assert outcome == ("pending", _at("11:26:00"), None)
+
+
+def test_incremental_outcome_not_requested_and_not_tracked() -> None:
+    assert reviewer_state.incremental_review([], CODERABBIT).outcome == "not_requested"
+    comments, _ = _as_of("14:15:00")
+    assert reviewer_state.incremental_review(comments, BUGBOT).outcome == (
+        "not_tracked"
+    )
+
+
+def test_an_incremental_not_completed_reply_is_its_own_outcome() -> None:
+    reply = _REPLY + (
+        "<details>\n<summary>Action not completed</summary>\n\nSomething new.\n\n"
+        "> Note: CodeRabbit is an incremental review system and does not re-review "
+        "already reviewed commits.\n\n</details>"
+    )
+    comments = [
+        _command("2026-01-15T10:00:00Z", body="@coderabbitai review"),
+        _comment(reply, "2026-01-15T10:00:09Z"),
+    ]
+    assert reviewer_state.incremental_review(comments, CODERABBIT).outcome == (
+        "not_completed"
+    )
+
+
+def test_synthetic_unthreaded_findings_carry_merge_risk_and_outside_diff() -> None:
+    _, reviews = _as_of("14:15:00")
+    found = reviewer_state.unthreaded_findings(
+        reviews, [_WALKTHROUGH], HEAD_OUTSIDE, CODERABBIT
+    )
+    assert {(f["source"], f["id"]) for f in found} == {
+        ("summary_comment", _WALKTHROUGH_ID),
+        ("review", 214),
+    }
+    merge_risk = next(f["text"] for f in found if f["source"] == "summary_comment")
+    assert merge_risk.startswith("**Merge Risk:**")
+    outside = next(f["text"] for f in found if f["source"] == "review")
+    assert "src/app/example.py:10-12" in outside
+    assert "Prompt to fix review comments" not in outside
+
+
+def test_synthetic_unthreaded_findings_skip_other_heads() -> None:
+    _, reviews = _as_of("14:15:00")
+    assert (
+        reviewer_state.unthreaded_findings(
+            reviews, [_WALKTHROUGH], "0" * 40, CODERABBIT
+        )
+        == []
+    )
+
+
+def test_synthetic_collect_state_case_1_a_failed_review_needs_a_retrigger(
+    monkeypatch: Any,
+) -> None:
+    state = _state_as_of(monkeypatch, "10:05:00", HEAD_FAILED)
+    assert state["verdict"] == "none"
+    assert state["incremental_review_outcome"] == "failed"
+    assert state["review_running"] is False
+    assert state["needs_trigger"] is True
+    assert state["head_committed_at"] == _at("10:00:00")
+    assert state["head_first_status_at"] == _at("10:00:30")
+
+
+def test_synthetic_collect_state_case_3_carries_the_verdict_past_a_no_changes_head(
+    monkeypatch: Any,
+) -> None:
+    """The head had nothing new to review, and the request covered it.
+
+    The commit before it passed inside a finished window, so its verdict carries.
+    """
+    state = _state_as_of(monkeypatch, "11:40:00", HEAD_NO_CHANGES)
+    assert state["incremental_review_outcome"] == "no_changes"
+    assert state["incremental_review_on_head"] is True
+    assert state["review_running"] is False
+    assert (state["verdict"], state["reported_finding_count"]) == ("pass", 0)
+    assert state["verdict_carried_from"] == "3c" * 20
+    assert state["verdict_carry_reason"] == "no_changes"
+    assert state["needs_trigger"] is False
+    # The 11:26 trigger follows the 11:25 full-review request; with a verdict
+    # carried, its "no files to review" answer spends no round.
+    assert state["round_budget"]["phase"] == "after_final"
+    assert state["round_budget"]["incremental_after_final"]["used"] == 0
+
+
+def test_synthetic_collect_state_no_carry_forward_for_a_head_newer_than_the_reply(
+    monkeypatch: Any,
+) -> None:
+    state = _state_as_of(
+        monkeypatch, "11:40:00", HEAD_NO_CHANGES, committed=_at("11:35:00")
+    )
+    assert state["incremental_review_on_head"] is False
+    assert state["verdict"] == "none"
+    assert state["needs_trigger"] is True
+
+
+def test_synthetic_collect_state_a_running_review_is_not_retriggered(
+    monkeypatch: Any,
+) -> None:
+    state = _state_as_of(monkeypatch, "11:29:00", HEAD_NO_CHANGES)
+    assert state["verdict"] == "none"
+    assert state["incremental_review_outcome"] == "pending"
+    assert state["review_running"] is True
+    assert state["needs_trigger"] is False
+
+
+def test_synthetic_collect_state_a_trigger_older_than_the_head_is_not_running(
+    monkeypatch: Any,
+) -> None:
+    state = _state_as_of(
+        monkeypatch, "11:29:00", HEAD_NO_CHANGES, committed=_at("11:27:00")
+    )
+    assert state["incremental_review_outcome"] == "pending"
+    assert state["review_running"] is False
+    assert state["needs_trigger"] is True
+
+
+def test_synthetic_collect_state_case_4_passes_the_reviewed_head(
+    monkeypatch: Any,
+) -> None:
+    state = _state_as_of(monkeypatch, "13:15:00", HEAD_WINDOW)
+    assert state["verdict"] == "pass"
+    assert state["incremental_review_outcome"] == "finished"
+    assert state["needs_trigger"] is False
+
+
+def test_synthetic_collect_state_surfaces_unthreaded_findings(
+    monkeypatch: Any,
+) -> None:
+    state = _state_as_of(monkeypatch, "14:15:00", HEAD_OUTSIDE)
+    assert (state["verdict"], state["reported_finding_count"]) == ("findings", 1)
+    assert state["final_review_outcome"] == "finished"
+    assert {f["source"] for f in state["unthreaded_findings"]} == {
+        "review",
+        "summary_comment",
+    }
+
+
+def test_the_query_requests_the_head_commit_date() -> None:
+    requested = {line.strip() for line in reviewer_state._THREADS_QUERY.splitlines()}
+    assert "commits(last: 1) {" in requested
+    assert "nodes { commit { committedDate } }" in requested
+
+
+def test_collect_state_without_a_commit_date_reports_none(monkeypatch: Any) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(reviewer_state, "_gh_json", _fake_gh([], [], calls))
+    state = reviewer_state.collect_state("owner/repo", 1, CODERABBIT_PR)
+    assert state["head_committed_at"] is None
+    assert state["head_first_status_at"] is None
+
+
+# The reply lags (or never moves) but the review landed: the 15:00:10 trigger's
+# reply reads "Review triggered" until 15:20, although its review (one outside-diff
+# finding, on the head) posted at 15:15. Replayed with the reply in that state.
+
+
+def _lagging_reply_as_of(
+    clock: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    comments, reviews = _as_of(clock)
+    reply = next(c for c in _SYNTHETIC["comments"] if c["id"] == _LAGGING_REPLY_ID)
+    in_progress = {
+        **reply,
+        "body": _SYNTHETIC["in_progress_reply"]["body"],
+        "updated_at": reply["created_at"],
+    }
+    return [*comments, in_progress], reviews
+
+
+def test_a_verdict_bearing_review_on_the_head_lands_a_lagging_reply() -> None:
+    comments, reviews = _lagging_reply_as_of("15:17:00")
+    outcome = reviewer_state.incremental_review(
+        comments, CODERABBIT, reviews, HEAD_LAGGING
+    )
+    assert outcome == ("finished", _at("15:00:10"), _at("15:15:00"))
+
+
+def test_without_the_review_the_lagging_reply_is_still_pending() -> None:
+    comments, reviews = _lagging_reply_as_of("15:10:00")
+    outcome = reviewer_state.incremental_review(
+        comments, CODERABBIT, reviews, HEAD_LAGGING
+    )
+    assert outcome.outcome == "pending"
+
+
+def test_an_empty_review_on_the_head_does_not_land_a_review() -> None:
+    """Empty-body reviews also hold thread replies, so they can't mark a landing."""
+    comments, _ = _lagging_reply_as_of("15:10:00")
+    empty = _rabbit("", commit=HEAD_LAGGING, submitted=_at("15:05:00"))
+    outcome = reviewer_state.incremental_review(
+        comments, CODERABBIT, [empty], HEAD_LAGGING
+    )
+    assert outcome.outcome == "pending"
+
+
+def test_a_review_before_the_trigger_does_not_land_it() -> None:
+    comments, _ = _lagging_reply_as_of("15:10:00")
+    early = _rabbit(
+        "**Actionable comments posted: 1**",
+        commit=HEAD_LAGGING,
+        submitted=_at("15:00:05"),
+    )
+    outcome = reviewer_state.incremental_review(
+        comments, CODERABBIT, [early], HEAD_LAGGING
+    )
+    assert outcome.outcome == "pending"
+
+
+def test_a_review_on_another_head_does_not_land_it() -> None:
+    comments, _ = _lagging_reply_as_of("15:10:00")
+    other = _rabbit(
+        "**Actionable comments posted: 1**",
+        commit=HEAD_OUTSIDE,
+        submitted=_at("15:05:00"),
+    )
+    outcome = reviewer_state.incremental_review(
+        comments, CODERABBIT, [other], HEAD_LAGGING
+    )
+    assert outcome.outcome == "pending"
+
+
+def test_collect_state_a_landed_review_stops_the_wait(monkeypatch: Any) -> None:
+    comments, reviews = _lagging_reply_as_of("15:17:00")
+    monkeypatch.setattr(
+        reviewer_state,
+        "_gh_json",
+        _fake_gh_timeline(
+            comments, reviews, HEAD_LAGGING, _committed(HEAD_LAGGING), []
+        ),
+    )
+    state = reviewer_state.collect_state(_REPO, _PR, CODERABBIT_PR)
+    assert state["incremental_review_outcome"] == "finished"
+    assert state["review_running"] is False
+    assert (state["verdict"], state["reported_finding_count"]) == ("findings", 1)
+    assert [f["id"] for f in state["unthreaded_findings"]] == [215]
+    assert "Outside diff range" not in state["unthreaded_findings"][0]["text"]
+
+
+# --- When did the head reach the PR? committedDate is not the push time ----------
+
+
+def test_collect_state_no_carry_forward_when_the_request_predates_the_head(
+    monkeypatch: Any,
+) -> None:
+    """A head pushed between the trigger (11:26) and its reply (11:30)."""
+    state = _state_as_of(
+        monkeypatch, "11:40:00", HEAD_NO_CHANGES, committed=_at("11:28:00")
+    )
+    assert state["incremental_review_outcome"] == "no_changes"
+    assert state["incremental_review_on_head"] is False
+    assert state["verdict"] == "none"
+    assert state["needs_trigger"] is True
+
+
+def test_the_request_is_on_head_when_it_follows_the_head_commit(
+    monkeypatch: Any,
+) -> None:
+    state = _state_as_of(monkeypatch, "13:15:00", HEAD_WINDOW)
+    assert state["incremental_review_on_head"] is True
+
+
+def test_a_commit_pushed_after_the_request_is_not_on_head(monkeypatch: Any) -> None:
+    """Committed 11:21, trigger 11:26, pushed ~11:27: the request predates the push.
+
+    committedDate alone says "on head". The head's first commit status (posted
+    after the push) says otherwise.
+    """
+    state = _state_as_of(
+        monkeypatch,
+        "11:40:00",
+        HEAD_NO_CHANGES,
+        committed=_at("11:21:00"),
+        statuses=[
+            {"created_at": _at("11:29:00"), "context": "gate"},
+            {"created_at": _at("11:27:30"), "context": "ci"},
+        ],
+    )
+    assert state["head_first_status_at"] == _at("11:27:30")
+    assert state["incremental_review_on_head"] is False
+    assert state["verdict"] == "none"
+    assert state["needs_trigger"] is True
+
+
+def test_a_status_before_the_request_keeps_it_on_head(monkeypatch: Any) -> None:
+    state = _state_as_of(
+        monkeypatch,
+        "11:40:00",
+        HEAD_NO_CHANGES,
+        committed=_at("11:20:00"),
+        statuses=[{"created_at": _at("11:21:00"), "context": "ci"}],
+    )
+    assert state["head_first_status_at"] == _at("11:21:00")
+    assert state["incremental_review_on_head"] is True
+    assert state["verdict"] == "pass"
+    assert state["verdict_carry_reason"] == "no_changes"
+
+
+def test_carry_forward_skips_an_earlier_commit_with_no_verdict(
+    monkeypatch: Any,
+) -> None:
+    """A passed; B's review failed (only thread-reply reviews); C had no changes."""
+    a, b, c = "a" * 40, "b" * 40, "c" * 40
+    comments = [
+        _command("2026-01-15T10:00:00Z", body="@coderabbitai review"),
+        _comment(_INCREMENTAL_DONE, "2026-01-15T10:00:05Z", "2026-01-15T10:03:00Z"),
+        _command("2026-01-15T10:10:00Z", body="@coderabbitai review"),
+        _comment(_INCREMENTAL_FAILED, "2026-01-15T10:10:05Z", "2026-01-15T10:10:08Z"),
+        _command("2026-01-15T10:20:00Z", body="@coderabbitai review"),
+        _comment(
+            _reply_body(_NO_CHANGES_REPLY_ID),
+            "2026-01-15T10:20:05Z",
+            "2026-01-15T10:20:09Z",
+        ),
+    ]
+    reviews = [
+        _rabbit("", commit=a, submitted="2026-01-15T10:02:00Z"),
+        _rabbit("", commit=b, submitted="2026-01-15T10:10:06Z"),
+    ]
+    monkeypatch.setattr(
+        reviewer_state,
+        "_gh_json",
+        _fake_gh_timeline(comments, reviews, c, "2026-01-15T10:15:00Z", []),
+    )
+    state = reviewer_state.collect_state("owner/repo", 1, CODERABBIT_PR)
+    assert state["incremental_review_outcome"] == "no_changes"
+    assert (state["verdict"], state["needs_trigger"]) == ("pass", False)
+    assert state["verdict_carried_from"] == a
+
+
+def test_bugbot_never_reads_head_statuses(monkeypatch: Any) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(reviewer_state, "_gh_json", _fake_gh([], [], calls))
+    state = reviewer_state.collect_state("owner/repo", 1, BUGBOT)
+    assert not any("statuses" in c for c in calls)
+    assert state["incremental_review_outcome"] == "not_tracked"
+    assert state["incremental_review_on_head"] is False
+    assert state["review_running"] is False
+
+
+def _state_trigger_beats_status(monkeypatch: Any, reviews: list[dict[str, Any]]) -> Any:
+    """Trigger 3 s after the push, and 2 s before the head's first status."""
+    head = "5" * 40
+    comments = [
+        _command("2026-01-15T21:37:19Z", body="@coderabbitai review"),
+        _comment(_INCREMENTAL_DONE, "2026-01-15T21:37:49Z", "2026-01-15T21:45:35Z"),
+    ]
+    monkeypatch.setattr(
+        reviewer_state,
+        "_gh_json",
+        _fake_gh_timeline(
+            comments,
+            reviews,
+            head,
+            "2026-01-15T21:37:16Z",
+            [{"created_at": "2026-01-15T21:37:21Z", "context": "ci"}],
+        ),
+    )
+    return reviewer_state.collect_state("owner/repo", 1, CODERABBIT_PR)
+
+
+def test_a_verdict_bearing_review_after_the_request_puts_it_on_head(
+    monkeypatch: Any,
+) -> None:
+    """The trigger beat the first status, but its review of the head proves it."""
+    findings = _rabbit(
+        "**Actionable comments posted: 2**",
+        commit="5" * 40,
+        submitted="2026-01-15T21:41:39Z",
+    )
+    state = _state_trigger_beats_status(monkeypatch, [findings])
+    assert state["incremental_review_on_head"] is True
+    assert (state["verdict"], state["reported_finding_count"]) == ("findings", 2)
+
+
+def test_an_empty_review_after_the_request_does_not_put_it_on_head(
+    monkeypatch: Any,
+) -> None:
+    """A thread-reply container says nothing about which head the request covered."""
+    empty = _rabbit("", commit="5" * 40, submitted="2026-01-15T21:38:03Z")
+    state = _state_trigger_beats_status(monkeypatch, [empty])
+    assert state["incremental_review_on_head"] is False
+
+
+# --- The template's own config: no reviewer is active ---------------------------
+
+
+def test_collect_state_with_the_shipped_config_reports_no_reviewer(
+    monkeypatch: Any, capsys: Any
+) -> None:
+    """The template ships ``"active": null``; every new path must run cleanly on it.
+
+    ``main`` on the shipped config reports no reviewer and calls GitHub not at all,
+    and each adapter the shipped config declares runs the incremental, window and
+    on-head paths on an untouched PR without raising.
+    """
+
+    def _no_gh(args: list[str]) -> Any:
+        raise AssertionError(f"no reviewer is active, yet gh was called: {args}")
+
+    monkeypatch.setattr(reviewer_state, "_gh_json", _no_gh)
+    monkeypatch.setattr(
+        sys, "argv", ["reviewer_state.py", "--repo", "owner/repo", "--pr", "1"]
+    )
+    reviewer_state.main()
+    out = json.loads(capsys.readouterr().out)
+    assert out["reviewer"] is None and out["configured"] is False
+
+    shipped = json.loads(reviewer_state.DEFAULT_CONFIG_PATH.read_text())
+    assert shipped["active"] is None
+    for key in shipped["reviewers"]:
+        calls: list[str] = []
+        monkeypatch.setattr(reviewer_state, "_gh_json", _fake_gh([], [], calls))
+        state = reviewer_state.collect_state("owner/repo", 1, load_reviewer(key=key))
+        assert state["incremental_review_outcome"] in ("not_tracked", "not_requested")
+        assert state["incremental_review_on_head"] is False
+        assert state["review_running"] is False
+        assert state["unthreaded_findings"] == []

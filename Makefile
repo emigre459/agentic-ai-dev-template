@@ -65,8 +65,16 @@ security: ## Security scan for both stacks
 	@$(MAKE) -C stacks/python security
 	@$(MAKE) -C stacks/react security
 
+.PHONY: test_speed_check
+test_speed_check: ## Per-test speed guard for both stacks (reads each stack's last coverage run)
+	@$(MAKE) -C stacks/python test_speed_check
+	@$(MAKE) -C stacks/react test_speed_check
+
 .PHONY: pr_check
-pr_check: lint tests ## lint + tests across machinery and both stacks
+# Coverage, THEN the speed check, in the recipe: the check reads the JUnit files
+# coverage writes, an order `make -j` would not guarantee between prerequisites.
+pr_check: lint machinery_tests security ## lint + machinery tests + security + both stacks' coverage + speed check
+	@$(MAKE) --no-print-directory coverage && $(MAKE) --no-print-directory test_speed_check
 
 .PHONY: init
 # The init inputs are read from the environment as $$VAR (shell), NOT interpolated

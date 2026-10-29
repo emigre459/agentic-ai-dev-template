@@ -16,9 +16,12 @@ instead (``reviewer_state.py`` reports it as ``rate_limit.refused`` with its
 
 Prints one JSON object and exits with its status:
 
-- ``available`` (exit 0): at least one local review is left; run the round.
-- ``exhausted`` (exit 75): wait ``recheck_after_seconds``, run this again, and run
-  the round once it says ``available``.
+- ``available`` (exit 0): the adapter's ``min_remaining`` local reviews (default one)
+  are left; run the round.
+- ``exhausted`` (exit 75): the state isn't available, or fewer than ``min_remaining``
+  reviews are left (a deep round can cost more than one, so the adapter may ask for a
+  margin); wait ``recheck_after_seconds``, run this again, and run the round once it
+  says ``available``.
 - ``unknown`` (exit 0): the command is missing, logged out, failed, or printed
   nothing readable. Tell the user ``remedy`` (the adapter's fix for ``cause``).
 - ``not_configured`` (exit 0): the reviewer declares no preflight; nothing to gate.
@@ -217,19 +220,25 @@ def check(adapter: ReviewerAdapter, run: Runner | None = None) -> dict[str, Any]
                 f"`{command}` printed no reading with {spec.state_path} and "
                 f"{spec.remaining_path}"
             )
+            if spec.min_remaining > 1:
+                failure += (
+                    f"; the minimum of {spec.min_remaining} review(s) was not "
+                    "applied (state-only judgement)"
+                )
     if reading is None:
         return result("unknown", failure, cause=_cause(spec, runner))
     state, remaining, full_capacity_ms = reading
-    if state in spec.available_states and remaining >= 1:
+    if state in spec.available_states and remaining >= spec.min_remaining:
         return result("available", f"{remaining} local review(s) left", remaining)
     recheck = _recheck_after(spec, full_capacity_ms)
-    return result(
-        "exhausted",
-        f"no local review left (state {state!r}, {remaining} remaining); "
-        f"check again in {recheck}s",
-        remaining,
-        recheck,
-    )
+    if state in spec.available_states and remaining >= 1:
+        why = (
+            f"only {remaining} review(s) left, under the minimum of "
+            f"{spec.min_remaining} a round needs"
+        )
+    else:
+        why = f"no local review left (state {state!r}, {remaining} remaining)"
+    return result("exhausted", f"{why}; check again in {recheck}s", remaining, recheck)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

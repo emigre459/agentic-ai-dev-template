@@ -62,7 +62,7 @@ Trackers cap how many children an epic can hold: GitHub allows 100 sub-issues pe
 
 - Every epic has a concrete end-state, drains, and closes. A theme that outlives any one push is expressed as a sequence of drainable epics, each naming its predecessor in `## Foundation`, not as one evergreen container.
 - When new work arrives, prefer a new epic scoped to that push (≥2 children; otherwise plan-issues' would-be-epic escape hatch) over nesting it under a long-lived broad epic, unless the new cards genuinely belong to that epic's current end-state.
-- Before nesting under an existing epic, check its child count (`gh api repos/<o>/<r>/issues/<n> --jq .sub_issues_summary.total`). Past ~60 children, treat it as a split signal: propose a successor epic rather than adding more.
+- Before nesting under an existing epic, check its child count (`gh api repos/<o>/<r>/issues/<n> --jq .sub_issues_summary.total`; a paginated `sub_issues --jq length` prints one count per page, not a total). Past ~60 children, treat it as a split signal: propose a successor epic rather than adding more.
 - In a board review (§2), flag any epic with no reachable end-state, or one past ~60 children, as AMBIGUOUS with "split or close" as the resolver.
 
 ## §2 The three-bucket board review
@@ -112,10 +112,10 @@ When a user describes new work (plan-issues) or a branch implies work (build-fro
 
 ## §6 Cross-repo + convention guardrails
 
-- **Cross-tracker routing**: when the repo defines routing rules (e.g. server-side work belongs on another team's Jira via a twin-card pattern), classify each card before filing — never file work on the wrong tracker.
+- **Cross-tracker routing**: if the repo defines tracker-routing rules, classify each card before filing — never file work on the wrong tracker.
 - **Cross-repo routing**: when the org splits surfaces across repos (backend / frontend / eval tooling), file each card in the OWNING repo, attached to the shared GH Project for portfolio visibility; the current repo keeps the backend/contract halves.
 - Epics are labeled `EPIC` (uppercase) + `[EPIC] ` title prefix — both, always.
-- New/amended core dev skills (this one included) in downstream repos → suggest an upstream PR to the shared template repo at finalization so the canonical copy stays in sync.
+- New/amended core dev skills (this one included) in downstream repos → suggest an upstream PR to the shared template repo at finalization so the canonical copy stays in sync (see `.agents/rules/shared/sync-core-dev-skills-upstream.md`).
 
 ## §7 Ready-set computation, in-flight detection, and assignment signals
 
@@ -129,7 +129,7 @@ The shared logic behind build-from-issue's Step 0 (propose next, session start) 
 3. **Stale branch** (matches the issue, but no PR, no recent commits) → "started-and-stalled": surface as a RESUME candidate, distinct from fresh picks.
 4. **Project `Status` = In progress** → treat as in-flight when populated (weakest signal; often unmaintained).
 
-This classifier is why the push-every-commit rule exists: local-only branches are invisible here and cause duplicate work.
+This classifier is why the **push-every-commit rule** exists (`.agents/rules/shared/push-every-commit.md`): local-only branches are invisible here and cause duplicate work.
 
 **Assignment signals** (GitHub assignees carry ownership):
 - **Issue assignee = claimed.** build-from-issue assigns the invoking user (`gh api user --jq .login`) when branch work begins.

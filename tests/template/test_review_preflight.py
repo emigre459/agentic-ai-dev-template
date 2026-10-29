@@ -94,9 +94,84 @@ def test_the_real_reading_allows_a_round() -> None:
     assert run.calls == [("coderabbit", "usage", "--agent")]
 
 
-def test_one_review_left_is_enough() -> None:
-    result = review_preflight.check(CODERABBIT, run=_runner(0, _reading(remaining=1)))
+def _with_min(min_remaining: int) -> Any:
+    """Return the CodeRabbit adapter with its ``min_remaining`` replaced."""
+    assert CODERABBIT.local_preflight is not None
+    spec = CODERABBIT.local_preflight._replace(min_remaining=min_remaining)
+    return CODERABBIT._replace(local_preflight=spec)
+
+
+def test_one_review_left_is_enough_with_a_minimum_of_one() -> None:
+    """A minimum of one keeps the plain behaviour: any review left runs."""
+    run = _runner(0, _reading(remaining=1))
+    result = review_preflight.check(_with_min(1), run=run)
     assert result["allowed"] is True
+    assert result["status"] == "available"
+
+
+def test_coderabbit_declares_a_minimum_of_two() -> None:
+    assert CODERABBIT.local_preflight is not None
+    assert CODERABBIT.local_preflight.min_remaining == 2
+
+
+def test_below_the_minimum_is_exhausted_with_a_recheck_and_remaining() -> None:
+    """One left is under the safety margin for a deep round, which can cost 1-2."""
+    reading = _reading(remaining=1, fullCapacityInMs=150_500)
+    result = review_preflight.check(CODERABBIT, run=_runner(0, reading))
+    assert result["allowed"] is False
+    assert result["status"] == "exhausted"
+    assert result["remaining"] == 1
+    assert result["recheck_after_seconds"] == 151
+    assert "only 1 review(s) left, under the minimum of 2" in result["detail"]
+
+
+def test_below_the_minimum_caps_the_recheck() -> None:
+    reading = _reading(remaining=1, fullCapacityInMs=2_400_000)
+    result = review_preflight.check(CODERABBIT, run=_runner(0, reading))
+    assert result["recheck_after_seconds"] == 300
+
+
+def test_at_the_minimum_is_available() -> None:
+    result = review_preflight.check(CODERABBIT, run=_runner(0, _reading(remaining=2)))
+    assert result["status"] == "available"
+    assert result["remaining"] == 2
+
+
+def test_above_the_minimum_is_available() -> None:
+    result = review_preflight.check(CODERABBIT, run=_runner(0, _AVAILABLE))
+    assert result["status"] == "available"
+    assert result["remaining"] == 10
+
+
+def test_an_empty_pool_does_not_claim_a_minimum_shortfall() -> None:
+    reading = _reading(remaining=0, fullCapacityInMs=150_500)
+    result = review_preflight.check(CODERABBIT, run=_runner(0, reading))
+    assert result["status"] == "exhausted"
+    assert "under the minimum" not in result["detail"]
+    assert "no local review left" in result["detail"]
+
+
+def test_an_unreadable_remaining_stays_state_only_and_says_the_gate_was_skipped() -> (
+    None
+):
+    """With no ``remaining`` the minimum can't be applied; say so."""
+    event = _reading()
+    del event["includedReviews"]["remaining"]
+    run = _by_command({_USAGE: (0, event), _AUTH: (0, _LOGGED_IN)})
+    result = review_preflight.check(CODERABBIT, run=run)
+    assert result["status"] == "unknown"
+    assert result["allowed"] is True
+    assert "minimum of 2" in result["detail"]
+    assert "not applied" in result["detail"]
+
+
+def test_an_unreadable_remaining_with_no_minimum_adds_no_note() -> None:
+    event = _reading()
+    del event["includedReviews"]["remaining"]
+    run = _by_command({_USAGE: (0, event), _AUTH: (0, _LOGGED_IN)})
+    result = review_preflight.check(_with_min(1), run=run)
+    assert result["status"] == "unknown"
+    assert "not applied" not in result["detail"]
 
 
 def test_an_empty_pool_waits_at_most_the_recheck_cap() -> None:

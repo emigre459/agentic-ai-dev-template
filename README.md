@@ -67,7 +67,8 @@ THEN run, in order:
   changes are only legitimate initialization output, then stage and commit:
   `git add -A && git commit -m "chore: initialize from agentic-ai-dev-template"`.
 - Run `make deps && make pr_check` yourself to confirm the stack is green
-  (fix anything red before proceeding).
+  (`pr_check` mirrors CI: lint, security, coverage gate, per-test speed check;
+  fix anything red before proceeding).
 - Reconfirm `git remote get-url origin` matches `TARGET_REPO`, push only there,
   and open the PR explicitly against the same repository:
   `git push -u origin HEAD` then `gh pr create --repo "$TARGET_REPO" --base main`.
@@ -117,7 +118,7 @@ settings, skip confirmation prompts, or continue after a preflight failure.
   `.agents/rules/`, plus harness-agnostic skills in `.agents/skills/` (Claude Code
   reads them via the `.claude/skills` symlink; Cursor natively).
 - **`Makefile` orchestration** with identical verbs across stacks
-  (`make deps|format|lint|tests|coverage|security|pr_check`) and `make cc` to drive
+  (`make deps|format|lint|tests|coverage|test_speed_check|security|pr_check`) and `make cc` to drive
   Claude Code.
 - **Canonical repo settings** in `.github/repo-settings/` — applied first with
   `make apply_repo_settings_bootstrap` and finalized after the setup PR merges

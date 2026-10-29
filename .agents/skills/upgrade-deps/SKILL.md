@@ -81,7 +81,7 @@ Commit ("deps: routine bumps") and push. Note every major version crossed — St
 ## Step 5: Fix what broke
 
 ```bash
-make pr_check && make coverage && make security
+make pr_check
 ```
 
 Read the failures, not just the exit codes. Typical, mechanical breakage:
@@ -101,12 +101,10 @@ Fresh, in this order, and read the output:
 ```bash
 make deps
 make pr_check
-make coverage
-make security
 uv run python <skill-dir>/scripts/alert_status.py --repo <owner>/<repo>   # must exit 0
 ```
 
-`make security` covers what each stack's scanner covers (a JS dependency audit, a Python SAST scan); `alert_status.py` covers the Dependabot alerts across every lockfile.
+`make pr_check` already runs lint, `make security` (what each stack's scanner covers: a JS dependency audit, a Python SAST scan), the coverage gate and the speed check; `alert_status.py` covers the Dependabot alerts across every lockfile.
 
 ## Step 7: PR, then hand off
 
