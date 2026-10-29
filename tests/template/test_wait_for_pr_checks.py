@@ -486,6 +486,58 @@ def test_all_green_reports_the_final_table_on_stdout(harness: Harness) -> None:
     assert "All required checks passed." in result.stderr
 
 
+def _break_final_checks_read(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, stderr: str
+) -> None:
+    """Make only the verdict's ``gh pr checks --json name,bucket`` read fail."""
+    real = harness.subprocess_run
+
+    def run(
+        argv: Sequence[str], *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        if list(argv[1:3]) == ["pr", "checks"] and list(argv[-2:]) == [
+            "--json",
+            "name,bucket",
+        ]:
+            return subprocess.CompletedProcess(list(argv), 1, "", stderr)
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+def test_an_unreadable_final_check_list_is_not_a_pass(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _break_final_checks_read(harness, monkeypatch, "HTTP 502: Bad Gateway")
+    result = harness.run()
+    assert result.returncode == 2
+    assert "could not read the PR's checks" in result.stderr
+    assert "All required checks passed." not in result.stderr
+
+
+def test_no_checks_reported_on_the_final_read_is_not_unreadable(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _break_final_checks_read(
+        harness, monkeypatch, "no checks reported on the 'topic' branch"
+    )
+    result = harness.run()
+    assert result.returncode == 0
+    assert "No checks reported on the PR" in result.stderr
+    assert "could not read" not in result.stderr
+    assert "All required checks passed." not in result.stderr
+
+
+def test_an_unreadable_check_list_while_polling_is_not_no_checks(
+    harness: Harness,
+) -> None:
+    harness.scenario["fail"] = ["pr checks"]
+    result = harness.run()
+    assert result.returncode == 2
+    assert "could not read the PR's checks" in result.stderr
+    assert "no checks reported yet" not in result.stderr
+
+
 def test_a_superseded_review_gate_run_is_not_a_failure(
     harness: Harness, tmp_path: Path
 ) -> None:

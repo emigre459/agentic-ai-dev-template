@@ -47,9 +47,9 @@ Behaviour:
   stays soft -- a reviewer app may still be installed).
 
 Exit codes:
-    0  -- all required checks passed
+    0  -- all required checks passed (or none were reported)
     1  -- one or more checks failed (or were cancelled)
-    2  -- timed out before settling
+    2  -- timed out before settling, or the final check list could not be read
     3  -- the merge state blocks CI (CONFLICTING/DIRTY): resolve it, then re-run
     64 -- usage error, a missing explicit --config, or an invalid config
 
@@ -573,11 +573,35 @@ def preflight_merge_state(opts: Options, poll_sec: float) -> str:
 # --- checks -------------------------------------------------------------------
 
 
-def _checks(opts: Options, fields: str) -> list[Mapping[str, Any]]:
-    """Return the PR's checks with ``fields``; a failed read is an empty list."""
-    doc = _gh_doc([*_pr_args(opts, "checks"), "--json", fields])
+# gh's stderr when the PR has no checks at all: an answer, not a failed read.
+_NO_CHECKS_RE = re.compile(r"no checks reported", re.IGNORECASE)
+
+
+def _checks(opts: Options, fields: str) -> list[Mapping[str, Any]] | None:
+    """Return the PR's checks with ``fields``, or ``None`` if they can't be read.
+
+    Parameters
+    ----------
+    opts : Options
+        The parsed command line.
+    fields : str
+        The comma-separated ``--json`` fields to ask for.
+
+    Returns
+    -------
+    list[Mapping[str, Any]] | None
+        The checks -- empty when ``gh`` says none are reported -- or ``None``
+        when the read failed or its output isn't a JSON list.
+    """
+    result = _gh([*_pr_args(opts, "checks"), "--json", fields])
+    if result.returncode != 0:
+        return [] if _NO_CHECKS_RE.search(result.stderr) else None
+    try:
+        doc = json.loads(result.stdout)
+    except ValueError:
+        return None
     if not isinstance(doc, list):
-        return []
+        return None
     return [c for c in doc if isinstance(c, Mapping)]
 
 
@@ -876,7 +900,9 @@ def wait_for_checks(
     )
     while True:
         checks = _checks(opts, "name,bucket,state,link")
-        if not checks:
+        if checks is None:
+            _err("  (could not read the PR's checks — retrying)")
+        elif not checks:
             # A conflicting PR registers no checks -- and a merge state the
             # preflight saw as UNKNOWN may have resolved to CONFLICTING by now.
             _exit_if_conflicting(_merge_state(opts))
@@ -925,8 +951,17 @@ def wait_for_checks(
 
 
 def verdict(opts: Options) -> int:
-    """Return the exit code for the settled checks (0 mergeable, 1 not)."""
+    """Return the exit code for the settled checks (0 mergeable, 1 not, 2 unread)."""
     checks = _checks(opts, "name,bucket")
+    if checks is None:
+        _err(
+            "ERROR: could not read the PR's checks (gh pr checks failed), so "
+            "whether they passed is unknown. Re-run once gh can read them."
+        )
+        return EXIT_TIMEOUT
+    if not checks:
+        _err("No checks reported on the PR -- nothing passed or failed.")
+        return EXIT_OK
     fails = sum(
         1
         for c in checks
@@ -976,7 +1011,7 @@ def run(argv: Sequence[str]) -> int:
     # Final report: the full table on stdout so the caller can grep it.
     print("FINAL CHECK RESULTS:")
     _print_table(opts, sys.stdout)
-    final_names = {c.get("name") for c in _checks(opts, "name")}
+    final_names = {c.get("name") for c in _checks(opts, "name") or []}
     if report is None:
         report = reviewer_report(opts, reviewer)
     if report is not None:

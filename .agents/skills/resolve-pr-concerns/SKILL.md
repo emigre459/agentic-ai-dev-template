@@ -539,7 +539,7 @@ It first reads the merge state (a `CONFLICTING` / `DIRTY` PR runs no CI, so it e
 
 - `0` — all required checks passed; the PR is mergeable from a CI standpoint.
 - `1` — one or more checks failed/cancelled; loop back to Step 2 and treat the failure as a new concern. (A cancelled run of the review-gate workflow's `compute review gate status` job is superseded-run noise and doesn't count — unless no passing `review-gate` status exists.)
-- `2` — timed out (default 20 minutes, `--timeout-min`). Surface to the user; they decide whether to wait longer or investigate.
+- `2` — timed out (default 20 minutes, `--timeout-min`), or the final `gh pr checks` read failed so the result is unknown (`ERROR: could not read the PR's checks`) — never read that as a pass. Surface to the user; they decide whether to wait longer, re-run, or investigate.
 - `3` — the merge state blocks CI (`CONFLICTING` / `DIRTY`): resolve it (Step 2f), push, and run it again.
 - `64` — usage error, an explicit `--config` that doesn't exist, or an invalid `.github/pr-reviewer.json` (including an active reviewer with no `bot_logins`); fix the config. (A repo with **no** reviewer config, or `"active": null`, is fine — the helper notes it and waits on CI only, per Step 1b.)
 
