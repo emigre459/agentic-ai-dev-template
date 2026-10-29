@@ -18,7 +18,9 @@ broken.
 **How to apply**
 1. Run the canonical command from the skill's `SKILL.md` verbatim. The bundled
    helpers are stdlib-only, so they run with plain `python3` (no project env, no
-   `uv run`).
+   `uv run`). **Exception:** a skill whose `SKILL.md` says a helper needs a newer
+   Python runs it exactly the way that `SKILL.md` says — e.g. `upgrade-deps`'
+   `alert_status.py` needs 3.11+ (`tomllib`), so it runs with `uv run python`.
 2. If it seems stuck, don't assume failure: a permission prompt may be pending, or
    it may be doing real work. Use `run_in_background: true` for long scripts and
    read output progressively; check process state before declaring failure.
