@@ -229,7 +229,7 @@ resolves user logins only: a CODEOWNERS line naming a team (`@org/team`) or an e
 owner, alone or beside users, is skipped by this gate (as is a line with `!`, `[...]`
 or `\` in its pattern) and its paths are left to GitHub's own "Require review from
 Code Owners" rule, so turn that rule on if you rely on team owners. Without a
-CODEOWNERS file the ownership half does nothing.
+CODEOWNERS file, or with one naming no user owner, the ownership half does nothing.
 
 ## Threads
 

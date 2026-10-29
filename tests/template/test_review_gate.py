@@ -78,11 +78,35 @@ def test_a_running_review_is_pending_not_failed() -> None:
 @pytest.mark.parametrize("outcome", ["failed", "not_completed"])
 def test_a_failed_review_request_says_so(outcome: str) -> None:
     state, description = gate_status(
-        _state(verdict="none", incremental_review_outcome=outcome)
+        _state(
+            verdict="none",
+            incremental_review_outcome=outcome,
+            incremental_review_on_head=True,
+        )
     )
     assert state == "failure"
     assert "last review request did not complete" in description
     assert "`@coderabbitai review`" in description and "0123456" in description
+
+
+@pytest.mark.parametrize("outcome", ["failed", "not_completed"])
+def test_a_failed_request_on_an_older_commit_asks_for_a_review_of_the_head(
+    outcome: str,
+) -> None:
+    """A request that failed before the latest push says nothing about the head."""
+    state, description = gate_status(
+        _state(
+            verdict="none",
+            incremental_review_outcome=outcome,
+            incremental_review_on_head=False,
+        )
+    )
+    assert state == "failure"
+    assert "did not complete" not in description
+    assert (
+        description
+        == "CodeRabbit has not reviewed 0123456: post `@coderabbitai review`"
+    )
 
 
 def test_a_verdict_wins_over_a_later_failed_request() -> None:
@@ -256,6 +280,7 @@ def _inputs(**over: Any) -> Any:
         "files": ["src/app/analysis/x.py", "src/app/api/y.py"],
         "renamed_from": [],
         "reviews": [],
+        "head_sha": "f" * 40,
     }
     fields.update(over)
     return review_gate.OwnershipInputs(**fields)
@@ -310,10 +335,30 @@ def test_no_codeowners_on_the_default_branch_gates_nothing(
     assert review_gate.ownership_gate_status(REPO, 7, _state()["head_sha"]) is None
 
 
-def test_an_empty_codeowners_gates_nothing(monkeypatch: Any, tmp_path: Path) -> None:
-    """A file with no rules still turns the status on, but never fails it."""
-    _codeowners(monkeypatch, tmp_path, "# owners go here\n")
-    assert _owner_gate(monkeypatch, _inputs()) == OWNERS_CLEAR
+NO_USER_OWNER = pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "# owners go here\n",
+        "* @owner/all-devs\n/docs/ docs-team@example.com\n",
+        "[ab].py @octocat\n!keep.py @octocat\n",
+    ],
+    ids=["empty", "comments", "teams-and-emails", "unsupported-syntax"],
+)
+
+
+@NO_USER_OWNER
+def test_an_empty_codeowners_gates_nothing(
+    monkeypatch: Any, tmp_path: Path, text: str
+) -> None:
+    """A file naming no user owner counts as no file: the PR isn't even read."""
+    _codeowners(monkeypatch, tmp_path, text)
+
+    def _never(repo: str, pr: int) -> Any:
+        raise AssertionError("no enforceable owner: the PR must not be read")
+
+    monkeypatch.setattr(review_gate, "_ownership_inputs", _never)
+    assert review_gate.ownership_gate_status(REPO, 7, _state()["head_sha"]) is None
 
 
 def test_a_team_owned_codeowners_line_never_crashes_the_gate(
@@ -340,7 +385,11 @@ def test_ownership_inputs_read_author_files_renames_and_reviews(
     monkeypatch: Any,
 ) -> None:
     answers = {
-        f"repos/{REPO}/pulls/7": {"user": {"login": "reviewer-a"}, "changed_files": 2},
+        f"repos/{REPO}/pulls/7": {
+            "user": {"login": "reviewer-a"},
+            "changed_files": 2,
+            "head": {"sha": "c" * 40},
+        },
         f"repos/{REPO}/pulls/7/files?per_page=100": [
             {"filename": "a.py"},
             {"filename": "b.py", "previous_filename": "old/b.py"},
@@ -356,7 +405,12 @@ def test_ownership_inputs_read_author_files_renames_and_reviews(
     monkeypatch.setattr(review_gate.reviewer_state, "_gh_json", _json)
     got = review_gate._ownership_inputs(REPO, 7)
     assert got == review_gate.OwnershipInputs(
-        "reviewer-a", 2, ["a.py", "b.py"], ["old/b.py"], [{"state": "APPROVED"}]
+        "reviewer-a",
+        2,
+        ["a.py", "b.py"],
+        ["old/b.py"],
+        [{"state": "APPROVED"}],
+        "c" * 40,
     )
     assert all("--paginate" in c for c in calls if c[-1] != f"repos/{REPO}/pulls/7")
 
@@ -583,7 +637,6 @@ def test_codeowners_with_no_reviewer_posts_an_ownership_only_status(
     want: str,
 ) -> None:
     """CODEOWNERS alone turns the status on (with no reviewer half to add)."""
-    monkeypatch.setattr(review_gate, "_head_sha", lambda repo, pr: "f" * 40)
     monkeypatch.setattr(
         review_gate, "_ownership_inputs", lambda repo, pr: _inputs(reviews=reviews)
     )
@@ -597,10 +650,32 @@ def test_codeowners_with_no_reviewer_posts_an_ownership_only_status(
     assert "no PR reviewer" in capsys.readouterr().out
 
 
-def test_the_head_sha_is_read_from_the_pull(monkeypatch: Any) -> None:
+@TARGETS
+@NO_USER_OWNER
+def test_an_all_team_codeowners_counts_as_no_file_without_a_reviewer(
+    tmp_path: Path, monkeypatch: Any, capsys: Any, target: list[str], text: str
+) -> None:
+    """Invisible until needed: no user owner and no reviewer posts nothing."""
+
+    def _no_github(args: Any) -> Any:
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    monkeypatch.setattr(review_gate.reviewer_state, "_gh_json", _no_github)
+    assert _main_without_reviewer(tmp_path, monkeypatch, target, text) == []
+    out = capsys.readouterr().out
+    assert "no PR reviewer" in out and "CODEOWNERS half" not in out
+
+
+@NO_USER_OWNER
+def test_an_all_team_codeowners_leaves_the_reviewer_status_unchanged(
+    monkeypatch: Any, tmp_path: Path, text: str
+) -> None:
+    _codeowners(monkeypatch, tmp_path, text)
+    head = _Head([_state(verdict="none")])
+    monkeypatch.setattr(review_gate.reviewer_state, "collect_state", head.collect)
+    monkeypatch.setattr(review_gate, "_post", head.post)
     monkeypatch.setattr(
-        review_gate.reviewer_state,
-        "_gh_json",
-        lambda args: {"head": {"sha": "c" * 40}} if args[-1].endswith("/7") else None,
+        review_gate, "_current_gate_status", lambda repo, sha: head.current
     )
-    assert review_gate._head_sha(REPO, 7) == "c" * 40
+    review_gate.post_for_pr(REPO, 7, reviewer_state.load_reviewer(key="coderabbit"))
+    assert head.posts == [gate_status(_state(verdict="none"))]

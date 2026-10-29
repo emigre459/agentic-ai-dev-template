@@ -13,9 +13,11 @@ resolved, whatever the head.
 With a CODEOWNERS file (see ``path_owners``), a PR touching a path its author
 doesn't own also needs that path's owner to approve the head; that half is reported
 first. CODEOWNERS alone turns the status on: with no reviewer configured
-(``"active": null``) the status is the ownership half only. With neither, nothing is
-posted. Run by ``.github/workflows/review-gate.yml`` from the default branch's
-checkout, never from PR code, so a PR can't loosen the CODEOWNERS that gates it.
+(``"active": null``) the status is the ownership half only. A CODEOWNERS file that
+names no user owner (empty, or only team, email or unsupported-syntax lines, which
+``path_owners`` skips) counts as no file. With neither, nothing is posted. Run by
+``.github/workflows/review-gate.yml`` from the default branch's checkout, never from
+PR code, so a PR can't loosen the CODEOWNERS that gates it.
 """
 
 from __future__ import annotations
@@ -68,7 +70,9 @@ def gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
         # Pending, not failure: the reviewer's reply edit re-runs this workflow.
         if state.get("review_running"):
             return "pending", _clip(f"{name} is reviewing {sha7}")
-        if state.get("incremental_review_outcome") in ("failed", "not_completed"):
+        if state.get("incremental_review_on_head") and state.get(
+            "incremental_review_outcome"
+        ) in ("failed", "not_completed"):
             return "failure", _clip(
                 f"{name}'s last review request did not complete: "
                 f"post `{trigger}` for {sha7}"
@@ -173,6 +177,8 @@ class OwnershipInputs(NamedTuple):
         Old paths of renamed files.
     reviews : list[Mapping[str, Any]]
         The PR's reviews, oldest first.
+    head_sha : str
+        The PR's head commit when it was read.
     """
 
     author: str
@@ -180,6 +186,7 @@ class OwnershipInputs(NamedTuple):
     files: list[str]
     renamed_from: list[str]
     reviews: list[Mapping[str, Any]]
+    head_sha: str
 
 
 def _ownership_inputs(repo: str, pr: int) -> OwnershipInputs:
@@ -204,19 +211,21 @@ def _ownership_inputs(repo: str, pr: int) -> OwnershipInputs:
             f["previous_filename"] for f in listed if f.get("previous_filename")
         ],
         reviews=reviews,
+        head_sha=str(pull["head"]["sha"]),
     )
 
 
-def _head_sha(repo: str, pr: int) -> str:
-    """Return the PR's head commit (the reviewer state reads it when there is one)."""
-    pull = reviewer_state._gh_json(["api", f"repos/{repo}/pulls/{pr}"])
-    return str(pull["head"]["sha"])
-
-
 def _codeowners_rules() -> list[path_owners.Rule] | None:
-    """Return the checkout's CODEOWNERS rules, or None when it has no CODEOWNERS."""
+    """Return the checkout's CODEOWNERS rules, or None when there are none to enforce.
+
+    A file naming no user owner (empty, ownerless, or only lines ``path_owners``
+    skips) gates nothing, so it counts as no file: the gate stays invisible.
+    """
     path = path_owners.find_codeowners(REPO_ROOT)
-    return None if path is None else path_owners.load_rules(path)
+    if path is None:
+        return None
+    rules = path_owners.load_rules(path)
+    return rules if any(rule.owners for rule in rules) else None
 
 
 def ownership_gate_status(repo: str, pr: int, head_sha: str) -> tuple[str, str] | None:
@@ -236,21 +245,33 @@ def ownership_gate_status(repo: str, pr: int, head_sha: str) -> tuple[str, str] 
     tuple[str, str] or None
         ``("failure", description)`` while a path owner's approval is missing,
         ``("success", OWNERSHIP_CLEAR)`` when none is, or None when the default
-        branch has no CODEOWNERS file (the PR isn't read at all).
+        branch has no CODEOWNERS naming a user owner (the PR isn't read at all).
+    """
+    return _ownership(repo, pr, head_sha)[1]
+
+
+def _ownership(
+    repo: str, pr: int, head_sha: str | None
+) -> tuple[str, tuple[str, str] | None]:
+    """Return (head SHA, ownership status) for ``pr``; see ``ownership_gate_status``.
+
+    With ``head_sha`` None the head is the one the PR read reports (no reviewer
+    state to take it from), so the pull is fetched once.
     """
     rules = _codeowners_rules()
     if rules is None:
-        return None
+        return head_sha or "", None
     pr_in = _ownership_inputs(repo, pr)
+    head = head_sha or pr_in.head_sha
     status = path_owners.ownership_status(
         rules,
         pr_in.files,
         pr_in.author,
-        path_owners.approvers(pr_in.reviews, head_sha),
+        path_owners.approvers(pr_in.reviews, head),
         changed_files=pr_in.changed_files,
         renamed_from=pr_in.renamed_from,
     )
-    return status or ("success", OWNERSHIP_CLEAR)
+    return head, status or ("success", OWNERSHIP_CLEAR)
 
 
 def _current_gate_status(repo: str, sha: str) -> tuple[str, str] | None:
@@ -310,8 +331,7 @@ def _want(
     reviewer's gate decides, or the ownership half alone when there is no reviewer.
     """
     if adapter is None:
-        head_sha = _head_sha(repo, pr)
-        return head_sha, ownership_gate_status(repo, pr, head_sha)
+        return _ownership(repo, pr, None)
     state = reviewer_state.collect_state(repo, pr, adapter)
     head_sha = state["head_sha"]
     owners = ownership_gate_status(repo, pr, head_sha)
@@ -328,7 +348,7 @@ def post_for_pr(
     The gate fails while a path owner's approval is missing, whatever the reviewer's
     state; otherwise it is the reviewer's gate (``gate_status``). With no reviewer
     (``adapter`` None) it is the ownership half alone, and nothing is posted when
-    there is no CODEOWNERS file either.
+    there is no CODEOWNERS file naming a user owner either.
 
     Runs are never cancelled (a cancelled run is a red X on the PR and on `main`),
     so several can overlap. A run posts only when the head's newest status differs
