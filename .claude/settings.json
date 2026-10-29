@@ -33,7 +33,9 @@
       "Bash(gh pr view *)",
       "Bash(gh pr comment * bugbot run*)",
       "Bash(gh pr comment * @coderabbitai review*)",
-      "Bash(gh pr comment * @coderabbitai full review*)"
+      "Bash(gh pr comment * @coderabbitai full review*)",
+      "Bash(coderabbit usage --agent*)",
+      "Bash(coderabbit auth status --agent*)"
     ]
   }
 }

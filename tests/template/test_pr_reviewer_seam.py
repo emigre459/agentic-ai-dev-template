@@ -54,6 +54,14 @@ _FIELDS: dict[str, tuple[type | None, ...]] = {
     "final_review_done_pattern": (str, None),
     "final_review_failed_pattern": (str, None),
     "final_review_partial_pattern": (str, None),
+    # A refused (rate-limited) request: how to recognise it and how long to wait.
+    "rate_limited_pattern": (str, None),
+    "rate_limit_wait_pattern": (str, None),
+    "rate_limit_default_wait_minutes": (int, None),
+    "rate_limit_notice_marker": (str, None),
+    # Local review rounds and the local allowance check (null = PR rounds only).
+    "local_preflight": (dict, None),
+    "local_review": (dict, None),
 }
 _FINAL_REVIEW_FIELDS = tuple(f for f in _FIELDS if f.startswith(("final_", "command_")))
 
@@ -256,3 +264,98 @@ def test_old_vendor_named_rule_is_gone() -> None:
         if path.is_file() and old in path.read_text(errors="ignore")
     ]
     assert not stale, f"References to the renamed rule {old!r} remain: {stale}"
+
+
+@pytest.mark.parametrize("key", _KEYS)
+def test_every_preflight_command_is_allow_listed(key: str) -> None:
+    """The allowance check runs before every local round, so it must never prompt."""
+    preflight = _load_state().load_reviewer(key=key).local_preflight
+    if preflight is None:
+        pytest.skip(f"{key} declares no preflight")
+    allow = json.loads((_REPO / ".claude" / "settings.json").read_text())[
+        "permissions"
+    ]["allow"]
+    for command in (preflight.command, preflight.auth_command):
+        expected = f"Bash({' '.join(command)}*)"
+        assert expected in allow, (
+            f"Add {expected!r} to .claude/settings.json permissions.allow so "
+            f"review_preflight.py can read the {key} reviewer's capacity unprompted."
+        )
+
+
+def test_the_repo_config_loads_its_round_caps() -> None:
+    """A misspelled review_rounds knob fails loudly instead of falling back."""
+    caps = _load_state().load_round_caps()
+    assert caps.local_before_final >= 1 and caps.local_after_final >= 1
+
+
+# --- Wiring: the prose agents follow names the local rounds and the rate limit ---
+
+_BUILD = _SKILLS / "build-from-issue" / "SKILL.md"
+
+
+def _flat(path: Path) -> str:
+    return " ".join(path.read_text().split())
+
+
+def _section(text: str, heading: str) -> str:
+    """Return ``heading``'s section, up to the next heading of any level."""
+    section = text[text.index(heading) :]
+    rest = section[len(heading) :]
+    ends = [i for i in (rest.find(" ### "), rest.find(" ## ")) if i >= 0]
+    return section[: len(heading) + min(ends)] if ends else section
+
+
+def test_fix_rounds_run_locally_and_refusals_are_waited_out() -> None:
+    for path in (_SKILL, _RULE, _BUILD):
+        text = _flat(path)
+        assert "local_review.py" in text, path.name
+        assert "review_preflight.py" in text, path.name
+    for path in (_SKILL, _RULE):
+        text = _flat(path)
+        assert "rate_limit.refused" in text, path.name
+        assert "SAME request" in text, path.name
+
+
+def test_the_rate_limit_rule_forbids_escalating_a_refused_request() -> None:
+    section = _section(_flat(_SKILL), "### Review requests and the rate limit")
+    assert "never escalate" in section.lower()
+    assert "retry_after" in section
+    assert "remedy" in section
+    assert "recheck_after_seconds" in section
+    # The local check reads a different pool, so it must never gate a PR request.
+    assert "separate pool" in section
+    assert "never PR requests" in section
+
+
+def test_the_local_rounds_section_covers_every_status() -> None:
+    section = _section(_flat(_SKILL), "### Local review rounds")
+    for status in (
+        "reviewed",
+        "already_reviewed",
+        "exhausted",
+        "budget_spent",
+        "head_mismatch",
+        "failed",
+        "not_configured",
+    ):
+        assert f"`{status}`" in section, status
+    assert "max_local_before_final" in section
+    assert "max_local_after_final" in section
+    assert "draft" in section
+    assert "record_body" in section
+
+
+def test_a_local_reviewer_skips_the_trigger_step() -> None:
+    skill = _SKILL.read_text()
+    step5 = skill[skill.index("## Step 5: ") : skill.index("## Step 5a")]
+    assert "local review skips this step" in step5
+    step4d = skill[skill.index("### 4d.") : skill.index("## Step 5: ")]
+    assert "local round on the new head" in step4d
+
+
+def test_the_preflight_documents_that_it_never_gates_a_pr_request() -> None:
+    script = _SKILLS / "resolve-pr-concerns" / "scripts" / "review_preflight.py"
+    doc = " ".join(script.read_text().split('"""')[1].split())
+    assert "never gates a PR review request" in doc
+    assert "separate pool" in doc
