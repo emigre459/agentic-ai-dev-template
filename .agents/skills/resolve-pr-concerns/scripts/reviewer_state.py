@@ -30,6 +30,14 @@ against an allowance separate from the PR quota), the fix rounds run locally thr
 ``local_review.py`` and are budgeted here from the records it leaves on the PR
 (``review_rounds`` in the config). Such a reviewer never needs a PR trigger: the PR's
 one review request is the final full review.
+
+Also returns ``incremental_review_outcome``: the reviewer's answer to the newest
+trigger comment (``finished``, ``no_changes``, ``failed``, ``not_completed``,
+``pending``, or ``not_requested`` / ``not_tracked``), read from its command replies.
+``incremental_review_on_head`` says whether that request covered the current head
+(it was posted once the head reached the PR, by ``head_committed_at`` and
+``head_first_status_at``), and ``review_running`` that it is still running on this
+head, so ``needs_trigger`` stays false instead of stacking a second request.
 """
 
 from __future__ import annotations
@@ -712,6 +720,9 @@ query($owner:String!, $name:String!, $pr:Int!) {
     pullRequest(number:$pr) {
       headRefOid
       mergeStateStatus
+      commits(last: 1) {
+        nodes { commit { committedDate } }
+      }
       reviewThreads(first:100) {
         nodes {
           id
@@ -765,22 +776,49 @@ def review_verdict(
     reviews: Iterable[Mapping[str, Any]],
     head_sha: str | None,
     adapter: ReviewerAdapter,
+    windows: Sequence[tuple[str, str]] = (),
 ) -> tuple[str, int]:
     """Return (verdict, finding_count) for the newest reviewer summary on head_sha.
 
-    verdict is "pass" (clean), "findings" (N inline findings), or "none"
-    (the reviewer has not reviewed this SHA — trigger it).
+    A summary carrying a verdict decides. Without one, a reviewer review or summary
+    on ``head_sha`` that carries no verdict (an empty-body or nitpick-only review; a
+    summary naming ``head_sha`` as reviewed) passes only inside one of ``windows``
+    -- see ``finished_windows``. Outside them it proves nothing: the reviewer also
+    posts empty reviews to hold its thread replies, even while its review is failing.
+
+    Parameters
+    ----------
+    reviews : Iterable[Mapping[str, Any]]
+        PR reviews as returned by the GitHub API (summary comments shaped by
+        ``_comment_as_review`` may be among them).
+    head_sha : str or None
+        Head commit SHA to judge; ``None`` matches any commit.
+    adapter : ReviewerAdapter
+        Configured reviewer adapter.
+    windows : Sequence[tuple[str, str]]
+        Completed review windows from ``finished_windows``.
+
+    Returns
+    -------
+    tuple[str, int]
+        ``"pass"`` (clean), ``"findings"`` (with the reported count), or ``"none"``
+        (the reviewer has not reviewed this SHA -- trigger it), and the count.
     """
-    candidates = [
+    on_head = [
         r
         for r in reviews
         if (r.get("user") or {}).get("login") in adapter.bot_logins
         and _live(r)
-        and _is_summary(r.get("body") or "", adapter)
         and _on_head(r, head_sha, adapter)
     ]
+    candidates = [r for r in on_head if _is_summary(r.get("body") or "", adapter)]
     if not candidates:
-        return ("none", 0)
+        in_window = any(
+            start <= (r.get("submitted_at") or "") <= end
+            for r in on_head
+            for start, end in windows
+        )
+        return ("pass", 0) if in_window else ("none", 0)
     newest = max(candidates, key=lambda r: r.get("submitted_at") or "")
     body = newest.get("body") or ""
     if adapter.clean_pattern.search(body):
@@ -863,6 +901,15 @@ def unthreaded_findings(
                 if text:
                     found.append({"source": source, "id": item.get("id"), "text": text})
     return found
+
+
+def _requests(ordered: Sequence[Mapping[str, Any]], command: str) -> list[str]:
+    """Return the creation times of the comments that are exactly ``command``."""
+    return [
+        c.get("created_at") or ""
+        for c in ordered
+        if (c.get("body") or "").strip() == command
+    ]
 
 
 def _replies_between(
@@ -1223,6 +1270,142 @@ def local_review_state(
     }
 
 
+class IncrementalReview(NamedTuple):
+    """The reviewer's answer to the newest trigger comment."""
+
+    outcome: str
+    requested_at: str | None
+    replied_at: str | None
+
+
+def _verdict_review_since(
+    reviews: Iterable[Mapping[str, Any]],
+    head_sha: str,
+    since: str,
+    adapter: ReviewerAdapter,
+) -> list[str]:
+    """Return when the reviewer posted verdict-bearing reviews of ``head_sha`` since.
+
+    Only a review carrying a verdict counts: an empty or nitpick-only one also holds
+    thread replies, so it says nothing about which request it answers.
+    """
+    return [
+        r.get("submitted_at") or ""
+        for r in reviews
+        if r.get("commit_id") == head_sha
+        and ((r.get("user") or {}).get("login")) in adapter.bot_logins
+        and _live(r)
+        and _is_summary(r.get("body") or "", adapter)
+        and (r.get("submitted_at") or "") >= since
+    ]
+
+
+def incremental_review(
+    comments: Iterable[Mapping[str, Any]],
+    adapter: ReviewerAdapter,
+    reviews: Iterable[Mapping[str, Any]] = (),
+    head_sha: str | None = None,
+) -> IncrementalReview:
+    """Classify the reviewer's answer to the newest trigger comment.
+
+    Every reply after the newest trigger counts, so a reply to an earlier trigger
+    that lands late is attributed to the newest. The reply is not the only signal:
+    it can lag the review by minutes. A verdict-bearing reviewer review on
+    ``head_sha`` submitted after the trigger also answers it (``"finished"``, with
+    ``replied_at`` that review's time). A verdict-less review does not: the reviewer
+    posts those to hold thread replies too.
+
+    Parameters
+    ----------
+    comments : Iterable[Mapping[str, Any]]
+        PR issue comments.
+    adapter : ReviewerAdapter
+        Configured reviewer adapter.
+    reviews : Iterable[Mapping[str, Any]]
+        PR reviews, to detect a review that landed before its reply moved.
+    head_sha : str or None
+        Head commit SHA a landed review must be on; ``None`` skips that check.
+
+    Returns
+    -------
+    IncrementalReview
+        ``outcome`` is ``"not_tracked"`` (the adapter has no incremental reply
+        patterns), ``"not_requested"`` (no trigger comment yet), ``"pending"`` (no
+        answer yet), or ``"finished"`` / ``"no_changes"`` / ``"failed"`` /
+        ``"not_completed"``; with the request and reply times.
+    """
+    patterns = (
+        adapter.incremental_review_done_pattern,
+        adapter.incremental_review_no_changes_pattern,
+        adapter.incremental_review_failed_pattern,
+        adapter.incremental_review_partial_pattern,
+    )
+    if patterns[0] is None:
+        return IncrementalReview("not_tracked", None, None)
+    ordered = sorted(comments, key=_created)
+    starts = _requests(ordered, adapter.trigger_comment)
+    if not starts:
+        return IncrementalReview("not_requested", None, None)
+    requested = starts[-1]
+    replies = _replies_between(requested, None, ordered, adapter)
+    outcomes = ("finished", "no_changes", "failed", "not_completed")
+    for outcome, pattern in zip(outcomes, patterns):
+        for reply in replies:
+            if pattern is not None and pattern.search(reply.get("body") or ""):
+                return IncrementalReview(outcome, requested, _created(reply))
+    if head_sha is not None:
+        landed = _verdict_review_since(reviews, head_sha, requested, adapter)
+        if landed:
+            return IncrementalReview("finished", requested, min(landed))
+    return IncrementalReview("pending", requested, None)
+
+
+def finished_windows(
+    comments: Iterable[Mapping[str, Any]], adapter: ReviewerAdapter
+) -> list[tuple[str, str]]:
+    """Return ``(request, reply's last edit)`` for every review request that finished.
+
+    Both trigger and full-review requests count. A review the reviewer posted inside
+    one of these windows is part of a review that ran to completion. A window also
+    ends at the next request of either kind: a late edit to one request's reply must
+    not vouch for reviews posted while a later request ran (and maybe failed).
+
+    Parameters
+    ----------
+    comments : Iterable[Mapping[str, Any]]
+        PR issue comments.
+    adapter : ReviewerAdapter
+        Configured reviewer adapter.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        ``(request time, end time)`` pairs, the end being the done reply's last
+        edit or the next request, whichever is earlier.
+    """
+    ordered = sorted(comments, key=_created)
+    commands = [
+        (command, done)
+        for command, done in (
+            (adapter.trigger_comment, adapter.incremental_review_done_pattern),
+            (adapter.final_review_comment, adapter.final_review_done_pattern),
+        )
+        if command is not None and done is not None
+    ]
+    every_start = sorted(
+        t for command, _ in commands for t in _requests(ordered, command)
+    )
+    windows: list[tuple[str, str]] = []
+    for command, done in commands:
+        starts = _requests(ordered, command)
+        for start, end in zip(starts, [*starts[1:], None]):
+            later = [t for t in every_start if t > start]
+            for reply in _replies_between(start, end, ordered, adapter):
+                if done.search(reply.get("body") or ""):
+                    windows.append((start, min([_edited(reply), *later[:1]])))
+    return windows
+
+
 def _comment_as_review(comment: Mapping[str, Any]) -> dict[str, Any]:
     """Shape an issue-comment like a review so ``review_verdict`` can judge it.
 
@@ -1303,32 +1486,61 @@ def collect_state(
     )
     pull = graph["data"]["repository"]["pullRequest"]
     head_sha = pull["headRefOid"]
+    commit_nodes = (pull.get("commits") or {}).get("nodes") or []
+    committed_at = (
+        ((commit_nodes[-1] or {}).get("commit") or {}).get("committedDate") or ""
+        if commit_nodes
+        else ""
+    )
     threads = pull["reviewThreads"]["nodes"]
     raw_reviews = (
         _gh_json(["api", f"repos/{repo}/pulls/{pr}/reviews", "--paginate"]) or []
     )
-    comments: list[Any] = []
-    if (
-        adapter.summary_in_issue_comments
-        or adapter.final_review_comment is not None
-        or adapter.rate_limited_pattern is not None
-        or adapter.local_review is not None
-    ):
-        comments = (
-            _gh_json(["api", f"repos/{repo}/issues/{pr}/comments", "--paginate"]) or []
-        )
+    # Always read the issue comments: trigger comments are issue comments, and the
+    # incremental outcome counts them for every reviewer.
+    comments: list[Any] = (
+        _gh_json(["api", f"repos/{repo}/issues/{pr}/comments", "--paginate"]) or []
+    )
     reviews = list(raw_reviews)
     if adapter.summary_in_issue_comments:
         # Some reviewers post a clean re-review as an empty review and keep the
         # verdict in an issue-comment they edit in place (see the adapter notes).
         reviews += [_comment_as_review(c) for c in comments]
+    # When did the head reach the PR? committedDate is the commit's time, not the
+    # push's: a commit made, then a trigger posted, then the push, would read as
+    # "requested after the head". The head's first commit status is posted after the
+    # push (the review gate posts one on every push), so the later of the two bounds
+    # it. Only a reviewer whose replies are tracked needs it.
+    first_status = ""
+    if adapter.incremental_review_done_pattern is not None:
+        statuses = (
+            _gh_json(["api", f"repos/{repo}/commits/{head_sha}/statuses", "--paginate"])
+            or []
+        )
+        first_status = min((st.get("created_at") or "" for st in statuses), default="")
+    head_at = max(committed_at, first_status)
     final = final_review_outcome(comments, raw_reviews, adapter)
+    incremental = incremental_review(comments, adapter, raw_reviews, head_sha)
+    windows = finished_windows(comments, adapter)
 
-    verdict, count = review_verdict(reviews, head_sha, adapter)
+    verdict, count = review_verdict(reviews, head_sha, adapter, windows)
+    # A trigger older than the head asked about an earlier commit, so its answer
+    # (running, or "no changes") says nothing about this head. A verdict-bearing
+    # reviewer review of this head posted after the request also proves the request
+    # covered it (a trigger posted seconds after a push can beat the first status).
+    # Not a verdict-less one: those also hold thread replies.
+    requested = incremental.requested_at
+    on_head = requested is not None and (
+        requested >= head_at
+        or bool(_verdict_review_since(raw_reviews, head_sha, requested, adapter))
+    )
+    running = incremental.outcome == "pending" and on_head
     findings = open_findings(threads, adapter)
     unresolved_total = sum(1 for t in threads if not t.get("isResolved"))
     return {
         "head_sha": head_sha,
+        "head_committed_at": committed_at or None,
+        "head_first_status_at": first_status or None,
         # UNKNOWN when GitHub has not computed it yet, or when the PR is MERGED.
         # Treat UNKNOWN as "do not act", never as "not BEHIND".
         "merge_state_status": pull["mergeStateStatus"],
@@ -1341,10 +1553,20 @@ def collect_state(
         "reported_finding_count": count,
         "open_findings": findings,
         "unresolved_thread_total": unresolved_total,
+        "incremental_review_outcome": incremental.outcome,
+        "incremental_review_on_head": on_head,
+        # The newest trigger covered this head and has no answer yet: wait for it
+        # rather than stack a second request.
+        "review_running": running,
+        "unthreaded_findings": unthreaded_findings(
+            raw_reviews, comments, head_sha, adapter
+        ),
         # A reviewer with a local review never takes a trigger on the PR: its fix
         # rounds run locally (``local_review.py``) and the PR's one review request
         # is the final full review.
-        "needs_trigger": verdict == "none" and adapter.local_review is None,
+        "needs_trigger": verdict == "none"
+        and not running
+        and adapter.local_review is None,
         "final_review_comment": adapter.final_review_comment,
         "final_review_outcome": final,
         "needs_final_review": final not in ("finished", "not_required"),

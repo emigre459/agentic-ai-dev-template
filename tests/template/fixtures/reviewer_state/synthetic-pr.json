@@ -1,0 +1,443 @@
+{
+  "_source": "Synthetic timeline for owner/repo PR 1, written for tests/template/test_reviewer_state.py; no real PR. Bodies are placeholders that carry only the markers the reviewer adapter reads.",
+  "repo": "owner/repo",
+  "pr": 1,
+  "commits": [
+    {
+      "oid": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+      "committedDate": "2026-01-15T08:20:00Z"
+    },
+    {
+      "oid": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+      "committedDate": "2026-01-15T10:00:00Z"
+    },
+    {
+      "oid": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+      "committedDate": "2026-01-15T11:00:00Z"
+    },
+    {
+      "oid": "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
+      "committedDate": "2026-01-15T11:20:00Z"
+    },
+    {
+      "oid": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+      "committedDate": "2026-01-15T13:00:00Z"
+    },
+    {
+      "oid": "6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+      "committedDate": "2026-01-15T14:00:00Z"
+    },
+    {
+      "oid": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+      "committedDate": "2026-01-15T15:00:00Z"
+    }
+  ],
+  "statuses": {
+    "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a": [
+      {
+        "context": "ci",
+        "state": "success",
+        "created_at": "2026-01-15T08:20:30Z"
+      }
+    ],
+    "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b": [
+      {
+        "context": "ci",
+        "state": "success",
+        "created_at": "2026-01-15T10:00:30Z"
+      }
+    ],
+    "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c": [
+      {
+        "context": "ci",
+        "state": "success",
+        "created_at": "2026-01-15T11:00:05Z"
+      }
+    ],
+    "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d": [
+      {
+        "context": "ci",
+        "state": "success",
+        "created_at": "2026-01-15T11:21:00Z"
+      }
+    ],
+    "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e": [
+      {
+        "context": "ci",
+        "state": "success",
+        "created_at": "2026-01-15T13:00:05Z"
+      }
+    ],
+    "6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f": [
+      {
+        "context": "ci",
+        "state": "success",
+        "created_at": "2026-01-15T14:00:05Z"
+      }
+    ],
+    "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a": [
+      {
+        "context": "ci",
+        "state": "success",
+        "created_at": "2026-01-15T15:00:05Z"
+      }
+    ]
+  },
+  "comments": [
+    {
+      "id": 100,
+      "body": "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\nPlaceholder walkthrough.\n<!-- final_review_risk_start -->**Merge Risk:** placeholder risk on empty input.<!-- final_review_risk_end -->\n<!-- {\"coveredCommitId\": \"6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f\"} -->\nchange_assessment_commit: \"6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f\"",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "created_at": "2026-01-15T08:00:00Z",
+      "updated_at": "2026-01-15T14:11:00Z"
+    },
+    {
+      "id": 101,
+      "body": "@coderabbitai review",
+      "user": {
+        "login": "octocat"
+      },
+      "created_at": "2026-01-15T08:30:00Z",
+      "updated_at": "2026-01-15T08:30:00Z"
+    },
+    {
+      "id": 102,
+      "body": "<!-- This is an auto-generated reply by CodeRabbit -->\nAction performed. Review finished. Note: placeholder text from an incremental review system.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "created_at": "2026-01-15T08:30:20Z",
+      "updated_at": "2026-01-15T08:45:00Z"
+    },
+    {
+      "id": 103,
+      "body": "@coderabbitai review",
+      "user": {
+        "login": "octocat"
+      },
+      "created_at": "2026-01-15T10:01:00Z",
+      "updated_at": "2026-01-15T10:01:00Z"
+    },
+    {
+      "id": 104,
+      "body": "<!-- This is an auto-generated reply by CodeRabbit -->\nAction failed. Review failed. Note: placeholder text from an incremental review system.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "created_at": "2026-01-15T10:01:10Z",
+      "updated_at": "2026-01-15T10:01:14Z"
+    },
+    {
+      "id": 105,
+      "body": "@coderabbitai review",
+      "user": {
+        "login": "octocat"
+      },
+      "created_at": "2026-01-15T10:30:00Z",
+      "updated_at": "2026-01-15T10:30:00Z"
+    },
+    {
+      "id": 106,
+      "body": "<!-- This is an auto-generated reply by CodeRabbit -->\nAction performed. Review finished. Note: placeholder text from an incremental review system.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "created_at": "2026-01-15T10:30:10Z",
+      "updated_at": "2026-01-15T10:50:00Z"
+    },
+    {
+      "id": 107,
+      "body": "@coderabbitai review",
+      "user": {
+        "login": "octocat"
+      },
+      "created_at": "2026-01-15T11:00:15Z",
+      "updated_at": "2026-01-15T11:00:15Z"
+    },
+    {
+      "id": 108,
+      "body": "<!-- This is an auto-generated reply by CodeRabbit -->\nAction performed. Review finished. Note: placeholder text from an incremental review system.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "created_at": "2026-01-15T11:00:30Z",
+      "updated_at": "2026-01-15T11:10:00Z"
+    },
+    {
+      "id": 109,
+      "body": "@coderabbitai full review",
+      "user": {
+        "login": "octocat"
+      },
+      "created_at": "2026-01-15T11:25:00Z",
+      "updated_at": "2026-01-15T11:25:00Z"
+    },
+    {
+      "id": 110,
+      "body": "<!-- This is an auto-generated reply by CodeRabbit -->\nAction not completed. Head commit changed.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "created_at": "2026-01-15T11:25:10Z",
+      "updated_at": "2026-01-15T11:28:00Z"
+    },
+    {
+      "id": 111,
+      "body": "@coderabbitai review",
+      "user": {
+        "login": "octocat"
+      },
+      "created_at": "2026-01-15T11:26:00Z",
+      "updated_at": "2026-01-15T11:26:00Z"
+    },
+    {
+      "id": 112,
+      "body": "<!-- This is an auto-generated reply by CodeRabbit -->\nAction not completed. No files to review. Note: placeholder text from an incremental review system.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "created_at": "2026-01-15T11:30:00Z",
+      "updated_at": "2026-01-15T11:30:20Z"
+    },
+    {
+      "id": 113,
+      "body": "@coderabbitai full review",
+      "user": {
+        "login": "octocat"
+      },
+      "created_at": "2026-01-15T12:00:00Z",
+      "updated_at": "2026-01-15T12:00:00Z"
+    },
+    {
+      "id": 114,
+      "body": "<!-- This is an auto-generated reply by CodeRabbit -->\nAction performed. Full review finished.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "created_at": "2026-01-15T12:00:10Z",
+      "updated_at": "2026-01-15T12:20:00Z"
+    },
+    {
+      "id": 115,
+      "body": "@coderabbitai review",
+      "user": {
+        "login": "octocat"
+      },
+      "created_at": "2026-01-15T13:00:10Z",
+      "updated_at": "2026-01-15T13:00:10Z"
+    },
+    {
+      "id": 116,
+      "body": "<!-- This is an auto-generated reply by CodeRabbit -->\nAction performed. Review finished. Note: placeholder text from an incremental review system.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "created_at": "2026-01-15T13:01:00Z",
+      "updated_at": "2026-01-15T13:10:00Z"
+    },
+    {
+      "id": 117,
+      "body": "@coderabbitai review",
+      "user": {
+        "login": "octocat"
+      },
+      "created_at": "2026-01-15T14:00:10Z",
+      "updated_at": "2026-01-15T14:00:10Z"
+    },
+    {
+      "id": 118,
+      "body": "<!-- This is an auto-generated reply by CodeRabbit -->\nAction performed. Review finished. Note: placeholder text from an incremental review system.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "created_at": "2026-01-15T14:00:40Z",
+      "updated_at": "2026-01-15T14:12:00Z"
+    },
+    {
+      "id": 119,
+      "body": "@coderabbitai review",
+      "user": {
+        "login": "octocat"
+      },
+      "created_at": "2026-01-15T15:00:10Z",
+      "updated_at": "2026-01-15T15:00:10Z"
+    },
+    {
+      "id": 120,
+      "body": "<!-- This is an auto-generated reply by CodeRabbit -->\nAction performed. Review finished. Note: placeholder text from an incremental review system.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "created_at": "2026-01-15T15:00:40Z",
+      "updated_at": "2026-01-15T15:20:00Z"
+    }
+  ],
+  "reviews": [
+    {
+      "id": 200,
+      "body": "**Actionable comments posted: 2**\n\nPlaceholder summary.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T08:40:00Z"
+    },
+    {
+      "id": 201,
+      "body": "",
+      "user": {
+        "login": "reviewer-a"
+      },
+      "commit_id": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T10:00:50Z"
+    },
+    {
+      "id": 202,
+      "body": "",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T10:01:11Z"
+    },
+    {
+      "id": 203,
+      "body": "",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T10:01:13Z"
+    },
+    {
+      "id": 204,
+      "body": "",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T10:01:15Z"
+    },
+    {
+      "id": 205,
+      "body": "",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T10:01:30Z"
+    },
+    {
+      "id": 206,
+      "body": "**Actionable comments posted: 1**\n\n**Outside diff range comments (1)**\n\n`src/app/other.py:3-4`: placeholder finding.\n\n---\n\nPlaceholder footer.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T10:40:00Z"
+    },
+    {
+      "id": 207,
+      "body": "",
+      "user": {
+        "login": "reviewer-a"
+      },
+      "commit_id": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T11:00:10Z"
+    },
+    {
+      "id": 208,
+      "body": "",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T11:00:45Z"
+    },
+    {
+      "id": 209,
+      "body": "**Actionable comments posted: 3**\n\nPlaceholder summary.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T12:15:00Z"
+    },
+    {
+      "id": 210,
+      "body": "",
+      "user": {
+        "login": "reviewer-a"
+      },
+      "commit_id": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T13:00:05Z"
+    },
+    {
+      "id": 211,
+      "body": "",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T13:00:30Z"
+    },
+    {
+      "id": 212,
+      "body": "",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T13:00:45Z"
+    },
+    {
+      "id": 213,
+      "body": "Reviewing files that changed from the base of the PR and between 3c3c3c3 and 5e5e5e5.\n\nNitpick comments (1): placeholder nit.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T13:06:00Z"
+    },
+    {
+      "id": 214,
+      "body": "**Outside diff range comments (1)**\n\n`src/app/example.py:10-12`: placeholder finding.\n\n---\n\nPrompt to fix review comments: placeholder.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T14:08:00Z"
+    },
+    {
+      "id": 215,
+      "body": "**Outside diff range comments (1)**\n\n`src/app/example.py:20-22`: placeholder finding.\n\n---\n\nPrompt to fix review comments: placeholder.",
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
+      "commit_id": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+      "state": "COMMENTED",
+      "submitted_at": "2026-01-15T15:15:00Z"
+    }
+  ],
+  "in_progress_reply": {
+    "comment_id": 120,
+    "body": "<!-- This is an auto-generated reply by CodeRabbit -->\nAction performed. Review triggered. Note: placeholder text from an incremental review system."
+  }
+}
