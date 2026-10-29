@@ -38,18 +38,33 @@ trigger comment (``finished``, ``no_changes``, ``failed``, ``not_completed``,
 (it was posted once the head reached the PR, by ``head_committed_at`` and
 ``head_first_status_at``), and ``review_running`` that it is still running on this
 head, so ``needs_trigger`` stays false instead of stacking a second request.
+
+Also returns ``round_budget``: the PR's incremental review rounds (exact trigger
+comments) counted before and after its first final full review, against the caps in
+``review_rounds`` (or ``--max-rounds-before-final`` / ``--max-rounds-after-final``
+for one run). A request that failed, was refused for the rate limit, or (when a
+verdict carried) was answered "no files to review" spends no round. A reviewer with
+a local review gets no PR incremental rounds.
+
+Also returns ``verdict_carried_from`` / ``verdict_carry_reason``: a head with no
+verdict of its own inherits the newest reviewed commit's verdict when the reviewer
+replied "no files to review" to a request that covered it (``no_changes``), or when
+the head's own diff is the same patch that commit was reviewed on (``same_patch``)
+-- a rebase or a merge from the base that changed nothing in the PR's own diff.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess  # nosec B404 -- fixed gh argv, no shell
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import quote
 
 # scripts/ -> resolve-pr-concerns/ -> skills/ -> .agents/ -> repo root
 DEFAULT_CONFIG_PATH = (
@@ -356,12 +371,14 @@ class ReviewerAdapter(NamedTuple):
 class RoundCaps(NamedTuple):
     """How many review rounds a PR gets around its final full review.
 
-    Set in ``.github/pr-reviewer.json`` under ``review_rounds``. ``before_final`` and
-    ``after_final`` count incremental PR reviews (the trigger comment) before and
-    after the final full review; ``fix_iterations`` is the fix loop's outer safety
-    net (the agent counts its passes, this is only the limit). The ``local_*`` caps
-    apply only to a reviewer that declares ``local_review``: its fix rounds run
-    locally, before the PR's one final full review and after it.
+    Set in ``.github/pr-reviewer.json`` under ``review_rounds`` (raise the PR caps
+    for one run with ``--max-rounds-before-final`` / ``--max-rounds-after-final``).
+    ``before_final`` and ``after_final`` count incremental PR reviews (the trigger
+    comment) before and after the final full review; ``fix_iterations`` is the fix
+    loop's outer safety net (the agent counts its passes, this is only the limit).
+    The ``local_*`` caps apply only to a reviewer that declares ``local_review``: its
+    fix rounds run locally, before the PR's one final full review and after it, and
+    ``pr_round_caps`` gives it no PR incremental rounds.
     """
 
     before_final: int = 1
@@ -730,6 +747,27 @@ query($owner:String!, $name:String!, $pr:Int!) {
           comments(first:1) {
             nodes { author { login } path line body }
           }
+        }
+      }
+    }
+  }
+}
+"""
+
+# Its own query, not part of _THREADS_QUERY: only a head with no verdict needs it.
+_BASE_EVENTS_QUERY = """
+query($owner:String!, $name:String!, $pr:Int!) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$pr) {
+      baseRefOid
+      timelineItems(
+        last: 100, itemTypes: [BASE_REF_FORCE_PUSHED_EVENT, BASE_REF_CHANGED_EVENT]
+      ) {
+        pageInfo { hasPreviousPage }
+        nodes {
+          __typename
+          ... on BaseRefForcePushedEvent { createdAt beforeCommit { oid } }
+          ... on BaseRefChangedEvent { createdAt }
         }
       }
     }
@@ -1216,6 +1254,29 @@ def _first_final_at(
     return None
 
 
+def pr_round_caps(adapter: ReviewerAdapter, caps: RoundCaps) -> RoundCaps:
+    """Return the PR incremental caps for this reviewer.
+
+    A reviewer with a local review spends its fix rounds locally, so the PR gets no
+    incremental rounds: its one review request is the final full review.
+
+    Parameters
+    ----------
+    adapter : ReviewerAdapter
+        Configured reviewer adapter.
+    caps : RoundCaps
+        Configured round caps.
+
+    Returns
+    -------
+    RoundCaps
+        ``caps``, with zero PR incremental rounds when ``local_review`` is set.
+    """
+    if adapter.local_review is None:
+        return caps
+    return caps._replace(before_final=0, after_final=0)
+
+
 def local_review_state(
     comments: Iterable[Mapping[str, Any]],
     adapter: ReviewerAdapter,
@@ -1406,6 +1467,403 @@ def finished_windows(
     return windows
 
 
+class CarrySource(NamedTuple):
+    """The reviewed commit whose verdict a head may inherit."""
+
+    sha: str
+    verdict: str
+    finding_count: int
+    # The commit's earliest live reviewer review: the base it saw is the base then.
+    reviewed_at: str
+
+
+def carry_source(
+    reviews: Sequence[Mapping[str, Any]],
+    head_sha: str,
+    adapter: ReviewerAdapter,
+    windows: Sequence[tuple[str, str]],
+    before: str | None = None,
+) -> CarrySource | None:
+    """Return the newest reviewed commit other than the head that has a verdict.
+
+    Only the newest counts as a source: an older commit's verdict never stands in
+    for a newer review. A commit whose reviews carry no verdict (e.g. its review
+    failed after thread-reply reviews) is skipped.
+
+    Parameters
+    ----------
+    reviews : Sequence[Mapping[str, Any]]
+        PR reviews as returned by the GitHub API.
+    head_sha : str
+        Current head SHA, excluded as a source.
+    adapter : ReviewerAdapter
+        Configured reviewer adapter.
+    windows : Sequence[tuple[str, str]]
+        Completed review windows from ``finished_windows``.
+    before : str or None
+        Only consider reviews submitted at or before this timestamp.
+
+    Returns
+    -------
+    CarrySource or None
+        The newest reviewed commit carrying a verdict, or ``None``.
+    """
+    earlier = sorted(
+        (
+            r
+            for r in reviews
+            if ((r.get("user") or {}).get("login")) in adapter.bot_logins
+            and _live(r)
+            and r.get("commit_id") not in (None, head_sha)
+            and (before is None or (r.get("submitted_at") or "") <= before)
+        ),
+        key=lambda r: r.get("submitted_at") or "",
+        reverse=True,
+    )
+    seen: set[str] = set()
+    for review in earlier:
+        sha = review["commit_id"]
+        if sha in seen:
+            continue
+        seen.add(sha)
+        verdict, count = review_verdict(reviews, sha, adapter, windows)
+        if verdict != "none":
+            reviewed_at = min(
+                r.get("submitted_at") or "" for r in earlier if r["commit_id"] == sha
+            )
+            return CarrySource(sha, verdict, count, reviewed_at)
+    return None
+
+
+# The numbers in a hunk header move with the base; the change under them doesn't.
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.MULTILINE)
+# GitHub's compare API lists at most 300 files, so a list that long may be cut off.
+_COMPARE_FILE_CAP = 300
+
+#: The most size-omitted patches one compare may resolve by blob pair. Each costs
+#: one contents call, and the review gate's sweep runs on every open PR, so a
+#: compare with more of them than this is not vouched for (no carry).
+_OMITTED_PATCH_LOOKUP_CAP = 20
+
+#: ``(path, ref) -> blob SHA`` of ``path`` at commit ``ref``, or ``None`` when unknown.
+BaseBlob = Callable[[str, str], "str | None"]
+
+
+def patch_fingerprint(compare: Any, base_blob: BaseBlob | None = None) -> str | None:
+    """Hash the diff in one compare response, ignoring hunk line numbers.
+
+    Two commits with the same fingerprint make the same change to the same files,
+    wherever their bases put it -- ``git patch-id``'s rule. A file with no patch and
+    no changed lines (a binary, or a rename with no edits) counts by its blob SHA.
+
+    A text file whose patch GitHub left out for size counts by its blob PAIR when
+    ``base_blob`` is given: its blob at the compare's merge base and at the head.
+    The same pair is the same change, exactly, so one very large file doesn't block
+    every carry.
+
+    Parameters
+    ----------
+    compare : Any
+        GitHub compare API response.
+    base_blob : BaseBlob or None
+        Looks up a file's blob SHA at a commit, to fingerprint size-omitted patches.
+
+    Returns
+    -------
+    str or None
+        The fingerprint; ``None`` when the response can't vouch for the whole
+        diff: a list at GitHub's 300-file cap, a payload of any other shape, or a
+        size-omitted patch whose blob pair can't be read (no ``base_blob``, an
+        unknown base blob, no merge base, a removed or copied file, or more than
+        ``_OMITTED_PATCH_LOOKUP_CAP`` such files).
+    """
+    files = compare.get("files") if isinstance(compare, Mapping) else None
+    if (
+        not isinstance(files, list)
+        or len(files) >= _COMPARE_FILE_CAP
+        or not all(isinstance(f, Mapping) for f in files)
+    ):
+        return None
+    omitted = [f for f in files if _patch_omitted_for_size(f)]
+    if omitted and (base_blob is None or len(omitted) > _OMITTED_PATCH_LOOKUP_CAP):
+        return None
+    merge_base = _merge_base_sha(compare)
+    digest = hashlib.sha256()
+    for entry in sorted(files, key=lambda f: str(f.get("filename") or "")):
+        if not _patch_omitted_for_size(entry):
+            body = _file_body(entry)
+        elif base_blob is not None:  # always set here: checked above
+            body = _omitted_body(entry, merge_base, base_blob)
+        else:
+            body = None
+        if body is None:
+            return None
+        for part in (
+            entry["status"],
+            entry.get("previous_filename"),
+            entry["filename"],
+            body,
+        ):
+            digest.update(str(part or "").encode())
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _patch_omitted_for_size(entry: Mapping[str, Any]) -> bool:
+    """Return whether GitHub left a text file's patch out (no patch, lines changed)."""
+    changes = entry.get("changes")
+    return (
+        entry.get("patch") is None
+        and isinstance(changes, int)
+        and not isinstance(changes, bool)
+        and changes > 0
+    )
+
+
+def _merge_base_sha(compare: Mapping[str, Any]) -> str | None:
+    """Return the compare's merge-base commit SHA, or ``None`` when it is missing."""
+    commit = compare.get("merge_base_commit")
+    sha = commit.get("sha") if isinstance(commit, Mapping) else None
+    return sha if isinstance(sha, str) and sha else None
+
+
+def _omitted_body(
+    entry: Mapping[str, Any], merge_base: str | None, base_blob: BaseBlob
+) -> str | None:
+    """Return a size-omitted file's blob pair, or ``None`` if it can't be read.
+
+    The head-side blob is the entry's own ``sha``. The base-side blob is read at the
+    merge base: from the old path for a rename, and none at all for an added file.
+    A removed, copied or otherwise-shaped entry is ``None`` (not vouched for).
+    """
+    status, head = entry.get("status"), entry.get("sha")
+    if (
+        not isinstance(head, str)
+        or not head
+        or not isinstance(entry.get("filename"), str)
+    ):
+        return None
+    if status == "added":
+        return f"omitted-patch none -> {head}"
+    if status == "modified":
+        path = entry["filename"]
+    elif status == "renamed" and isinstance(entry.get("previous_filename"), str):
+        path = entry["previous_filename"]
+    else:
+        return None
+    if merge_base is None:
+        return None
+    base = base_blob(path, merge_base)
+    if not isinstance(base, str) or not base:
+        return None
+    return f"omitted-patch {base} -> {head}"
+
+
+def _file_body(entry: Mapping[str, Any]) -> str | None:
+    """Return what one compare file entry contributes, or ``None`` if it can't vouch.
+
+    A text change is its patch with hunk numbers removed. A file with no patch must
+    show zero changed lines and a blob SHA (a binary, or a rename with no edits);
+    anything else -- a patch GitHub left out for size, a missing name or status --
+    is ``None``, so two incomplete entries can never fingerprint alike.
+    """
+    for field in ("filename", "status"):
+        if not isinstance(entry.get(field), str) or not entry[field]:
+            return None
+    patch = entry.get("patch")
+    if isinstance(patch, str):
+        return _HUNK_HEADER.sub("@@", patch)
+    changes, sha = entry.get("changes"), entry.get("sha")
+    if (
+        patch is not None
+        or isinstance(changes, bool)
+        or changes != 0
+        or not isinstance(sha, str)
+        or not sha
+    ):
+        return None
+    return f"blob {sha}"
+
+
+def base_at_review(
+    events: Iterable[Any],
+    reviewed_at: str,
+    current_base: str,
+    *,
+    complete: bool,
+) -> str | None:
+    """Return a commit on the base lineage the PR had at ``reviewed_at``.
+
+    The first base event at or after the review decides. A force-push gives the tip
+    it replaced, which fast-forward pushes since the review only extended, so its
+    merge-base with the reviewed commit is the base that review saw. No later event
+    gives ``current_base``. A retarget (``BaseRefChangedEvent``) records no commit,
+    so the base is unknown, and so is a node GraphQL couldn't resolve (it may be a
+    retarget). When older events may be missing, the events must reach back past
+    the review to be trusted.
+
+    Parameters
+    ----------
+    events : Iterable[Any]
+        Base-ref timeline events of the PR (GraphQL nodes; an unresolved one is
+        ``null``).
+    reviewed_at : str
+        Timestamp of the review.
+    current_base : str
+        The PR's current base commit.
+    complete : bool
+        Whether ``events`` is the PR's full event history.
+
+    Returns
+    -------
+    str or None
+        A commit on the base lineage at ``reviewed_at``, or ``None`` when unknown.
+    """
+    listed = list(events)
+    if not all(isinstance(e, Mapping) for e in listed):
+        return None
+    ordered = sorted(listed, key=lambda e: e.get("createdAt") or "")
+    if not complete and (
+        not ordered or (ordered[0].get("createdAt") or "") >= reviewed_at
+    ):
+        return None
+    for event in ordered:
+        if (event.get("createdAt") or "") < reviewed_at:
+            continue
+        if event.get("__typename") != "BaseRefForcePushedEvent":
+            return None
+        oid = (event.get("beforeCommit") or {}).get("oid")
+        return oid if isinstance(oid, str) and oid else None
+    return current_base
+
+
+def round_budget(
+    comments: Iterable[Mapping[str, Any]],
+    adapter: ReviewerAdapter,
+    caps: RoundCaps,
+    *,
+    free_no_changes: bool = True,
+) -> dict[str, Any]:
+    """Count the incremental rounds already requested on this PR against the caps.
+
+    A round is one trigger comment (the exact ``trigger_comment``) that the reviewer
+    did not answer with "failed" or "no changes" ("not completed" still counts: the
+    review often posted), nor refuse for its rate limit (``rate_limited_pattern``;
+    a refused final-review request doesn't start the after-final phase either).
+    Rounds before the first final-review request and rounds after it are budgeted
+    separately, split by position in the comment stream. A reviewer with no final
+    review gets one budget of both caps combined.
+
+    Parameters
+    ----------
+    comments : Iterable[Mapping[str, Any]]
+        PR issue comments.
+    adapter : ReviewerAdapter
+        Configured reviewer adapter.
+    caps : RoundCaps
+        Round caps to budget against (``pr_round_caps`` for the live PR).
+    free_no_changes : bool
+        Whether a "no changes" answer leaves the round uncounted. ``False`` counts
+        it: with no verdict to carry, re-posting would get the same answer forever,
+        so the budget must bound it.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``phase``; ``incremental_before_final`` / ``incremental_after_final`` as
+        ``{"used": int, "cap": int}``; ``trigger_allowed`` (another trigger fits in
+        the current phase); ``final_review_due`` (the before-final budget is spent,
+        so the next review is the final full review); and ``max_fix_iterations``,
+        the fix loop's outer limit, passed through so the skills read it from here.
+    """
+    ordered = sorted(comments, key=_created)
+
+    def _is(comment: Mapping[str, Any], command: str | None) -> bool:
+        return command is not None and (comment.get("body") or "").strip() == command
+
+    requests = [
+        i
+        for i, c in enumerate(ordered)
+        if _is(c, adapter.trigger_comment) or _is(c, adapter.final_review_comment)
+    ]
+
+    def _window(position: int) -> list[Mapping[str, Any]]:
+        """Return the reviewer's replies to one request, up to the next request."""
+        end = (
+            _created(ordered[requests[position + 1]])
+            if position + 1 < len(requests)
+            else None
+        )
+        return _replies_between(
+            _created(ordered[requests[position]]), end, ordered, adapter
+        )
+
+    # A request refused for the rate limit never ran. It spends no round, and a
+    # refused final request doesn't start the after-final phase -- or one refusal
+    # would make the final review "due" and invite a second refused request.
+    limited = adapter.rate_limited_pattern
+    refused = {
+        requests[position]
+        for position in range(len(requests))
+        if limited is not None
+        and any(limited.search(r.get("body") or "") for r in _window(position))
+    }
+    first_final = next(
+        (
+            i
+            for i in requests
+            if i not in refused and _is(ordered[i], adapter.final_review_comment)
+        ),
+        None,
+    )
+    # Only an outright failure is not a round. "Not completed" often means just the
+    # summary failed while the review itself posted, so it counts; its retry is
+    # governed by ``trigger_allowed`` like any other trigger.
+    failed = adapter.incremental_review_failed_pattern
+    no_changes = adapter.incremental_review_no_changes_pattern
+    before_used = after_used = 0
+    for position, i in enumerate(requests):
+        if i in refused or not _is(ordered[i], adapter.trigger_comment):
+            continue
+        # A request the reviewer answered "failed" is not a round: re-posting it must
+        # not spend the budget. Nor is one answered "no files to review": the head's
+        # verdict carried from the commit before it.
+        replies = _window(position)
+        if any(
+            pattern is not None and pattern.search(r.get("body") or "")
+            for r in replies
+            for pattern in (failed, no_changes if free_no_changes else None)
+        ):
+            continue
+        # Partition by position, not timestamp: a trigger that ties with the final
+        # request must land in exactly one phase.
+        if first_final is None or i < first_final:
+            before_used += 1
+        else:
+            after_used += 1
+    if adapter.final_review_comment is None:
+        before = {"used": before_used, "cap": caps.before_final + caps.after_final}
+        after = {"used": 0, "cap": 0}
+        phase = "before_final"
+    else:
+        before = {"used": before_used, "cap": caps.before_final}
+        after = {"used": after_used, "cap": caps.after_final}
+        phase = "after_final" if first_final is not None else "before_final"
+    current = after if phase == "after_final" else before
+    return {
+        "phase": phase,
+        "incremental_before_final": before,
+        "incremental_after_final": after,
+        "trigger_allowed": current["used"] < current["cap"],
+        "final_review_due": (
+            adapter.final_review_comment is not None
+            and phase == "before_final"
+            and before["used"] >= before["cap"]
+        ),
+        "max_fix_iterations": caps.fix_iterations,
+    }
+
+
 def _comment_as_review(comment: Mapping[str, Any]) -> dict[str, Any]:
     """Shape an issue-comment like a review so ``review_verdict`` can judge it.
 
@@ -1445,6 +1903,104 @@ def _gh_json(args: Sequence[str]) -> Any:
     return docs[0] if len(docs) == 1 else docs
 
 
+def _compare(repo: str, base: str, head: str) -> Any:
+    """Return GitHub's compare of ``base...head``.
+
+    ``per_page=1`` pages the commit list only; page one always lists every file.
+    """
+    return _gh_json(["api", f"repos/{repo}/compare/{base}...{head}?per_page=1"])
+
+
+def _blob_at(repo: str, path: str, ref: str) -> str | None:
+    """Return ``path``'s blob SHA at commit ``ref`` from the contents API.
+
+    A directory listing, or any payload without a file ``sha``, is ``None``. A
+    missing path makes ``gh`` fail, which the caller treats as "no carry".
+    """
+    payload = _gh_json(
+        ["api", f"repos/{repo}/contents/{quote(path, safe='/')}?ref={ref}"]
+    )
+    if not isinstance(payload, Mapping) or payload.get("type") != "file":
+        return None
+    sha = payload.get("sha")
+    return sha if isinstance(sha, str) and sha else None
+
+
+def _same_patch_carry(repo: str, pr: int, head_sha: str, source: CarrySource) -> bool:
+    """Return whether the head's own diff is the same patch ``source`` was reviewed on.
+
+    The head's own diff is from the PR's current base; the source's is from the base
+    the PR had when it was reviewed (``base_at_review``). Any doubt -- a missing
+    field, a payload of the wrong shape, an unknown base, an incomplete compare, a
+    ``gh`` error or output that isn't JSON -- is ``False``: the head then needs a
+    review of its own.
+
+    Parameters
+    ----------
+    repo : str
+        Repository as ``owner/name``.
+    pr : int
+        Pull request number.
+    head_sha : str
+        The PR's current head.
+    source : CarrySource
+        The reviewed commit whose verdict the head would inherit.
+
+    Returns
+    -------
+    bool
+        Whether both diffs fingerprint alike.
+    """
+    owner, name = repo.split("/", 1)
+    try:
+        graph = _gh_json(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={_BASE_EVENTS_QUERY}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"name={name}",
+                "-F",
+                f"pr={pr}",
+            ]
+        )
+        pull: Any = graph
+        for key in ("data", "repository", "pullRequest"):
+            pull = pull.get(key) if isinstance(pull, Mapping) else None
+        if not isinstance(pull, Mapping):
+            return False
+        current = pull.get("baseRefOid")
+        timeline = pull.get("timelineItems")
+        nodes = timeline.get("nodes") if isinstance(timeline, Mapping) else None
+        if not isinstance(current, str) or not current or not isinstance(nodes, list):
+            return False
+        page = timeline.get("pageInfo") if isinstance(timeline, Mapping) else None
+        has_previous = (
+            page.get("hasPreviousPage") if isinstance(page, Mapping) else None
+        )
+        # An unknown page state is not a complete timeline.
+        if not isinstance(has_previous, bool):
+            return False
+        base = base_at_review(
+            nodes, source.reviewed_at, current, complete=not has_previous
+        )
+        if base is None:
+            return False
+
+        def blob(path: str, ref: str) -> str | None:
+            return _blob_at(repo, path, ref)
+
+        head_print = patch_fingerprint(_compare(repo, current, head_sha), blob)
+        if head_print is None:
+            return False
+        return head_print == patch_fingerprint(_compare(repo, base, source.sha), blob)
+    except (subprocess.CalledProcessError, ValueError):
+        return False
+
+
 def collect_state(
     repo: str,
     pr: int,
@@ -1462,7 +2018,8 @@ def collect_state(
     adapter : ReviewerAdapter
         Configured reviewer adapter.
     caps : RoundCaps
-        Local review round caps (``review_rounds`` in the config).
+        Round caps (``review_rounds`` in the config) for the PR's round budget and
+        its local review rounds.
 
     Returns
     -------
@@ -1534,6 +2091,24 @@ def collect_state(
         requested >= head_at
         or bool(_verdict_review_since(raw_reviews, head_sha, requested, adapter))
     )
+    carried_from: str | None = None
+    carry_reason: str | None = None
+    if verdict == "none" and incremental.outcome == "no_changes" and on_head:
+        # The reviewer had nothing new on this head: the newest verdict it had given
+        # by the time it said so still describes it.
+        source = carry_source(
+            reviews, head_sha, adapter, windows, before=incremental.replied_at or ""
+        )
+        if source is not None:
+            verdict, count = source.verdict, source.finding_count
+            carried_from, carry_reason = source.sha, "no_changes"
+    if verdict == "none":
+        # A rebase or a merge from the base gave the head a new SHA but not a new
+        # diff, so the newest verdict still describes it.
+        source = carry_source(reviews, head_sha, adapter, windows)
+        if source is not None and _same_patch_carry(repo, pr, head_sha, source):
+            verdict, count = source.verdict, source.finding_count
+            carried_from, carry_reason = source.sha, "same_patch"
     running = incremental.outcome == "pending" and on_head
     findings = open_findings(threads, adapter)
     unresolved_total = sum(1 for t in threads if not t.get("isResolved"))
@@ -1551,6 +2126,8 @@ def collect_state(
         "self_resolves_threads": adapter.self_resolves_threads,
         "verdict": verdict,
         "reported_finding_count": count,
+        "verdict_carried_from": carried_from,
+        "verdict_carry_reason": carry_reason,
         "open_findings": findings,
         "unresolved_thread_total": unresolved_total,
         "incremental_review_outcome": incremental.outcome,
@@ -1574,11 +2151,54 @@ def collect_state(
         # retry_after, then re-post the SAME request. Never escalate.
         "rate_limit": rate_limit_state(comments, adapter),
         "local_review": local_review_state(comments, adapter, caps, head_sha),
+        # "No changes" is free unless the head is left with no verdict: then the
+        # budget must bound re-posting a trigger that gets the same answer.
+        "round_budget": round_budget(
+            comments,
+            adapter,
+            pr_round_caps(adapter, caps),
+            free_no_changes=not (
+                incremental.outcome == "no_changes" and verdict == "none"
+            ),
+        ),
     }
 
 
+def _non_negative_int(value: str) -> int:
+    """Parse a round-cap CLI value, applying the same rule as ``load_round_caps``.
+
+    Parameters
+    ----------
+    value : str
+        The flag's value.
+
+    Returns
+    -------
+    int
+        The cap.
+
+    Raises
+    ------
+    argparse.ArgumentTypeError
+        The value is not an integer, or is negative.
+    """
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"a round cap must be an integer, got {value!r}"
+        ) from None
+    if number < 0:
+        raise argparse.ArgumentTypeError(f"a round cap must be >= 0, got {number}")
+    return number
+
+
 def main() -> None:
-    """Print ``collect_state`` for ``--repo`` / ``--pr`` as JSON."""
+    """Print ``collect_state`` for ``--repo`` / ``--pr`` as JSON.
+
+    ``--max-rounds-before-final`` / ``--max-rounds-after-final`` override the
+    configured PR incremental caps for this run only.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="owner/name")
     parser.add_argument("--pr", required=True, type=int)
@@ -1588,6 +2208,18 @@ def main() -> None:
         default=None,
         help=f"reviewer config (default: {DEFAULT_CONFIG_PATH})",
     )
+    parser.add_argument(
+        "--max-rounds-before-final",
+        type=_non_negative_int,
+        default=None,
+        help="override review_rounds.max_incremental_before_final for this run",
+    )
+    parser.add_argument(
+        "--max-rounds-after-final",
+        type=_non_negative_int,
+        default=None,
+        help="override review_rounds.max_incremental_after_final for this run",
+    )
     args = parser.parse_args()
     try:
         adapter = load_reviewer(args.config)
@@ -1595,6 +2227,10 @@ def main() -> None:
         print(json.dumps({"reviewer": None, "configured": False, "detail": str(exc)}))
         return
     caps = load_round_caps(args.config)
+    if args.max_rounds_before_final is not None:
+        caps = caps._replace(before_final=args.max_rounds_before_final)
+    if args.max_rounds_after_final is not None:
+        caps = caps._replace(after_final=args.max_rounds_after_final)
     print(json.dumps(collect_state(args.repo, args.pr, adapter, caps), indent=2))
 
 

@@ -580,6 +580,7 @@ def test_bugbot_never_takes_its_verdict_from_issue_comments(monkeypatch: Any) ->
     state = reviewer_state.collect_state("octo/example", 1, BUGBOT)
     assert state["verdict"] == "none"
     assert sum("issues/" in call for call in calls) == 1
+    assert state["round_budget"]["incremental_before_final"]["used"] == 0
 
 
 def test_loader_non_bool_summary_in_issue_comments_raises(tmp_path: Path) -> None:
@@ -2014,18 +2015,25 @@ def test_synthetic_collect_state_case_1_a_failed_review_needs_a_retrigger(
     assert state["head_first_status_at"] == _at("10:00:30")
 
 
-def test_synthetic_collect_state_case_3_reports_no_changes_on_the_head(
+def test_synthetic_collect_state_case_3_carries_the_verdict_past_a_no_changes_head(
     monkeypatch: Any,
 ) -> None:
     """The head had nothing new to review, and the request covered it.
 
-    Whether the earlier clean window's verdict carries onto it is the verdict-carry
-    rule's business, not this one's.
+    The commit before it passed inside a finished window, so its verdict carries.
     """
     state = _state_as_of(monkeypatch, "11:40:00", HEAD_NO_CHANGES)
     assert state["incremental_review_outcome"] == "no_changes"
     assert state["incremental_review_on_head"] is True
     assert state["review_running"] is False
+    assert (state["verdict"], state["reported_finding_count"]) == ("pass", 0)
+    assert state["verdict_carried_from"] == "3c" * 20
+    assert state["verdict_carry_reason"] == "no_changes"
+    assert state["needs_trigger"] is False
+    # The 11:26 trigger follows the 11:25 full-review request; with a verdict
+    # carried, its "no files to review" answer spends no round.
+    assert state["round_budget"]["phase"] == "after_final"
+    assert state["round_budget"]["incremental_after_final"]["used"] == 0
 
 
 def test_synthetic_collect_state_no_carry_forward_for_a_head_newer_than_the_reply(
@@ -2237,6 +2245,40 @@ def test_a_status_before_the_request_keeps_it_on_head(monkeypatch: Any) -> None:
     )
     assert state["head_first_status_at"] == _at("11:21:00")
     assert state["incremental_review_on_head"] is True
+    assert state["verdict"] == "pass"
+    assert state["verdict_carry_reason"] == "no_changes"
+
+
+def test_carry_forward_skips_an_earlier_commit_with_no_verdict(
+    monkeypatch: Any,
+) -> None:
+    """A passed; B's review failed (only thread-reply reviews); C had no changes."""
+    a, b, c = "a" * 40, "b" * 40, "c" * 40
+    comments = [
+        _command("2026-01-15T10:00:00Z", body="@coderabbitai review"),
+        _comment(_INCREMENTAL_DONE, "2026-01-15T10:00:05Z", "2026-01-15T10:03:00Z"),
+        _command("2026-01-15T10:10:00Z", body="@coderabbitai review"),
+        _comment(_INCREMENTAL_FAILED, "2026-01-15T10:10:05Z", "2026-01-15T10:10:08Z"),
+        _command("2026-01-15T10:20:00Z", body="@coderabbitai review"),
+        _comment(
+            _reply_body(_NO_CHANGES_REPLY_ID),
+            "2026-01-15T10:20:05Z",
+            "2026-01-15T10:20:09Z",
+        ),
+    ]
+    reviews = [
+        _rabbit("", commit=a, submitted="2026-01-15T10:02:00Z"),
+        _rabbit("", commit=b, submitted="2026-01-15T10:10:06Z"),
+    ]
+    monkeypatch.setattr(
+        reviewer_state,
+        "_gh_json",
+        _fake_gh_timeline(comments, reviews, c, "2026-01-15T10:15:00Z", []),
+    )
+    state = reviewer_state.collect_state("owner/repo", 1, CODERABBIT_PR)
+    assert state["incremental_review_outcome"] == "no_changes"
+    assert (state["verdict"], state["needs_trigger"]) == ("pass", False)
+    assert state["verdict_carried_from"] == a
 
 
 def test_bugbot_never_reads_head_statuses(monkeypatch: Any) -> None:
