@@ -35,7 +35,7 @@ convention = "numpy"
 
 [tool.mypy]
 python_version = "3.13"
-# Cross-module type-checking best practice (learned in gridium-agent, issue #1430).
+# Cross-module type-checking best practice (learned in a downstream repo).
 # This template type-checks scripts/ + tests/ only. When you add a first-party
 # package under src/<name>/, you MUST also (1) uncomment "src" in `files` below
 # and (2) keep mypy_path set (add explicit_package_bases = true too if tests/
