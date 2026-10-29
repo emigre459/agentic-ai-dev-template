@@ -537,3 +537,83 @@ def test_the_pr_round_budget_is_scoped_away_from_a_local_reviewer() -> None:
     assert "for a reviewer without a local review, `round_budget.final_review_due`" in (
         step5a
     )
+
+
+# --- build-from-issue: the downstream improvements, and opt-in stacked PRs ---
+
+_BUILD_STACK_REF = _SKILLS / "build-from-issue" / "references" / "stacked-prs.md"
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        # Step 1: a number the user names wins over the branch's number.
+        "target issue number",
+        "branch-derived issue number",
+        # Step 11: Closes only when the PR completes the card.
+        "`Refs #N`",
+        # Step 11: the local CI mirror gates PR creation; make tests is not the gate.
+        "make pr_check",
+        "`make tests` is not the PR gate",
+        # Step 7b: the kit lands in the PR diff; the self-review rides alongside.
+        "docs/superpowers/test-kits/",
+        "explain-diff-merge-review",
+        # Step 11b: posting to Slack is opt-in.
+        "off by default",
+        # Stacked PRs are opt-in, documented in this skill's own reference.
+        "references/stacked-prs.md",
+        "gh stack --help",
+        # Step 12: merge-ready is a report built from actual check results.
+        "wait_for_pr_checks.py",
+        "one-off",
+        # Canonical-ahead items that must survive the port.
+        "There is no changelog step",
+        '"active": null',
+        "retry_after",
+        "CONFLICTING",
+        "DIRTY",
+        "[Other tracks ready next:",
+        ".agents/rules/shared/push-every-commit.md",
+        ".agents/skills/clean-up-kanban/SKILL.md",
+        ".agents/rules/shared/checkpoint-commits.md",
+    ],
+)
+def test_build_from_issue_names_each_ported_behavior(phrase: str) -> None:
+    assert phrase in _flat(_BUILD), phrase
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "4-option menu",
+        "no — merged/kept/discarded",
+        "run_quicktest",
+    ],
+)
+def test_build_from_issue_drops_the_finishing_menu_and_product_leftovers(
+    phrase: str,
+) -> None:
+    assert phrase not in _flat(_BUILD), phrase
+
+
+def test_build_from_issue_stack_reference_keeps_the_policy() -> None:
+    text = _flat(_BUILD_STACK_REF)
+    for phrase in (
+        "One PR is the default",
+        "4 layers",
+        "300 files",
+        "/plan-issues",
+        "## Stack",
+        "gh stack --help",
+        "gh extension install github/gh-stack",
+        "npx skills add github/gh-stack",
+        "never installs",
+        "make pr_check",
+        "gh stack submit",
+        "Refs #N",
+        "Closes #N",
+        "merge queue",
+        "never `gh pr merge`",
+        "resolve-pr-concerns",
+    ):
+        assert phrase in text, phrase
