@@ -52,6 +52,10 @@ REQUIRED = ("ci / lint", "ci / tests")
 GREEN = {name: "success" for name in REQUIRED}
 HEAD = "a" * 40
 NOT_FOUND = "gh: Not Found (HTTP 404)"
+THREADS_BLOCKER = (
+    "{n} unresolved review thread(s); the base branch's rules require resolution: "
+    "a human resolves answered threads (the agent never resolves them)"
+)
 
 
 def _gate(**overrides: Any) -> Any:
@@ -235,6 +239,7 @@ def test_no_reviewer_keeps_the_other_halves() -> None:
     verdict = _gate(
         reviewer_verdict=None,
         unresolved_thread_total=1,
+        threads_must_resolve=True,
         changes_requested_by=["octocat"],
         check_conclusions={"ci / lint": "failure", "ci / tests": "success"},
     )
@@ -251,9 +256,43 @@ def test_unthreaded_findings_are_info_not_blockers() -> None:
 
 
 def test_unresolved_non_reviewer_thread_blocks() -> None:
-    verdict = _gate(unresolved_thread_total=1)
+    """With thread resolution required by the rules, any open thread blocks."""
+    verdict = _gate(unresolved_thread_total=1, threads_must_resolve=True)
     assert verdict["mergeable"] is False
-    assert verdict["blockers"] == ["1 unresolved review thread(s)"]
+    assert verdict["blockers"] == [THREADS_BLOCKER.format(n=1)]
+    assert verdict["info"]["unresolved_threads"] == 1
+
+
+def test_unresolved_threads_block_only_when_the_rules_require_resolution() -> None:
+    required = _gate(unresolved_thread_total=2, threads_must_resolve=True)
+    assert required["mergeable"] is False
+    not_required = _gate(unresolved_thread_total=2, threads_must_resolve=False)
+    assert not_required["mergeable"] is True
+    assert not_required["blockers"] == []
+    assert not_required["info"]["unresolved_threads"] == 2
+    assert any(
+        "2 unresolved review thread(s)" in note and "not a blocker" in note
+        for note in not_required["info"]["notes"]
+    )
+    assert _gate(unresolved_thread_total=2)["mergeable"] is True  # default: not
+
+
+def test_the_threads_blocker_leaves_resolution_to_a_human() -> None:
+    (blocker,) = _gate(unresolved_thread_total=1, threads_must_resolve=True)["blockers"]
+    assert "human" in blocker and "never resolves" in blocker
+
+
+def test_threads_must_resolve_reads_the_pull_request_rule() -> None:
+    assert merge_gate.threads_must_resolve(_RULES) is True
+    off = [
+        {
+            "type": "pull_request",
+            "parameters": {"required_review_thread_resolution": False},
+        }
+    ]
+    assert merge_gate.threads_must_resolve(off) is False
+    assert merge_gate.threads_must_resolve([{"type": "deletion"}]) is False
+    assert merge_gate.threads_must_resolve(None) is False  # a 404
 
 
 def _final_gate(outcome: str) -> Any:
@@ -423,6 +462,7 @@ def test_the_output_never_says_merge() -> None:
             reviewer_verdict="weird",
             open_reviewer_findings=1,
             unresolved_thread_total=2,
+            threads_must_resolve=True,
             acceptance_audit_clean=False,
             changes_requested_by=["octocat"],
             final_review_outcome="failed",
@@ -440,6 +480,7 @@ def test_the_output_never_says_merge() -> None:
             unthreaded_findings=[{"source": "review", "id": 1, "text": "t"}],
         ),
         _gate(merge_state_status="DIRTY"),
+        _gate(unresolved_thread_total=3, threads_must_resolve=False),
     ]
     verdicts.append(merge_gate.evaluate_stack([(1, verdicts[0]), (2, verdicts[2])]))
     verdicts.append(merge_gate.single_layer_stack(5, verdicts[0]))
@@ -449,10 +490,50 @@ def test_the_output_never_says_merge() -> None:
         assert not offending, offending
 
 
-def test_the_script_never_runs_a_merge() -> None:
+_MERGE_PATH_RE = re.compile(r"/merges?(?:/|\?|$)")
+
+
+def _assert_reads_only(calls: list[list[str]]) -> None:
+    """Every ``gh`` call is a read: no ``pr merge``, no merge API, no write method."""
+    assert calls
+    for call in calls:
+        assert call[:2] != ["pr", "merge"], call
+        assert "merge" not in call[:3], call
+        assert not any(flag in call for flag in ("-X", "--method")), call
+        if call[0] == "pr":
+            assert call[1] == "view", call
+            continue
+        assert call[0] == "api", call
+        if call[1] == "graphql":
+            query = next(a for a in call if a.startswith("query="))
+            assert "mutation" not in query, call
+        else:
+            assert not _MERGE_PATH_RE.search(call[1]), call
+
+
+def test_the_script_never_runs_a_merge(
+    fake_gh: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Drive every collection path and check the argv of each ``gh`` call."""
     source = _SCRIPT.read_text()
     assert '"merge"' not in source and "'merge'" not in source
     assert "pr merge" not in source
+    stacks = [{"number": 1, "pull_requests": [{"number": 3}, {"number": 4}]}]
+    fake = fake_gh(stacks=stacks, threads=[[False]])
+    merge_gate.collect_and_evaluate(REPO, 3)
+    merge_gate.collect_and_evaluate(
+        REPO, 3, config_path=_config(tmp_path, _local_reviewer_key())
+    )
+    merge_gate.collect_and_evaluate_stack(REPO, 4)
+    _assert_reads_only(fake.calls)
+    for argv in (["--pr", "4", "--stack"], ["--pr", "3"]):
+        fake = fake_gh(stacks=stacks)
+        _main(monkeypatch, *argv)
+        _assert_reads_only(fake.calls)
+    capsys.readouterr()
 
 
 # --- stacks --------------------------------------------------------------------
@@ -744,7 +825,7 @@ def test_collect_reads_threads_checks_and_statuses_on_every_page(
     verdict = merge_gate.collect_and_evaluate(REPO, 1)
     assert verdict["blockers"] == [
         "required check not green: ci / tests = failure",
-        "2 unresolved review thread(s)",
+        THREADS_BLOCKER.format(n=2),
     ]
     lists = [c for c in fake.calls if c[0] == "api" and c[1] != "graphql"]
     assert lists and all("--paginate" in c for c in lists)
@@ -783,6 +864,51 @@ def test_collect_reads_the_strict_policy_from_the_rules(fake_gh: Any) -> None:
     assert merge_gate.collect_and_evaluate(REPO, 1)["mergeable"] is False
     fake_gh(merge_state="BEHIND")
     assert merge_gate.collect_and_evaluate(REPO, 1)["mergeable"] is True
+
+
+def test_collect_with_a_rules_404_lists_threads_as_info(fake_gh: Any) -> None:
+    fake_gh(rules="404", threads=[[False, False]])
+    verdict = merge_gate.collect_and_evaluate(REPO, 1)
+    assert verdict["blockers"] == []
+    assert verdict["info"]["unresolved_threads"] == 2
+    assert verdict["info"]["threads_must_resolve"] is False
+
+
+def test_collect_blocks_on_threads_the_rules_require_resolved(fake_gh: Any) -> None:
+    fake_gh(threads=[[False]])
+    verdict = merge_gate.collect_and_evaluate(REPO, 1)
+    assert verdict["blockers"] == [THREADS_BLOCKER.format(n=1)]
+    loose = json.loads(json.dumps(_RULES))
+    loose[0]["parameters"]["required_review_thread_resolution"] = False
+    fake_gh(rules=loose, threads=[[False]])
+    assert merge_gate.collect_and_evaluate(REPO, 1)["blockers"] == []
+
+
+def test_a_non_list_rules_payload_is_an_error(fake_gh: Any) -> None:
+    fake_gh(rules={"message": "unexpected"})
+    with pytest.raises(ValueError, match="expected a list of rules"):
+        merge_gate.branch_rules(REPO, "main")
+
+
+def test_an_empty_rules_payload_is_no_rules(fake_gh: Any) -> None:
+    fake_gh(rules=None)
+    assert merge_gate.branch_rules(REPO, "main") == []
+
+
+def test_no_required_checks_rule_notes_classic_protection_is_not_read() -> None:
+    verdict = _gate(required_checks=None)
+    assert any(
+        "classic branch protection is not" in note for note in verdict["info"]["notes"]
+    )
+
+
+def test_the_merge_state_blocker_lists_the_passing_states_plainly() -> None:
+    (blocker,) = _gate(merge_state_status="DIRTY", strict_up_to_date=True)["blockers"]
+    assert blocker == (
+        "mergeStateStatus is DIRTY (need one of CLEAN, HAS_HOOKS, UNSTABLE)"
+    )
+    (loose,) = _gate(merge_state_status="DIRTY")["blockers"]
+    assert loose.endswith("(need one of BEHIND, CLEAN, HAS_HOOKS, UNSTABLE)")
 
 
 def test_collect_on_a_merged_pr_reads_nothing_else(fake_gh: Any) -> None:
@@ -937,14 +1063,18 @@ def test_collect_and_evaluate_stack_gates_every_layer(
     def _single(repo: str, pr: int, **kwargs: Any) -> dict[str, Any]:
         seen.append(pr)
         assert kwargs["acceptance_audit_clean"] is True
-        return _verdict() if pr == 11 else _verdict("1 unresolved review thread(s)")
+        configs.append(kwargs["config"])
+        blocker = THREADS_BLOCKER.format(n=1)
+        return _verdict() if pr == 11 else _verdict(blocker)
 
+    configs: list[Any] = []
     monkeypatch.setattr(merge_gate, "collect_and_evaluate", _single)
     verdict = merge_gate.collect_and_evaluate_stack(
         REPO, 12, acceptance_audit_clean=True
     )
     assert seen == [11, 12]
-    assert verdict["blockers"] == ["#12: 1 unresolved review thread(s)"]
+    assert verdict["blockers"] == [f"#12: {THREADS_BLOCKER.format(n=1)}"]
+    assert configs[0] is configs[1]  # loaded once, shared by every layer
 
 
 def test_a_pr_outside_any_stack_is_a_single_layer_stack(fake_gh: Any) -> None:
@@ -1068,3 +1198,43 @@ def test_a_gh_failure_is_reported_not_a_traceback(
     monkeypatch.setattr(reviewer_state, "_gh_json", boom)
     assert _main(monkeypatch, "--pr", "1") == 2
     assert "HTTP 502" in capsys.readouterr().err
+
+
+def test_a_non_list_rules_payload_exits_two(
+    fake_gh: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_gh(rules={"message": "unexpected"})
+    assert _main(monkeypatch, "--pr", "1") == 2
+    assert "expected a list of rules" in capsys.readouterr().err
+
+
+def test_an_unexpected_payload_shape_exits_two(
+    fake_gh: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake = fake_gh()
+    fake.pull = {}  # pr view answered without the fields asked for
+    assert _main(monkeypatch, "--pr", "1") == 2
+    captured = capsys.readouterr()
+    assert "unexpected GitHub payload" in captured.err
+    assert captured.out == ""
+
+
+def test_main_loads_the_config_once_for_a_stack(
+    fake_gh: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    loads: list[Any] = []
+    real = merge_gate.load_config
+
+    def counting(path: Any) -> Any:
+        loads.append(path)
+        return real(path)
+
+    monkeypatch.setattr(merge_gate, "load_config", counting)
+    fake_gh(stacks=[{"number": 1, "pull_requests": [{"number": n} for n in (3, 4, 5)]}])
+    assert _main(monkeypatch, "--pr", "4", "--stack") == 0
+    assert len(loads) == 1
+    capsys.readouterr()

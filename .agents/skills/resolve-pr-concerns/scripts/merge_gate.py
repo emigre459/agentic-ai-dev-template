@@ -12,13 +12,17 @@ Blockers, all gathered in one call:
   conclusion (``success``, ``neutral`` or ``skipped``). With no required-checks
   rule (or a 404), every check reported on the head must be green instead. Check
   runs and commit statuses both count. No check name or ruleset id is hard-coded.
+  Only rulesets are read: classic branch protection is not.
 - **Reviewer** (``reviewer_state``, the reviewer named in
   ``.github/pr-reviewer.json``): a verdict on the head, the final full review, and
   no open reviewer finding. A reviewer with a local review needs no verdict on a
   head moved after its final full review. With ``"active": null`` (or no config at
   all) this half is skipped.
 - **Humans** (``human_review``): a standing request for changes blocks until that
-  reviewer's own new review clears it. Unresolved review threads block too.
+  reviewer's own new review clears it. Unresolved review threads block only while
+  a ``pull_request`` rule sets ``required_review_thread_resolution``; a human
+  resolves answered threads (the agent never resolves them). Otherwise their count
+  is listed under ``info``, not as a blocker.
 - **Merge state.** ``mergeStateStatus`` must be ``CLEAN``, ``UNSTABLE`` (only a
   non-required check fails) or ``HAS_HOOKS``. ``BEHIND`` blocks only while a
   required-checks rule sets ``strict_required_status_checks_policy``: a merge
@@ -43,8 +47,8 @@ Prints JSON: ``mergeable``, ``already_merged``, ``blockers``, ``info`` (with
 ``unthreaded_findings`` and ``notes``) and, with ``--stack``, ``layers``.
 
 Exit codes: 0 -- nothing blocks (or the PR is already merged); 1 -- blocked;
-2 -- a ``gh`` call failed; 64 -- usage error, or an explicit ``--config`` that does
-not exist or is invalid.
+2 -- a ``gh`` call failed or GitHub answered an unexpected shape; 64 -- usage
+error, or an explicit ``--config`` that does not exist or is invalid.
 """
 
 from __future__ import annotations
@@ -55,7 +59,7 @@ import subprocess  # nosec B404 -- only to catch the gh failure ``reviewer_state
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 from urllib.parse import quote
 
 import human_review
@@ -129,6 +133,8 @@ def branch_rules(repo: str, base: str) -> list[dict[str, Any]] | None:
     ------
     subprocess.CalledProcessError
         Any other ``gh`` failure.
+    ValueError
+        GitHub answered something other than a list of rules.
     """
     try:
         rules = _gh_json(
@@ -142,7 +148,14 @@ def branch_rules(repo: str, base: str) -> list[dict[str, Any]] | None:
         if _not_found(exc):
             return None
         raise
-    return [r for r in rules or [] if isinstance(r, dict)]
+    if rules is None:
+        return []
+    if not isinstance(rules, list):  # a bad payload is a failed read, not a bug
+        raise ValueError(  # noqa: TRY004
+            f"repos/{repo}/rules/branches/{base}: expected a list of rules, got "
+            f"{type(rules).__name__}"
+        )
+    return [r for r in rules if isinstance(r, dict)]
 
 
 def _status_check_rules(
@@ -198,6 +211,28 @@ def strict_up_to_date(rules: Iterable[Mapping[str, Any]] | None) -> bool:
     return any(
         params.get("strict_required_status_checks_policy") is True
         for params in _status_check_rules(rules)
+    )
+
+
+def threads_must_resolve(rules: Iterable[Mapping[str, Any]] | None) -> bool:
+    """Return whether the branch's rules require review threads to be resolved.
+
+    Parameters
+    ----------
+    rules : Iterable[Mapping[str, Any]] | None
+        The branch's rules (``branch_rules``); ``None`` after a 404.
+
+    Returns
+    -------
+    bool
+        ``True`` when any ``pull_request`` rule sets
+        ``required_review_thread_resolution``.
+    """
+    return any(
+        rule.get("type") == "pull_request"
+        and (rule.get("parameters") or {}).get("required_review_thread_resolution")
+        is True
+        for rule in rules or ()
     )
 
 
@@ -401,7 +436,7 @@ def _merge_state_blocker(status: str, strict: bool, notes: list[str]) -> str | N
     if status in PASSING_MERGE_STATES:
         return None
     passing = sorted(PASSING_MERGE_STATES | ({_BEHIND} if not strict else set()))
-    return f"mergeStateStatus is {status} (need one of {passing})"
+    return f"mergeStateStatus is {status} (need one of {', '.join(passing)})"
 
 
 def evaluate_gate(
@@ -411,6 +446,7 @@ def evaluate_gate(
     unresolved_thread_total: int,
     required_checks: Sequence[str] | None = None,
     strict_up_to_date: bool = False,
+    threads_must_resolve: bool = False,
     pr_state: str = "OPEN",
     reviewer_verdict: str | None = None,
     open_reviewer_findings: int = 0,
@@ -444,6 +480,9 @@ def evaluate_gate(
         so every reported check must be green.
     strict_up_to_date : bool
         The rules require an up-to-date branch, so ``BEHIND`` blocks.
+    threads_must_resolve : bool
+        The rules require review-thread resolution, so unresolved threads block;
+        otherwise their count is only listed under ``info``.
     pr_state : str
         GitHub PR state (``OPEN``, ``CLOSED`` or ``MERGED``).
     reviewer_verdict : str | None
@@ -488,6 +527,8 @@ def evaluate_gate(
         ),
         "required_checks": None if required_checks is None else list(required_checks),
         "strict_up_to_date": strict_up_to_date,
+        "threads_must_resolve": threads_must_resolve,
+        "unresolved_threads": unresolved_thread_total,
         "verdict_carried_from": verdict_carried_from,
         "unthreaded_findings": [dict(f) for f in unthreaded_findings],
         "notes": notes,
@@ -510,7 +551,8 @@ def evaluate_gate(
     if required_checks is None:
         notes.append(
             "the base branch has no required-checks rule: every reported check "
-            "must be green"
+            "must be green (only rulesets are read; classic branch protection is "
+            "not)"
         )
     blockers += _check_blockers(check_conclusions, required_checks, notes)
 
@@ -542,8 +584,17 @@ def evaluate_gate(
             "then re-request their review; only their new review clears it"
         )
 
-    if unresolved_thread_total:
-        blockers.append(f"{unresolved_thread_total} unresolved review thread(s)")
+    if unresolved_thread_total and threads_must_resolve:
+        blockers.append(
+            f"{unresolved_thread_total} unresolved review thread(s); the base "
+            "branch's rules require resolution: a human resolves answered threads "
+            "(the agent never resolves them)"
+        )
+    elif unresolved_thread_total:
+        notes.append(
+            f"{unresolved_thread_total} unresolved review thread(s) (not a blocker: "
+            "the base branch's rules do not require resolution)"
+        )
 
     state_blocker = _merge_state_blocker(merge_state_status, strict_up_to_date, notes)
     if state_blocker:
@@ -677,13 +728,15 @@ def stack_prs(repo: str, pr: int) -> list[int] | None:
 # --- live collection -------------------------------------------------------------
 
 
-def _load_config(
-    config_path: Path | None,
-) -> tuple[
-    reviewer_state.ReviewerAdapter | None,
-    reviewer_state.RoundCaps | None,
-    frozenset[str],
-]:
+class ReviewConfig(NamedTuple):
+    """The reviewer config, loaded once per run and shared by every stack layer."""
+
+    adapter: reviewer_state.ReviewerAdapter | None
+    caps: reviewer_state.RoundCaps | None
+    bot_logins: frozenset[str]
+
+
+def load_config(config_path: Path | None) -> ReviewConfig:
     """Load the reviewer adapter, its round caps and every reviewer's bot logins.
 
     Parameters
@@ -694,7 +747,7 @@ def _load_config(
 
     Returns
     -------
-    tuple[ReviewerAdapter | None, RoundCaps | None, frozenset[str]]
+    ReviewConfig
         The adapter and caps (``None`` with ``"active": null`` or no default
         config) and the bot logins ``human_review`` treats as non-human.
 
@@ -716,7 +769,7 @@ def _load_config(
             raise
         adapter = None
     caps = reviewer_state.load_round_caps(config_path) if adapter else None
-    return adapter, caps, human_review.load_bot_logins(config_path)
+    return ReviewConfig(adapter, caps, human_review.load_bot_logins(config_path))
 
 
 def collect_and_evaluate(
@@ -725,6 +778,7 @@ def collect_and_evaluate(
     *,
     acceptance_audit_clean: bool | None = None,
     config_path: Path | None = None,
+    config: ReviewConfig | None = None,
 ) -> dict[str, Any]:
     """Fetch one PR's live state and report its merge readiness.
 
@@ -737,7 +791,10 @@ def collect_and_evaluate(
     acceptance_audit_clean : bool | None
         ``False`` adds a blocker; ``None`` means not asserted.
     config_path : Path | None
-        Reviewer config path, or ``None`` for the default.
+        Reviewer config path, or ``None`` for the default; read only when
+        ``config`` is not given.
+    config : ReviewConfig | None
+        An already-loaded reviewer config (``load_config``).
 
     Returns
     -------
@@ -750,7 +807,7 @@ def collect_and_evaluate(
         A ``gh`` call failed.
     """
     # Load first: a bad reviewer config fails before any GitHub call.
-    adapter, caps, bots = _load_config(config_path)
+    adapter, caps, bots = config if config is not None else load_config(config_path)
     pull = _gh_json(
         [
             "pr",
@@ -791,6 +848,7 @@ def collect_and_evaluate(
         unresolved_thread_total=unresolved_threads(repo, pr),
         required_checks=required_checks_from_rules(rules),
         strict_up_to_date=strict_up_to_date(rules),
+        threads_must_resolve=threads_must_resolve(rules),
         pr_state=pull["state"],
         changes_requested_by=human_review.standing_requests(repo, pr, bots),
         acceptance_audit_clean=acceptance_audit_clean,
@@ -804,8 +862,11 @@ def collect_and_evaluate_stack(
     *,
     acceptance_audit_clean: bool | None = None,
     config_path: Path | None = None,
+    config: ReviewConfig | None = None,
 ) -> dict[str, Any]:
     """Report every layer of ``pr``'s stack, then combine them.
+
+    The reviewer config is loaded once and shared by every layer.
 
     Parameters
     ----------
@@ -816,7 +877,10 @@ def collect_and_evaluate_stack(
     acceptance_audit_clean : bool | None
         ``False`` adds a blocker to every layer; ``None`` means not asserted.
     config_path : Path | None
-        Reviewer config path, or ``None`` for the default.
+        Reviewer config path, or ``None`` for the default; read only when
+        ``config`` is not given.
+    config : ReviewConfig | None
+        An already-loaded reviewer config (``load_config``).
 
     Returns
     -------
@@ -824,13 +888,11 @@ def collect_and_evaluate_stack(
         The combined ``evaluate_stack`` report; a PR in no stack is a one-layer
         stack (``single_layer_stack``).
     """
+    loaded = config if config is not None else load_config(config_path)
     numbers = stack_prs(repo, pr)
     if numbers is None:
         single = collect_and_evaluate(
-            repo,
-            pr,
-            acceptance_audit_clean=acceptance_audit_clean,
-            config_path=config_path,
+            repo, pr, acceptance_audit_clean=acceptance_audit_clean, config=loaded
         )
         return single_layer_stack(pr, single)
     return evaluate_stack(
@@ -841,7 +903,7 @@ def collect_and_evaluate_stack(
                     repo,
                     number,
                     acceptance_audit_clean=acceptance_audit_clean,
-                    config_path=config_path,
+                    config=loaded,
                 ),
             )
             for number in numbers
@@ -907,7 +969,7 @@ def main() -> NoReturn:
     )
     args = parser.parse_args()
     try:
-        _load_config(args.config)
+        config = load_config(args.config)
     except (FileNotFoundError, ValueError) as exc:
         print(exc, file=sys.stderr)
         raise SystemExit(EXIT_USAGE) from exc
@@ -917,10 +979,14 @@ def main() -> NoReturn:
             args.repo,
             args.pr,
             acceptance_audit_clean=args.acceptance_audit_clean,
-            config_path=args.config,
+            config=config,
         )
     except subprocess.CalledProcessError as exc:
         print(f"gh failed: {(exc.stderr or '').strip() or exc}", file=sys.stderr)
+        raise SystemExit(EXIT_GH_FAILED) from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        # A payload shape this script doesn't know: a failed read, never a report.
+        print(f"unexpected GitHub payload: {exc!r}", file=sys.stderr)
         raise SystemExit(EXIT_GH_FAILED) from exc
     print(json.dumps(report, indent=2))
     raise SystemExit(EXIT_BLOCKED if report["blockers"] else EXIT_CLEAR)
