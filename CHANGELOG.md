@@ -48,7 +48,7 @@
 - feat: dual-stack CI (python/react/template jobs) + dependabot + PR template
 - feat: root dispatcher Makefile (delegates to both stacks + owns init target)
 - refactor: tighten react exemplar — testable App, istanbul comment fix, userEvent.setup()
-- feat: runnable React.ts/bun stack scaffold (Biome snapmeter formatting, Vitest) with green gates
+- feat: runnable React.ts/bun stack scaffold (Biome formatting, Vitest) with green gates
 - feat: runnable Python/uv stack scaffold with green quality gates
 - feat: mk/shared.mk — shared make targets (help, cc, apply_repo_settings)
 - feat: stack-aware Stop hook + permission hook + trimmed settings.json

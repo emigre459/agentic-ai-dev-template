@@ -27,21 +27,26 @@ before it reviews at all. A fresh repo created from this template has no automat
 review until someone installs + enables it **and** sets `active` to its adapter key
 (the template ships with `"active": null`).
 
-**How to apply:** Detect the mode once per PR (see `resolve-pr-concerns` Step 1a)
-and act accordingly:
+**How to apply:** after every push, watch about 30 seconds, and at least until the
+new head's first commit status appears (the reviewer state dates the head's arrival by
+it, so a trigger posted earlier can read as "not on this head"). Then:
 
-- **Automatic mode:** the push already triggered a fresh review. **Do NOT post the
-  trigger comment** — it's a redundant double-trigger that just clutters the PR.
-  Wait for the auto-review.
-- **Manual mode:** post the trigger comment after pushing fixes, since nothing else
-  will trigger a re-review. Read the literal value with
+- **A review started** (verdict leaves `none`, `review_running`, or an in-progress
+  signal): auto-run is on. **Do NOT post the trigger comment** — it's a redundant
+  double-trigger that just clutters the PR. Wait for the review. The reviewer's check
+  merely registering is not evidence one started; it can register as "skipped".
+- **No review started:** post the trigger comment only if `round_budget.trigger_allowed`
+  is `true`. Read the literal value with
   `jq -r '.reviewers[.active].trigger_comment' .github/pr-reviewer.json`, then post
   exactly that string (`gh pr comment <num> --body "<trigger_comment>"`) — a literal
   body matches the `.claude/settings.json` allow-list entry; a `$(...)` substitution
   doesn't.
+- **Comment mode is sticky.** Once you have had to comment on a PR, stay in comment
+  mode for the rest of it: every later push, watch, confirm nothing started, then post
+  the trigger (budget permitting).
 
 Don't blindly post the trigger comment "to be safe" — on an auto-on-push repo that
-double-triggers every round. Confirm the mode first, then skip or send accordingly.
+double-triggers every round. Confirm nothing started first, then send.
 
 **Unless the reviewer reviews locally.** When the adapter declares `local_review`
 (`reviewer_state.py` reports `local_review.configured: true`), never post the

@@ -1,6 +1,6 @@
 ---
 name: pr-check
-description: Run the full PR readiness check (lint + tests) via `make pr_check`. Use before opening a pull request or when asked to verify code is ready to merge.
+description: Run the full PR readiness check (lint, security, coverage gate, per-test speed check; mirrors CI) via `make pr_check`. Use before opening a pull request or when asked to verify code is ready to merge.
 compatibility: Requires make (plus the active stack's toolchain — uv for Python, bun for React)
 disable-model-invocation: true
 allowed-tools: Bash(make pr_check), Bash(make format)
@@ -12,14 +12,29 @@ Run the full PR readiness check:
 make pr_check
 ```
 
-`make pr_check` runs `make lint` then `make tests`:
+`make pr_check` is the local mirror of the jobs CI requires: `make lint` and
+`make security` first, then `make coverage` and `make test_speed_check`:
 - **lint** is format-check + linting + type-checking (it does NOT modify files):
   Python = `black --check` + `ruff check` + `mypy`; React = `biome check` + `tsc --noEmit`.
-- **tests** = the stack's test suite (pytest / vitest).
+- **security** is the stack's dependency / SAST scan.
+- **coverage** runs the stack's test suite (pytest / vitest) behind the 80% coverage gate
+  and writes `test-results.xml`.
+- **speed check** reads that run and fails any test over the per-test budget
+  (`test_speed` in `.github/pr-reviewer.json`, scaled by the measured speed of the machine)
+  that is not on the slow-test allowlist.
+
+`make tests` is the fast iteration target, not this gate: it skips the coverage gate,
+the speed check and the security scan, so a green `make tests` says nothing about
+`make pr_check`.
 
 Report:
 1. Lint result — if it reports a formatting violation, run `make format` to auto-fix, then re-run.
-2. Test pass/fail summary and total count.
-3. Any test failures with file path, line number, and failed assertion.
+2. Security findings, with the package or file and the advisory or rule.
+3. Test pass/fail summary and total count; any failures with file path, line number, and
+   failed assertion; and any coverage shortfall against the 80% gate.
+4. Speed offenders (test name and duration), with the remedy in this order: speed the test
+   up (usually mock the slow dependency) → move it to a slower test group → allowlist it
+   with a reason and a tracking issue (Python: `tests/slow_test_allowlist.txt`; React:
+   `slow_test_allowlist.txt`).
 
 If checks fail, fix the issues and re-run before finishing.

@@ -1,8 +1,21 @@
 {
   "active": null,
   "review_rounds": {
+    "max_incremental_before_final": 1,
+    "max_incremental_after_final": 3,
+    "max_fix_iterations": 5,
     "max_local_before_final": 3,
     "max_local_after_final": 3
+  },
+  "test_speed": {
+    "_note": "Budgets are seconds on a typical runner of the class, scaled by this machine's measured speed; the benchmark is Python and stands in for single-thread CPU speed on React too, where tests are judged on their full time (no shared-setup split).",
+    "budget_seconds": 10,
+    "recheck_fraction": 0.6,
+    "factor_low": 0.5,
+    "factor_high": 2.0,
+    "shared_setup_budget_seconds": 30,
+    "default_runner_class": "ubuntu-latest",
+    "reference_seconds": {"ubuntu-latest": 0.45}
   },
   "reviewers": {
     "bugbot": {
@@ -21,6 +34,11 @@
       "final_review_done_pattern": null,
       "final_review_failed_pattern": null,
       "final_review_partial_pattern": null,
+      "incremental_review_done_pattern": null,
+      "incremental_review_no_changes_pattern": null,
+      "incremental_review_failed_pattern": null,
+      "incremental_review_partial_pattern": null,
+      "unthreaded_finding_patterns": [],
       "rate_limited_pattern": null,
       "rate_limit_wait_pattern": null,
       "rate_limit_default_wait_minutes": null,
@@ -36,7 +54,11 @@
       "summary_marker": null,
       "clean_pattern": "No actionable comments were generated",
       "findings_pattern": "(?:Actionable comments posted:\\s*|Outside diff range comments \\()(\\d+)",
-      "reviewed_sha_pattern": "between\\s+[0-9a-f]{7,40}\\s+and\\s+([0-9a-f]{7,40})",
+      "reviewed_sha_pattern": [
+        "between\\s+[0-9a-f]{7,40}\\s+and\\s+([0-9a-f]{7,40})",
+        "\"coveredCommitId\"\\s*:\\s*\"([0-9a-f]{7,40})\"",
+        "change_assessment_commit\\s*:\\s*\"([0-9a-f]{7,40})\""
+      ],
       "self_resolves_threads": true,
       "summary_in_issue_comments": true,
       "final_review_comment": "@coderabbitai full review",
@@ -44,7 +66,15 @@
       "final_review_done_pattern": "\\bFull review finished\\b",
       "final_review_failed_pattern": "(?s)^(?!.*incremental review system).*\\b(?:Review failed|Head commit changed|base or head changed)\\b",
       "final_review_partial_pattern": "(?s)^(?!.*incremental review system).*\\bAction not completed\\b",
-      "rate_limited_pattern": "\\bReview rate limited\\b",
+      "incremental_review_done_pattern": "(?s)^(?=.*incremental review system).*\\bReview finished\\b",
+      "incremental_review_no_changes_pattern": "(?s)^(?=.*incremental review system).*\\bNo files to review\\b",
+      "incremental_review_failed_pattern": "(?s)^(?=.*incremental review system).*\\b(?:Review failed|Head commit changed|base or head changed)\\b",
+      "incremental_review_partial_pattern": "(?s)^(?=.*incremental review system).*\\bAction not completed\\b",
+      "unthreaded_finding_patterns": [
+        "(?s)<!-- final_review_risk_start -->(.*?)<!-- final_review_risk_end -->",
+        "(?s)Outside diff range comments \\(\\d+\\)\\*\\*(.*?)(?:\\n---\\n|\\Z)"
+      ],
+      "rate_limited_pattern": "(?s)^(?!.*\\bAction performed\\b).*\\b(?:Review rate limited|included review limit is currently reached)\\b",
       "rate_limit_wait_pattern": "available in (\\d+) minutes?",
       "rate_limit_default_wait_minutes": 60,
       "rate_limit_notice_marker": "<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->",
@@ -55,6 +85,7 @@
         "remaining_path": "includedReviews.remaining",
         "full_capacity_ms_path": "includedReviews.fullCapacityInMs",
         "max_recheck_seconds": 300,
+        "min_remaining": 2,
         "auth_command": ["coderabbit", "auth", "status", "--agent"],
         "authenticated_path": "authenticated",
         "remedies": {
@@ -75,7 +106,8 @@
           "title": "title",
           "body": "comment"
         },
-        "timeout_seconds": 1200
+        "timeout_seconds": 1200,
+        "start_failure_pattern": "Failed to start review"
       }
     }
   }

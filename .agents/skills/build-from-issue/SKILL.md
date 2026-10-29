@@ -14,9 +14,10 @@ Orchestrator skill for taking a GitHub issue (typically brief) all the way to a 
 - Per-task implementation discipline → `superpowers:test-driven-development` (red-green-refactor, iron law, verify-RED, verify-GREEN)
 - Plan execution + per-task code review → `superpowers:subagent-driven-development` (default) or orchestrator-driven manual TDD (fallback)
 - Optional parallelization isolation → `superpowers:using-git-worktrees`
-- Branch finalization (merge / PR / keep / discard, worktree cleanup) → `superpowers:finishing-a-development-branch`
+- Branch finalization (test verification, PR creation, worktree cleanup) → `superpowers:finishing-a-development-branch` — but **this skill always picks "push + create PR"**; do not present its menu (Step 11)
 - PR-side follow-up → `resolve-pr-concerns` (sibling skill in this repo); for individual reviewer comments lean on `superpowers:receiving-code-review`
 - Backstop discipline → `superpowers:verification-before-completion` (no completion claim without fresh evidence) and `superpowers:systematic-debugging` (when E2E or acceptance reveals a regression)
+- Stacked delivery (opt-in, rare) → `references/stacked-prs.md` (when to stack, how to split, the plan's `## Stack` section, building, finalize) and GitHub's `gh stack` CLI extension, which the **user** installs
 
 ## Workflow
 
@@ -35,7 +36,7 @@ digraph build_from_issue {
     "1g. Claim issue + epic\n(assignment discipline)" [shape=box];
     "2. Read-back gate (AskUserQuestion)" [shape=box];
     "2b. Open-PR / vuln-fix guard\n(AskUserQuestion if related/security PRs or alerts)" [shape=box];
-    "3. superpowers:brainstorming\n→ spec + plan" [shape=box];
+    "3. superpowers:brainstorming\n→ spec + plan (stack offered only if warranted)" [shape=box];
     "4. Parallelization check\n(any fan-out/join?)" [shape=diamond];
     "4a. Justify + confirm + worktrees" [shape=box];
     "5. Execute plan" [shape=box];
@@ -48,9 +49,9 @@ digraph build_from_issue {
     "7b. Live-E2E handoff gate\n(hand user test kit OR justify skip)" [shape=box];
     "8. User acceptance (AskUserQuestion)" [shape=box];
     "9. Update AGENTS.md" [shape=box];
-    "11. superpowers:finishing-a-development-branch" [shape=box];
+    "11. Local gate (make pr_check), then\nfinishing-a-development-branch: push + PR" [shape=box];
     "PR was created?" [shape=diamond];
-    "11b. Momentum hook\n(next card + Slack + kanban re-sync)" [shape=box];
+    "11b. Momentum hook\n(next card + kanban re-sync; Slack opt-in)" [shape=box];
     "12. resolve-pr-concerns" [shape=box];
     "Done" [shape=doublecircle];
 
@@ -65,7 +66,7 @@ digraph build_from_issue {
     "1c. Mismatch gate (AskUserQuestion):\nworktree off main + link, or this branch?" -> "1e. Name the current branch;\nwork proceeds here" [label="stay on current branch"];
     "1d. gh issue develop → linked branch\n+ superpowers:using-git-worktrees" -> "1f. Parent-epic context + repo-staleness gate";
     "1e. Name the current branch;\nwork proceeds here" -> "1f. Parent-epic context + repo-staleness gate";
-    "1f. Parent-epic context + repo-staleness gate" -> "1g. Claim issue + epic\n(assignment discipline)" -> "2. Read-back gate (AskUserQuestion)" -> "2b. Open-PR / vuln-fix guard\n(AskUserQuestion if related/security PRs or alerts)" -> "3. superpowers:brainstorming\n→ spec + plan" -> "4. Parallelization check\n(any fan-out/join?)";
+    "1f. Parent-epic context + repo-staleness gate" -> "1g. Claim issue + epic\n(assignment discipline)" -> "2. Read-back gate (AskUserQuestion)" -> "2b. Open-PR / vuln-fix guard\n(AskUserQuestion if related/security PRs or alerts)" -> "3. superpowers:brainstorming\n→ spec + plan (stack offered only if warranted)" -> "4. Parallelization check\n(any fan-out/join?)";
     "4. Parallelization check\n(any fan-out/join?)" -> "4a. Justify + confirm + worktrees" [label="yes"];
     "4. Parallelization check\n(any fan-out/join?)" -> "5. Execute plan" [label="no"];
     "4a. Justify + confirm + worktrees" -> "5. Execute plan";
@@ -83,10 +84,11 @@ digraph build_from_issue {
     "7b. Live-E2E handoff gate\n(hand user test kit OR justify skip)" -> "5. Execute plan" [label="live E2E failed → TDD RED"];
     "8. User acceptance (AskUserQuestion)" -> "5. Execute plan" [label="gaps"];
     "8. User acceptance (AskUserQuestion)" -> "9. Update AGENTS.md" [label="satisfied"];
-    "9. Update AGENTS.md" -> "11. superpowers:finishing-a-development-branch" -> "PR was created?";
-    "PR was created?" -> "11b. Momentum hook\n(next card + Slack + kanban re-sync)" [label="yes"];
-    "11b. Momentum hook\n(next card + Slack + kanban re-sync)" -> "12. resolve-pr-concerns";
-    "PR was created?" -> "Done" [label="no — merged/kept/discarded"];
+    "9. Update AGENTS.md" -> "11. Local gate (make pr_check), then\nfinishing-a-development-branch: push + PR" -> "PR was created?";
+    "11. Local gate (make pr_check), then\nfinishing-a-development-branch: push + PR" -> "5. Execute plan" [label="make pr_check red → TDD RED"];
+    "PR was created?" -> "11b. Momentum hook\n(next card + kanban re-sync; Slack opt-in)" [label="yes"];
+    "11b. Momentum hook\n(next card + kanban re-sync; Slack opt-in)" -> "12. resolve-pr-concerns";
+    "PR was created?" -> "Done" [label="no — user chose otherwise for this branch,\nor no green suite (stop + report)"];
     "12. resolve-pr-concerns" -> "Done";
 }
 ```
@@ -105,23 +107,25 @@ digraph build_from_issue {
 
 ## Step 1: Fetch the Issue
 
-1. `git branch --show-current`.
-2. Parse the leading number from the branch (e.g., `2-update-repo-...` → issue #2).
+1. `git branch --show-current`. Call this the **current branch**; its leading number (e.g., `2-update-repo-...` → `2`) is the **branch-derived issue number** (absent on `main` or a non-conventional branch name).
+2. Determine the **target issue number** — the issue you've actually been asked to build:
+   - If the user named one explicitly (`/build-from-issue 6`, "build issue #6", an issue URL), that is the target, even when the branch carries a different number.
+   - Otherwise the target is the branch-derived issue number.
 3. Detect the repo:
    ```bash
    gh repo view --json nameWithOwner -q .nameWithOwner
    ```
-4. Fetch the issue body via the GitHub CLI (portable; no MCP server required):
+4. Fetch the target issue's body via the GitHub CLI (portable; no MCP server required):
    ```bash
    gh issue view <number> --repo <owner>/<repo> \
      --json number,title,body,labels,state,url,assignees,milestone
    ```
-   Read the full body — particularly the `## Acceptance criteria` section, which Step 7 will audit.
-5. If no number is found in the branch name (and none was given), you should already have run **Step 0** (propose next) — if you somehow reached here without a target, go back and run it now rather than asking for a bare number.
+   Read the full body — particularly the `## Acceptance criteria` section (or whatever prose states "done"), which Step 7 will audit.
+5. If no target issue number can be determined (none given, none in the branch name), you should already have run **Step 0** (propose next) — if you somehow reached here without a target, go back and run it now rather than asking for a bare number.
 
 ## Step 1b: Branch / Issue Mismatch Gate
 
-**Trigger:** the target issue number from Step 1 does **not** match the current branch's branch-derived number. This includes the common cases where the current branch is `main`, or carries a *different* issue's number (e.g., you're on `5-foo` but asked to build issue #6). When they match, skip straight to Step 1f.
+**Trigger:** the target issue number from Step 1 does **not** match the current branch's branch-derived issue number (or the branch has none). This includes the common cases where the current branch is `main`, or carries a *different* issue's number (e.g., you're on `5-foo` but asked to build issue #6). When they match, skip straight to Step 1f.
 
 This gate exists because a mismatch is genuinely ambiguous and only the user can disambiguate:
 - You may have simply **forgotten to switch branches** locally — in which case a fresh worktree off `main` is the right home for issue #N.
@@ -162,7 +166,7 @@ The user declined the worktree, so **work proceeds on the current branch**. Befo
 
 **MUST run before the Step 2 read-back.** A single issue card is a keyhole view; you need the larger arc before you commit to *how* to build it. Read the parent epic for how this issue fits the whole project, then cross-check both the card and the epic against what the repo actually is today.
 
-**Read `.claude/skills/clean-up-kanban/SKILL.md` first (it's short):** it owns the epic-body template (product outcome + lifecycle stage + drainable order) this step reads against, the staleness rules step 3 applies, and the **duplicate hunt (§5)** — before building, confirm no OTHER open card already covers what this branch implies (if one does, surface it: amend/merge/supersede via `/plan-issues` rather than silently building a duplicate).
+**Read `.agents/skills/clean-up-kanban/SKILL.md` first (it's short; Claude Code reads it via the `.claude/skills` symlink):** it owns the epic-body template (product outcome + lifecycle stage + drainable order) this step reads against, the staleness rules step 3 applies, and the **duplicate hunt (§5)** — before building, confirm no OTHER open card already covers what this branch implies (if one does, surface it: amend/merge/supersede via `/plan-issues` rather than silently building a duplicate).
 
 1. **Find the parent epic.** Resolve the GitHub sub-issue link first, then fall back to a `Parent epic: #NN` line in the body. The sub-issue parent is exposed as **`parent_issue_url`** on the issue payload (NOT a nested `.parent.number`), so take the trailing number:
    ```bash
@@ -180,6 +184,8 @@ The user declined the worktree, so **work proceeds on the current branch**. Befo
    - a **framework or dependency described as production** that is actually dev-only, or has been swapped out;
    - a **document framed as the source-of-truth contract** that has since been superseded (e.g. by a generated schema);
    - a listed **blocker / prereq that has since merged or closed**, or a described end-state the repo already reached.
+
+   **Is the fix already on `main`?** Check the code, not commit ancestry — rebased or squashed work lands under a different SHA. Read the files at `origin/main` (`git fetch origin` then `git show origin/main:<path>`) and grep for the mechanism the card names *and* its call sites (a bare substring grep can match the wrong thing). If it's already there, propose closing the card with `file:line` evidence instead of building it again. A card so broad it would need a mega-PR is an over-scoped card: offer `/plan-issues` to split it.
 4. **On staleness or out-of-sync framing, PAUSE — do not build on it.** Surface exactly what's stale (quote the offending line from the card or epic), say whether it's the card, the epic, or both, and **offer to cross over to `/plan-issues`** to reconcile them against current reality *before* proceeding. Only continue past this gate once the framing matches the repo — or the user explicitly says to build anyway despite the noted drift. When clean, note "Card + epic #NN are consistent with current repo state" and proceed to Step 1g (claim), then Step 2.
 
 ## Step 1g: Claim the Issue (assignment discipline)
@@ -199,6 +205,7 @@ A fast sanity check before brainstorming — *not* a substitute for it. Use `Ask
 - A plain-language summary of what the issue asks for.
 - The specific behaviors/capabilities you read into it.
 - Any scope/implementation assumptions you're making.
+- **Any open question the card itself poses** ("should we X?", "A or B?", "TBD") — name the fork and ask the user to pick. Never silently choose a branch the card left open.
 - "Does this match your intent? Anything I'm missing or misreading?"
 
 Do not proceed until the user confirms. If they correct you, revise and re-confirm.
@@ -222,7 +229,7 @@ Immediately after the read-back — **before** brainstorming — scan the repo f
    - **Unrelated** — note and ignore.
 
 3. **Offer the user a choice via `AskUserQuestion`** whenever step 1 surfaced related or vuln/fix PRs/alerts:
-   - **Resolve first** — pause this issue; drive the offending PR(s) to merge, and/or open fix PRs for unsurfaced alerts (e.g. `uv lock --upgrade-package <pkg>` / `bun update`, verify the stack's checks, open the PR) and/or fix the Dependabot misconfig so it self-surfaces going forward.
+   - **Resolve first** — pause this issue; drive the offending PR(s) to merge-ready (the user merges), and/or open fix PRs for unsurfaced alerts (e.g. `uv lock --upgrade-package <pkg>` / `bun update <pkg>`, verify with `make pr_check`, open the PR) and/or fix the Dependabot misconfig so it self-surfaces going forward.
    - **Branch on top** — proceed, but base this issue's branch on the related PR's branch (not stale `main`) so you don't build on soon-to-change code.
    - **Proceed anyway** — the user judges them independent; record the call and continue.
 
@@ -245,6 +252,10 @@ Immediately after the read-back — **before** brainstorming — scan the repo f
 
 **Always push the branch and share a GitHub link for every spec/plan review — never a local file path.** Whenever brainstorming or `writing-plans` writes a spec or plan doc and asks the user to review it, first commit it, `git push` the branch, and give the user the GitHub blob URL (`https://github.com/<owner>/<repo>/blob/<branch>/<path>`). This work usually happens in a worktree, where local file paths / `file://` URIs are unreliable for the user to open — a pushed GitHub link always resolves. Re-push and re-share the link after any spec/plan revision so the user always reviews the current version. This is the default; do it without being asked.
 
+**Always surface the doc's review-attention areas alongside the link — don't wait to be asked.** In the same message as the link, list the **specific judgment calls** that could reasonably have gone another way, where the user's eye changes the outcome: value/representation semantics you chose, fields deliberately left null/empty, scope calls (something dropped, deferred, or folded in), a surface placed here rather than there, and anything where you picked one of two defensible readings. Keep it to roughly 3–5 bullets, each naming the choice **and** its alternative. Skip parts that only restate the issue.
+
+**Offer a stack only when one review would likely miss related changes (opt-in).** One PR is the default, and the author decides. At plan review, if the plan is complex enough that even an AI reviewer would likely miss how its changes relate (rough signals, not rules: several separately reviewable concerns, or a large expected diff), offer to deliver it as a stack of PRs, within hard limits: **at most 4 layers**, every layer from this one planned card, and **fewer than 300 files changed across the whole stack** (more than that means the card is too big: split it via `/plan-issues`, don't stack harder). Never offer one for docs/config-only work, a hotfix, or a change that can't be split into layers that are each green. **Before offering, check `gh stack --help`.** If the extension is missing, say so plainly and give the user the commands to run themselves — `gh extension install github/gh-stack` (and, optionally, its agent skill: `npx skills add github/gh-stack`). Never install CLI extensions or system tools on the user's machine yourself. If the user picks a stack, `writing-plans` adds a `## Stack` section and orders the tasks by layer; read `references/stacked-prs.md` for the policy, the plan format and the build/finalize steps. A plan without a `## Stack` section is a single PR.
+
 ## Step 4: Parallelization Check (Optional)
 
 Most well-scoped issues are sequential and need **no** worktrees. Only consider parallelization when the plan reveals **fan-out / join** structure — pieces that legitimately start independently before being wired together at the end. Pure-fan-out without a join is a smell that the issue is over-scoped, not an opportunity for worktrees.
@@ -261,6 +272,8 @@ Only on user confirmation, **invoke `superpowers:using-git-worktrees`** to set u
 ## Step 5: Execute the Plan
 
 Both modes use TDD — the difference is who drives. Subagents in mode 5a follow `superpowers:test-driven-development` per task automatically (it's a required workflow skill for SDD). The orchestrator in mode 5b follows it directly. **Red-green-refactor mechanics are not duplicated here — see the TDD skill for the iron law, RED, Verify-RED, GREEN, Verify-GREEN, REFACTOR, and rationalization-prevention tables.**
+
+**Pick the mode yourself and proceed — do not gate on the user for 5a vs 5b.** 5a is the default; pick 5b only when a concrete property of *this* plan makes inline the better fit. Weigh the criteria both ways: independent, cleanly testable tasks or any fan-out/join favor 5a (isolated context and per-task spec + quality review); genuinely tightly coupled tasks that must be edited as one unit, delicate verbatim/relocation edits, or an explicit per-task human-in-the-loop request favor 5b. State the pick in chat with a one-line reason that **names why the other mode was rejected** (e.g. "5a: three independent tasks, nothing coupled enough to force inline" / "5b: one config relocation; verbatim fidelity would thrash under subagents") — that reason is the self-check that keeps the choice from sliding to habit. Ask only when the call is genuinely ambiguous. If `writing-plans` presents its own execution-handoff prompt, answer it with your recommendation instead of passing it to the user.
 
 ### 5a (default). Subagent-Driven Execution
 
@@ -279,18 +292,24 @@ Use when:
 
 Drive `superpowers:test-driven-development` directly per plan task: RED → Verify-RED → GREEN → Verify-GREEN → REFACTOR, commit, then proceed. At natural checkpoints (every 1–3 tasks or before any high-risk integration) invoke `superpowers:requesting-code-review` to dispatch a review subagent.
 
-Commit after each task completes — checkpoint history is reviewable history.
+In either mode, commit after each task completes — checkpoint history is reviewable history (`.agents/rules/shared/checkpoint-commits.md`).
+
+### 5c. Building a stack (only when the plan has a `## Stack` section)
+
+Set the layer branches up with `gh stack` **before the first implementation commit**, build each task on its own layer's branch, push with `gh stack push`, and put a fix that belongs to a lower layer on that layer, then restack. In 5a, dispatch implementers in layer order, one at a time, naming the branch in each dispatch: the layers share one worktree. Commands and gotchas: `references/stacked-prs.md` ("Building").
 
 ## Step 6: Project E2E Run (orchestrator-owned)
 
 **Run once, here, after all per-task work in Step 5 is done.** Do not push E2E into per-subagent-task work — multiple E2E runs in parallel on small slices is too slow.
 
-1. **Discover the target.** Look for a Makefile target like `run_quicktest` / `e2e` / `smoke`, a script like `scripts/*_example.py` or `scripts/smoke.py`, or a pytest marker like `@pytest.mark.e2e` (run with `pytest -m e2e`). Also check `package.json` (`npm run e2e`), `pyproject.toml`, `Justfile`, etc.
-2. **If no E2E target exists for a pipeline-touching feature**, ask the user whether to add one. If yes: add a thin smoke test that exercises the new feature end-to-end and a way to invoke it. Mark it skippable in CI so it doesn't burn API tokens / external resources on every push.
-3. **Run it and read the artifacts** — exit code is necessary but not sufficient. Confirm rendered files, written outputs, and logs reflect the new behavior.
+1. **Discover the target.** Look for a Makefile target like `e2e` / `smoke`, or a `Justfile` equivalent. **Python:** a pytest marker like `@pytest.mark.e2e` (run with `pytest -m e2e`; `make tests` excludes it), or a script like `scripts/smoke.py` / `scripts/*_example.py`. **React/TS:** a `package.json` script like `test:e2e` / `e2e` (Playwright, Cypress, or Vitest browser mode), a `playwright.config.*`, or a dev-server path the feature can be exercised through.
+2. **If no E2E target exists for a user-facing or pipeline-touching feature**, ask the user whether to add one. If yes: add a thin smoke test that exercises the new feature end-to-end (e.g. a Playwright flow through the rendered UI, or an `e2e`-marked pytest) and a way to invoke it. Mark it skippable in CI so it doesn't burn API tokens / external resources / credentials on every push.
+3. **Run it and read the artifacts** — exit code is necessary but not sufficient. Confirm rendered files or pages, written outputs, network calls, and logs / console output reflect the new behavior.
 4. **If E2E reveals issues**, treat each as a TDD RED for the gap (return to Step 5 with a new failing test). Do not paper over E2E findings to push the PR through.
 
-This step is the source of truth that the *thing actually works* — `superpowers:verification-before-completion` applies in full: don't claim "E2E passed" without showing fresh output.
+This step is the source of truth that the *thing actually works* — `superpowers:verification-before-completion` applies in full: don't claim "E2E passed" without showing fresh output. **For a stack**, run the E2E on the top layer, which holds the whole change.
+
+**The E2E proves the feature works; it is not the PR gate.** And `make tests` is not the PR gate either: it is the fast iteration target, and it skips the 80% coverage gate, the per-test speed check and the security scan. The gate is `make pr_check`, the local mirror of CI, run at Step 11 before the PR is opened.
 
 ## Step 7: Acceptance-Criteria Audit (orchestrator-owned)
 
@@ -300,8 +319,8 @@ This step is the source of truth that the *thing actually works* — `superpower
    ```bash
    gh issue view <number> --repo <owner>/<repo> --json body
    ```
-   Pull the `## Acceptance criteria` section verbatim.
-2. **For each `- [ ]` checkbox**, build a row in an audit table with:
+   Pull the `## Acceptance criteria` section verbatim. **Many cards state "done" as prose** — plain bullets, a "Definition of done" paragraph, or expectations scattered through the body — rather than `- [ ]` checkboxes. That is still the checklist: audit each stated expectation the same way. Never skip the audit because there are no boxes.
+2. **For each `- [ ]` checkbox (or prose criterion)**, build a row in an audit table with:
    - **Criterion text** — quoted verbatim from the issue.
    - **Status** — one of `✅ satisfied`, `⚠️ approved deviation`, or `❌ not done`.
    - **Evidence** — concrete pointers a reviewer can verify: commit SHAs, test names, file paths with line numbers, fixture names. Vague "we did this" answers are not evidence.
@@ -314,16 +333,17 @@ This step is the source of truth that the *thing actually works* — `superpower
    - Boxes marked `✅` → tick them (`- [x]`).
    - Boxes marked `⚠️ approved deviation` → tick them AND append a deviation-note section (e.g., under "## Acceptance criteria" or just above "## Migration notes" if present) summarizing the divergence with a pointer to the spec section.
    - Boxes that remain `❌` should stay unchecked; if you somehow reach this step with unchecked boxes, the right move is to return to Step 5, not to gloss.
+   - **Prose criteria (no checkboxes):** don't rewrite someone's card into checkboxes. Post the audit table as an issue comment instead (`gh issue comment <number> --body-file <file>`), and verify the comment landed.
 6. **Verify the issue update landed** by re-reading the issue body after the edit:
    ```bash
    gh issue view <number> --repo <owner>/<repo> --json body
    ```
 
-This audit produces the substrate Step 8 (user acceptance) builds on. The user shouldn't be asked "is everything done?" without first being shown a concrete answer to "is the issue card's own checklist satisfied?".
+This audit produces the substrate Step 8 (user acceptance) builds on. The user shouldn't be asked "is everything done?" without first being shown a concrete answer to "is the issue card's own checklist satisfied?". **For a stack**, audit the top layer (the whole change) and cite, per criterion, the layer its evidence lives in.
 
 ## Step 7b: Live-E2E Handoff Gate (orchestrator-owned)
 
-Step 6's E2E is what **you** can run in-session. Some functionality is only truly proven when the **user** exercises it in a live environment you can't reach — a real deploy, an external service, hardware, a paid/credentialed path, or anything behind credentials you don't hold. Before Step 8 asks "do you accept?", decide whether such a gap exists and handle it explicitly. **Never ask the user to accept functionality that neither you nor they have actually run live.**
+Step 6's E2E is what **you** can run in-session. Some functionality is only truly proven when the **user** exercises it in a live environment you can't reach — a real deploy, an external service, hardware, a paid/credentialed or SSO path, a browser session behind auth, or anything behind credentials you don't hold. Before Step 8 asks "do you accept?", decide whether such a gap exists and handle it explicitly. **Never ask the user to accept functionality that neither you nor they have actually run live.**
 
 Decide, then do exactly one:
 
@@ -331,10 +351,11 @@ Decide, then do exactly one:
    - **Exact, copy-pasteable steps** to exercise the built functionality — commands, config, URLs, credentials-to-fetch, expected outputs. Prefer the project's real client/UI (the way the user said they'd test) over a synthetic probe.
    - **What "works" looks like** — the specific observable result, plus the likely failure modes and the first things to check.
    - **A pass/fail criterion** the user stated or would recognize (e.g. "local and remote return identical results").
-   - Where practical, capture the kit in a **durable artifact** (runbook / README section), not just the chat, so it survives the session.
+   - **Commit the kit to the repo**, so it lands in the PR diff (reviewable) and outlives the chat: by default next to the build's spec and plan, as `docs/superpowers/test-kits/YYYY-MM-DD-<topic>-live-e2e-kit.md`, or under `docs/runbooks/` when it is a standing operational procedure rather than one-time PR verification. Keep its fenced code blocks plain ASCII so they copy-paste cleanly. Optionally, if your harness can render it, also publish **that same committed file** as a rendered artifact — never a scratch copy, so the two never drift.
+   - **Alongside the kit, run the `explain-diff-merge-review` skill** and hand the user its quiz link together with the kit (this session wrote the change, so that skill's same-session gate is satisfied). It centers every judgment call the build made; the user can self-quiz first to decide what to scrutinize, or go straight to the live test. The quiz is optional and **never gates** the live test.
    - Then **WAIT** for the user's live results. Reported failures are Step-5 TDD REDs (or `superpowers:systematic-debugging` for regressions); do **not** advance to Step 8 on unproven functionality.
 
-2. **Live E2E is not needed** — justify in one or two sentences and record it (e.g. "pure refactor fully covered by existing tests"; "this is IaC the user deploys separately, and the in-session container E2E already exercised the image + auth + tools"). Only then proceed.
+2. **Live E2E is not needed** — justify in one or two sentences and record it (e.g. "pure refactor fully covered by existing tests"; "this is IaC the user deploys separately, and the in-session container E2E already exercised the image + auth + tools"; "the in-session Playwright E2E exercised the rendered flow end to end"). Only then proceed. There is no kit on this branch, so offer `explain-diff-merge-review` (optional) with the Step 8 question instead.
 
 **The anti-pattern this prevents:** declaring victory on work only the user can validate, then asking them to "accept" it sight-unseen. If you can't run it and you didn't tell the user how to, you don't know it works.
 
@@ -351,36 +372,50 @@ Satisfied → continue.
 
 ## Step 9: Update Agent Docs
 
-- Review `AGENTS.md` — update if the feature introduces new patterns, tools, modules, or workflows agents should know about.
+- Review `AGENTS.md` — update if the feature introduces new patterns, tools, modules, or workflows agents should know about. Keep always-on memory lean: prefer a `.agents/rules/` rule or a `references/` doc over appending to `AGENTS.md`, unless the change is a genuinely universal, always-on command or routing pointer (`.agents/rules/shared/default-to-shareable-rules.md`).
 - Check for any other agent-facing docs in the repo (e.g., `CLAUDE.md`, or `.agents/skills/` — the canonical skills dir, read via the `.claude/skills` symlink in Claude Code) and update as relevant.
 - Keep updates factual and concise.
 
 ## Step 11: Finalize the Branch
 
-**Invoke `superpowers:finishing-a-development-branch`.** It verifies tests, presents the 4-option menu (merge locally / push + create PR / keep as-is / discard), creates the PR if chosen (using the repo's PR template), and handles worktree cleanup with provenance checks. Reference the issue in the PR body (`Closes #N`). If Step 7 surfaced any approved deviations, surface them in the PR body under a "Deviations from issue text" section so reviewers see intent. (There is no changelog step: a shared `CHANGELOG.md` edited by every PR is a frequent source of catch-up-merge conflicts, so the merged-PR history is the record of what changed.)
+**FIRST — run the CI mirror locally and gate on it, before pushing or opening the PR.** Run `make pr_check` (lint + security, then coverage with its 80% gate, then the per-test speed check: the same jobs CI requires) and confirm it **exits 0**. This gate lives here, at creation, on purpose: `resolve-pr-concerns` (Step 12) only engages *after* the PR exists, so it can't stop a red PR from being born — this skill owns "don't open a red PR." `make tests` passing is not evidence the gate passes (Step 6). Do NOT push/open the PR on a non-zero exit; treat each failure as a TDD RED (return to Step 5) and re-run until green. **A "ready" claim needs the fresh `make pr_check` tail as evidence — never a prediction that "CI will pass" from a lighter run** (`superpowers:verification-before-completion`).
 
-**The agent's job ends at merge-ready, and merging is the user's call.** Merge-ready means pushed, PR open, CI green, the configured reviewer's verdict on the current head plus its final full review done when a reviewer is active (`resolve-pr-concerns` Step 5a; the vendor-neutral `review-gate` status shows both; with `"active": null` there is none), conversation resolved, and GitHub not reporting `BEHIND` / `CONFLICTING` / `DIRTY`. If `main` uses a **merge queue**, the user merges with "Merge when ready", which enqueues the PR, and the queue tests it against the latest `main` — so finalize is "push + open PR + drive to merge-ready, then the user enqueues it."
+**Then invoke `superpowers:finishing-a-development-branch`** for its test verification, PR-template handling, and worktree-cleanup provenance checks. **Do NOT present its integration menu — this skill always chooses "push and create a Pull Request."** That is a standing decision, not a per-branch question: every branch goes to a PR so CI, the configured reviewer and human review run before anything lands (the `main` ruleset requires a PR, and merges are squash-only), and merging locally would skip all of them. Announce it in one line ("Pushing and opening a PR per the project default") and do it. Two narrow exceptions: the user explicitly asks for something else on *this* branch, or a green suite is unobtainable (then stop and report — never open a PR on a red suite). **On a stack** (the plan has a `## Stack` section), still invoke it for test verification and the cleanup checks, but do NOT take its push/PR option: `gh stack push` pushes the layers and `gh stack submit` opens their PRs (Stacked finalize, below).
 
-## Step 11b: Momentum Hook — next card + Slack + kanban re-sync (runs whenever a PR was created)
+**Reference the issue correctly — `Closes #N` is not automatic.** Use `Closes #N` only when merging the PR genuinely completes the card. When the branch delivers a *prerequisite* for #N, or one slice of a multi-PR card, write `Refs #N` and say in the body what remains open; otherwise the merge auto-closes a card that still has work, and the next session finds it closed and re-derives the scope from scratch.
+
+If Step 7 surfaced any approved deviations, surface them in the PR body under a "Deviations from issue text" section so reviewers see intent. (There is no changelog step: a shared `CHANGELOG.md` edited by every PR is a frequent source of catch-up-merge conflicts, so the merged-PR history is the record of what changed.)
+
+**Stacked finalize** (only when the plan has a `## Stack` section; it replaces the single-PR gate and PR creation above, including `finishing-a-development-branch`'s push/PR option): run `make pr_check` on the **top** layer (it contains every layer's change) plus `make lint` on each lower layer; open every layer's PR with `gh stack submit` instead of `gh pr create`; then give each layer's PR its own body (the stack map, `Refs #N` / `Closes #N` per layer, and on lower layers a "don't merge from this PR" line). Each layer's PR is gated by its own CI. Details: `references/stacked-prs.md` ("Finalize").
+
+**The agent's job ends at merge-ready, and merge-ready is a report to the user, never a merge.** Merge-ready means pushed, PR open, CI green, the configured reviewer's verdict on the current head plus its final full review done when a reviewer is active (`resolve-pr-concerns` Step 5a; the vendor-neutral `review-gate` status shows both, and the reviewer's own status check alone is not evidence; with `"active": null` there is none), conversation resolved, and GitHub not reporting `CONFLICTING` / `DIRTY` — nor `BEHIND` when the base branch's rules require up-to-date branches (strict required status checks; with a merge queue a behind PR reads `CLEAN`). `merge_gate.py` reads the rules and decides. The user merges — or gives explicit, one-off permission to merge *that* PR, which never carries over to another. If `main` uses a **merge queue**, merging means "Merge when ready", which enqueues the PR, and the queue tests it against the latest `main` — so finalize is "gate locally + push + open PR + drive to merge-ready, then the user merges or enqueues it."
+
+## Step 11b: Momentum Hook — next card + kanban re-sync, Slack opt-in only (runs whenever a PR was created)
 
 Three quick actions the moment the PR exists, so momentum survives the review gap. (The next-card computation here is `clean-up-kanban` §7 — the same logic as Step 0, evaluated at PR time; keep them consistent.)
 
 1. **Propose the next card — full §7 output shape, evaluated as-if-merged.** Compute per `clean-up-kanban` §7 with ONE deliberate deviation from Step 0's evaluation point: treat THIS PR as already merged (its issue closed, its blocked-by edges satisfied) — that is what makes "the card this PR naturally unblocks" rankable while the PR is still open. Output: primary pick per unblocked epic track (the current track's primary is normally the just-unblocked card), the **parallelizable-with-this-PR** set, resume candidates, and evidence-backed exclusions. Tell the user directly. **Orphan fallback:** when the issue has no parent epic (Step 1f orphan path, incl. would-be-epic cards), derive the picks from the GH dependency graph alone — cards wired blocked-by this issue; if none, recommend from the board's Stage/Priority ordering and say the pick has no epic context.
-2. **Post the momentum message to the team's Slack build channel** (via the Slack MCP `slack_send_message`; the channel is a per-repo convention — skip this step if the repo has none), formatted exactly:
+2. **Slack posting is off by default.** Item 1's recommendation goes **to the user in chat**, not to a team channel: a per-PR posting cadence is noise, and an ignored post is worse than none. Post the momentum message to the team's Slack build channel **only if the user explicitly asks this session and the repo has such a channel convention** (via the Slack MCP `slack_send_message`), formatted exactly:
    > Issue #X (<3-4 word summary>) is in PR now, recommend working on issue #Y when it finishes. [Issues #Z, #A can be parallelized with #X too.] [Other tracks ready next: #P (epic #E), #Q (epic #F).]
    `#Y` is the CURRENT track's next pick from item 1 (as-if-merged). Each bracketed clause is optional and appears **iff its set is non-empty**, and each stays literally true: the first carries ONLY the parallelizable-with-this-PR set; the second carries other tracks' primary picks. Nothing item 1 computed is dropped, and nothing is mislabeled as parallel work. If nothing is unblocked (epic drained or all successors blocked elsewhere), say that instead: "…is in PR now; epic #E has no unblocked successor — next work comes from epic #F per the roadmap." For orphan/would-be-epic builds (item 1's fallback), never name epics — use: "…is in PR now; no parent epic — recommend #Y next per the dependency graph" (or "…per the board's Stage/Priority ordering" when the graph offers nothing).
 3. **Kanban re-sync for build-time decisions.** Building almost always decides things the board doesn't know yet (a stopgap became permanent, a card's scope shrank, a follow-on gap surfaced, an assumption in a sibling card broke). Sweep the decisions made during THIS build and write them back: amendment blocks on affected cards, new follow-on cards (with parent epic), closures for cards this PR obsoletes — per `clean-up-kanban` §3 discipline, with user approval for creations/closures. Do not let build-time knowledge evaporate into the PR description alone.
 
 ## Step 12: PR Follow-Up
 
-If a PR was created in Step 11, run Step 11b (momentum hook) first, then invoke `resolve-pr-concerns`. A freshly opened PR draws bot reviews (the configured PR reviewer named in `.github/pr-reviewer.json`, Copilot, etc.) within seconds, and dependabot/renovate PRs against the same base branch may be foldable. That skill enumerates everything pending and drives it to merge-ready, including a final re-review of the latest commit after fixes land (auto-run, or the reviewer's configured trigger comment when the repo is in manual mode). With `"active": null` there is no reviewer, so nothing is triggered and the skill falls back to its Step 1b pre-pass review. Otherwise, after the incremental loop is clean, it posts the adapter's `final_review_comment` once (the final full review; `resolve-pr-concerns` Step 5a). A reviewer with a local review runs those fix rounds on the developer's machine instead (`local_review.py`, which checks the local allowance with `review_preflight.py` first; `resolve-pr-concerns`, "Local review rounds"), so the PR's one review request is the final full review. A refused request is waited out until its `retry_after` and re-posted unchanged, never escalated (`resolve-pr-concerns`, "Review requests and the rate limit").
+If a PR was created in Step 11, run Step 11b (momentum hook) first, then **actually invoke the `resolve-pr-concerns` skill — do not hand-roll a lightweight follow-up** (triggering the reviewer and eyeballing the checks is not the skill; it re-runs `make pr_check` on the integrated state and drives the whole loop, human reviewers' threads included). **A merge-ready claim needs the ACTUAL check results** — `gh pr checks`, or that skill's `wait_for_pr_checks.py`, read to a terminal state — never a prediction from a local run: CI is the authority, the local `make pr_check` is the pre-flight. A freshly opened PR draws bot reviews (the configured PR reviewer named in `.github/pr-reviewer.json`, Copilot, etc.) within seconds, and dependabot/renovate PRs against the same base branch may be foldable. That skill enumerates everything pending and drives it to merge-ready, including a final re-review of the latest commit after fixes land (auto-run, or the reviewer's configured trigger comment when the repo is in manual mode). With `"active": null` there is no reviewer, so nothing is triggered and the skill falls back to its Step 1b pre-pass review. Otherwise, after the incremental loop is clean, it posts the adapter's `final_review_comment` once (the final full review; `resolve-pr-concerns` Step 5a). A reviewer with a local review runs those fix rounds on the developer's machine instead (`local_review.py`, which checks the local allowance with `review_preflight.py` first; `resolve-pr-concerns`, "Local review rounds"), so the PR's one review request is the final full review. A refused request is waited out until its `retry_after` and re-posted unchanged, never escalated (`resolve-pr-concerns`, "Review requests and the rate limit"). Enforcement is **structural** — `review-gate` is a required status when a reviewer is active — so a trigger comment only turns the gate green sooner; a missing review or final review blocks merge exactly like a failing check. That skill's merge-readiness report (`merge_gate.py`) is a report for the user, never permission to merge.
 
-**A blocking merge state is GATING, never optional** (`resolve-pr-concerns` Step 2f). If GitHub reports `mergeStateStatus` `BEHIND` (the ruleset requires up-to-date branches), `CONFLICTING` or `DIRTY`, merge the base in, re-run CI, and re-trigger the automated reviewer on the merged state — green checks on a stale branch verified code that won't actually land. Do not report the PR as merge-ready in any of those states. With a merge queue on, a PR that is merely behind its base reads `CLEAN` and needs no catch-up merge: the queue tests the combined state.
+**For a stack**, `resolve-pr-concerns` detects it (its Step 1c) and drives every layer bottom-up, each with its own final full review, reporting merge-ready only when every layer is.
+
+**A blocking merge state is GATING, never optional** (`resolve-pr-concerns` Step 2f). If GitHub reports `mergeStateStatus` `CONFLICTING` or `DIRTY` — or `BEHIND`, which blocks only under the up-to-date rule (the base branch's rules require up-to-date branches: strict required status checks; `merge_gate.py` reads the rules and decides) — merge the base in (on a stack layer never merge: `gh stack sync` or `gh stack rebase`), re-run CI, and re-trigger the automated reviewer on the merged state when `reviewer_state.py` reports `needs_trigger: true` (a merge that left the PR's own diff unchanged carries the verdict) — green checks on a stale branch verified code that won't actually land. `wait_for_pr_checks.py` exits 3 on a conflicting PR, whose checks never register: that is this gate, not a CI wait. Do not report the PR as merge-ready in any of those states. With a merge queue on, a PR that is merely behind its base reads `CLEAN` and needs no catch-up merge: the queue tests the combined state.
 
 For individual reviewer comments — particularly any that seem unclear, technically questionable, or that you're tempted to agree with performatively — lean on `superpowers:receiving-code-review`.
 
 ## Red Flags — Stop and Reassess
 
+- Building a target issue whose number doesn't match the current branch **without running the Step 1b mismatch gate** — silently coding on `main` or on an unrelated issue's branch is exactly what the gate prevents.
+- Creating a worktree in Step 1d without linking the branch to the issue card (`gh issue develop`), or without verifying the link with `--list`.
+- Proceeding on the current branch in Step 1e without first stating its name out loud.
+- Silently picking one side of an open question the card itself poses, instead of surfacing it at Step 2.
 - Skipping Step 3 brainstorming because the issue "seems clear" — no spec or plan on disk means stop.
 - Starting Step 5 before the spec doc and plan exist and are user-approved.
 - Asking the user to review a spec or plan via a local file path instead of a pushed GitHub blob link — local URIs break across worktrees (Step 3 requires push + GH link).
@@ -392,7 +427,15 @@ For individual reviewer comments — particularly any that seem unclear, technic
 - **Advancing to Step 8 acceptance on functionality only the user can validate live, without first handing them a Step-7b test kit (or justifying why live E2E isn't needed)** — if neither you nor the user has run it live, nobody knows it works; asking for acceptance is premature.
 - Marking an audit row `⚠️ approved deviation` without a citation to the brainstorming-stage spec/plan section that recorded the approval.
 - Editing the issue body to tick boxes that aren't actually satisfied (i.e., glossing instead of returning to Step 5).
-- Hand-rolling commit/push/PR creation instead of letting `superpowers:finishing-a-development-branch` own it.
+- Hand-rolling commit/push/PR creation instead of letting `superpowers:finishing-a-development-branch` own it (the single-PR path; on a stack, `gh stack push` / `gh stack submit` own push and PR creation).
+- Opening the PR (Step 11) without a green `make pr_check`, or substituting `make tests` / a passing E2E for it.
+- Claiming "ready" / "CI will pass" from a local run instead of the fresh `make pr_check` tail (at creation) or the actual `gh pr checks` terminal results (after creation). Predicting CI is not verifying it.
+- Doing an ad-hoc PR follow-up in Step 12 (trigger the reviewer, glance at checks) instead of actually invoking `resolve-pr-concerns`.
+- **Presenting the integration menu in Step 11 (or asking "merge locally, PR, or keep?")** — this skill always opens a PR. Citing the norm and then asking anyway is the same failure.
+- Writing `Closes #N` when the branch only delivers a prerequisite or one slice of #N (use `Refs #N`).
+- Merging, or treating a merge-ready report as permission to merge, without the user's explicit one-off permission for that PR.
+- Offering a stack for work on the don't-stack list, past 4 layers or 300 files, or without checking `gh stack --help` first; installing `gh stack` (or any other CLI extension or system tool) on the user's machine yourself instead of showing the user the commands.
+- Merging `main` into a stack layer (use `gh stack sync` / `gh stack rebase`), or running `gh pr merge` on a stacked PR.
 - Moving past Step 8 with the user identifying gaps.
 
 ## Common Mistakes
@@ -409,9 +452,14 @@ For individual reviewer comments — particularly any that seem unclear, technic
 | Choosing 5a (subagent) for a plan whose tasks are tightly coupled | Switch to 5b manual TDD; subagents thrash on tightly-coupled tasks |
 | Choosing 5b (manual) when the plan is genuinely independent | 5a is faster; reserve 5b for coupling or explicit human-in-loop preference |
 | Letting SDD invoke `finishing-a-development-branch` itself | Instruct SDD to stop after final code review; build-from-issue owns Steps 6–11 |
-| Skipping Step 6 because "all unit tests pass" | E2E is the only thing that exercises real path/schema/API alignment |
+| Skipping Step 6 because "all unit tests pass" | E2E is the only thing that exercises the real flow end to end — path/schema/API alignment, the rendered UI |
 | Papering over E2E findings to push the PR through | Treat E2E findings as a TDD RED — fix the gap, re-run, then proceed |
 | Skipping Step 7's audit and going straight to user acceptance | Walk the boxes; produce the evidence table; only then ask the user |
 | Treating audit divergences as "good enough" without spec backing | A deviation only counts as `⚠️ approved` if there's a brainstorming-stage record of the approval; otherwise it's `❌` and you return to Step 5 |
 | Forgetting to update the issue card with the audit results | Tick the satisfied + approved-deviation boxes via `gh issue edit`; append a deviation note where applicable |
-| Forgetting `Closes #N` in the PR body | `superpowers:finishing-a-development-branch` populates the body; ensure the issue ref is included |
+| Skipping the audit because the card has no checkboxes | Audit the prose criteria; post the table as an issue comment instead of rewriting the card |
+| Forgetting to reference the issue in the PR body | Ensure a `Closes #N` / `Refs #N` line is present — see Step 11 for which |
+| `Closes #N` on a prerequisite-only or partial-slice PR | `Refs #N` + say what remains; `Closes` auto-closes a card with work left |
+| Asking the user how to finalize the branch | Always push + open a PR; state the choice and proceed (Step 11) |
+| Opening the PR without `make pr_check`, or running `make tests` instead | Run `make pr_check` (exit 0) at Step 11 before the PR; `make tests` skips coverage, the speed check and security |
+| Claiming "ready" / "CI will pass" from a local run | Back every readiness claim with evidence: the `make pr_check` tail (creation) or terminal `gh pr checks` (after creation) |

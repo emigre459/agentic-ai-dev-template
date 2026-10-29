@@ -1,7 +1,12 @@
 # Vendor-neutral review gate. Posts the `review-gate` commit status: green only
 # when the configured PR reviewer (.github/pr-reviewer.json) reviewed the current
-# head AND finished its final full review. Require `review-gate` in the main
-# ruleset once a reviewer is installed; never require the vendor's own check (it
+# head AND finished its final full review, AND (when the default branch has a
+# CODEOWNERS file naming user owners) every changed path's owner approved the head
+# unless the author owns it. With no reviewer (`"active": null`) such a CODEOWNERS
+# file alone turns the status on as the ownership half only; with neither, nothing
+# is posted. Team/email owners are left to GitHub's code-owner rule. Require
+# `review-gate` in the main ruleset once a reviewer is installed (or a CODEOWNERS
+# file gates the repo); never require the vendor's own check (it
 # can pass on heads it skipped, and some vendors can't report on merge-queue
 # commits). Always checks out and runs the default branch's copy of the script,
 # because it holds `statuses: write`.

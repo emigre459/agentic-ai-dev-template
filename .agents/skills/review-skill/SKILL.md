@@ -6,7 +6,7 @@ description: |
   skill, check a skill, audit a SKILL.md, or verify skill quality. Runs
   automated structural checks and performs qualitative analysis of description
   quality, instruction clarity, progressive disclosure, and security.
-allowed-tools: Bash(uv run python:*) Read Glob Grep
+allowed-tools: Bash(python3:*) Read Glob Grep
 ---
 
 # Review Skill
@@ -34,8 +34,12 @@ Run the validation script (bundled in this skill at `scripts/validate.py`,
 referenced relative to the skill root per the Agent Skills spec) against the target:
 
 ```
-uv run python scripts/validate.py <path-to-skill-directory>
+python3 scripts/validate.py <path-to-skill-directory>
 ```
+
+It uses only the Python standard library, so plain `python3` is enough. Add
+`--json <report.json>` to also write the results as
+`{"results": [{"level", "check", "message"}]}`.
 
 Resolve `scripts/validate.py` relative to this skill's own directory — run it from
 there, or prefix it with the skill's path (Claude Code exposes that as
@@ -47,10 +51,11 @@ Capture all output. The script checks structural rules:
 - YAML frontmatter (name constraints, description constraints, no XML tags, reserved words)
 - Body size (line count, character count)
 - References (linked from SKILL.md, no cross-references, TOC for long files)
-- Scripts (existence, executability)
+- External references (FAIL when SKILL.md or a references file tells the agent to run a script outside the skill's own folder; `<placeholder>` paths are exempt, and prose pointers such as `../<sibling>/SKILL.md` are allowed)
+- Scripts (existence; only `#!` scripts need the executable bit, importable modules do not)
 - Security (hardcoded secrets, backslash paths)
 
-The script exits 0 on success, 1 if any checks fail. It also writes a `.validation-result.json` file in the skill directory.
+The script exits 0 on success, 1 if any checks fail, and writes nothing into the skill directory.
 
 ### Step 3: Perform qualitative review
 

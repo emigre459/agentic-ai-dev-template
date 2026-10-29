@@ -82,16 +82,16 @@ def test_run_steps_take_event_data_only_through_env() -> None:
 
 
 def test_the_wait_script_ignores_this_jobs_cancelled_runs_by_name() -> None:
-    """wait_for_pr_checks.sh names the job to skip its superseded (cancelled) runs."""
+    """wait_for_pr_checks.py names the job to skip its superseded (cancelled) runs."""
     wait_script = (
         _WF.parents[1]
         / ".agents"
         / "skills"
         / "resolve-pr-concerns"
         / "scripts"
-        / "wait_for_pr_checks.sh"
+        / "wait_for_pr_checks.py"
     ).read_text()
-    assert f'REVIEW_GATE_JOB="{_gate_job()["name"]}"' in wait_script
+    assert f'REVIEW_GATE_JOB = "{_gate_job()["name"]}"' in wait_script
 
 
 def test_a_default_branch_without_the_script_skips_instead_of_failing() -> None:
