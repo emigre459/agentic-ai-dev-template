@@ -110,7 +110,7 @@ settings, skip confirmation prompts, or continue after a preflight failure.
   `.agents/rules/`, plus harness-agnostic skills in `.agents/skills/` (Claude Code
   reads them via the `.claude/skills` symlink; Cursor natively).
 - **`Makefile` orchestration** with identical verbs across stacks
-  (`make deps|format|lint|tests|coverage|security|pr_check`) and `make cc` to drive
+  (`make deps|format|lint|tests|coverage|test_speed_check|security|pr_check`) and `make cc` to drive
   Claude Code.
 - **Canonical repo settings** in `.github/repo-settings/` — applied first with
   `make apply_repo_settings_bootstrap` and finalized after the setup PR merges

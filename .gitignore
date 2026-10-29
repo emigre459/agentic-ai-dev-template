@@ -6,6 +6,8 @@ __pycache__/
 .coverage.*
 htmlcov/
 coverage.xml
+# JUnit from `make coverage`, read by `make test_speed_check`
+test-results.xml
 
 # Node / bun
 node_modules/

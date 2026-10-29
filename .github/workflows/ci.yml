@@ -51,6 +51,10 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: make deps
       - run: make coverage
+      # Not on pushes to main: there it would only re-run flakes after merge.
+      - name: Per-test speed guard
+        if: github.event_name != 'push'
+        run: make test_speed_check
 
   python-security:
     runs-on: ubuntu-latest
@@ -91,6 +95,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: make deps
       - run: make coverage
+      # Not on pushes to main: there it would only re-run flakes after merge.
+      - name: Per-test speed guard
+        if: github.event_name != 'push'
+        run: make test_speed_check
 
   react-security:
     runs-on: ubuntu-latest
