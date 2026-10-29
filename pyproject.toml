@@ -7,7 +7,7 @@ dependencies = []
 
 [dependency-groups]
 dev = [
-    "black>=26.3.0",
+    "black>=26.10.1",
     "ruff>=0.15.20",
     "mypy>=1.13.0",
     "pytest>=9.1.1",

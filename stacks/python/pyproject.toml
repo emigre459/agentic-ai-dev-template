@@ -24,7 +24,7 @@ module-name = "example_app"
 [dependency-groups]
 dev = [
     "bandit>=1.9.4",
-    "black>=26.3.0",
+    "black>=26.10.1",
     "mypy>=1.13.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
