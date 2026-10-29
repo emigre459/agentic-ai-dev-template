@@ -1,8 +1,8 @@
 """Guard: downstream organization names must not leak into this public template.
 
 The denylist holds only SHA-256 digests, so the names it blocks never appear
-in the repository themselves. Every tracked line under the scanned paths is
-split into lower-cased alphanumeric tokens (plus adjacent pairs joined by
+in the repository themselves. Every line of every tracked text file (binary
+files are skipped) is split into lower-cased alphanumeric tokens (plus adjacent pairs joined by
 ``-``, ``_`` and nothing), each token is hashed, and a hit fails the test.
 The failure message names the file and line, never the token.
 """
@@ -14,7 +14,6 @@ import subprocess  # nosec B404
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCANNED_PATHS = (".agents/skills", "tests/template", "pyproject.toml")
 
 # SHA-256 of the lower-cased organization name, its product names and its
 # private repo names (hyphen, underscore and joined forms). Personal logins
@@ -62,7 +61,7 @@ def _sha256(token: str) -> str:
 
 def _tracked_files() -> list[Path]:
     result = subprocess.run(  # nosec B603 B607
-        ["git", "ls-files", *SCANNED_PATHS],
+        ["git", "ls-files"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -71,9 +70,11 @@ def _tracked_files() -> list[Path]:
     return [REPO_ROOT / name for name in result.stdout.splitlines() if name]
 
 
-def _offending_locations() -> list[str]:
+def _offending_locations(paths: list[Path]) -> list[str]:
     hits: list[str] = []
-    for path in _tracked_files():
+    for path in paths:
+        if not path.is_file():
+            continue  # tracked but deleted in the working tree, or a submodule
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -94,6 +95,14 @@ def test_tokens_of_joins_adjacent_pairs() -> None:
     }
 
 
-def test_no_org_name_in_skills_or_new_fixtures() -> None:
-    hits = _offending_locations()
+def test_tracked_file_list_is_not_empty() -> None:
+    files = _tracked_files()
+    assert files, "git ls-files returned nothing: the guard would scan no files"
+    assert REPO_ROOT / "tests/template/test_no_org_names.py" in files
+
+
+def test_no_org_name_in_any_tracked_file() -> None:
+    files = _tracked_files()
+    assert files, "git ls-files returned nothing: the guard would scan no files"
+    hits = _offending_locations(files)
     assert not hits, "downstream org name found (see denylist) at: " + ", ".join(hits)
