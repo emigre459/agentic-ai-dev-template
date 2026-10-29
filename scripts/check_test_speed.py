@@ -54,9 +54,12 @@ A test id is ``"{classname}::{name}"`` as JUnit reports it, e.g.
 ``tests.pkg.test_mod.TestX::test_a`` (pytest) or ``src/app/view.test.tsx::view >
 renders`` (Vitest). In ``--rerun``, ``{test}`` expands to the pytest node id or to
 ``<file> -t "<name as an anchored, escaped regex>"`` for Vitest, and an optional
-``{junit}`` to a temp file the re-run writes its JUnit to; with ``{junit}`` the
-re-run is judged on the test's own JUnit time, without it on the whole command's
-wall-clock (runner start-up included, so it can only over-read).
+``{junit}`` to a temp file the re-run writes its JUnit to. With ``{junit}`` the
+re-run is judged on the test's own JUnit time, and a re-run whose match was
+skipped or that ran no test is unmeasurable (fails closed). Without it the
+re-run is judged on the whole command's wall-clock when it exits 0: start-up is
+included, so a test that ran reads slower than it is, but a command that exits 0
+without running the test reads fast. Always pass ``{junit}``.
 
 Stdlib only and runnable by path::
 
@@ -209,24 +212,38 @@ class CaseTiming(NamedTuple):
         return max(self.total - sum(s.seconds for s in self.shared), 0.0)
 
 
-def _seconds(raw: str | None) -> float:
-    """Parse a JUnit ``time`` attribute; anything unreadable counts as 0.
+def _seconds(raw: str | None, where: str) -> float:
+    """Parse a JUnit ``time`` attribute.
+
+    A missing or unreadable time is bad input, never 0 s: reading it as 0 would
+    pass the very test it belongs to.
 
     Parameters
     ----------
     raw : str | None
         The attribute value.
+    where : str
+        The testcase and file, for the message.
 
     Returns
     -------
     float
-        Seconds, or 0.0.
+        Seconds.
+
+    Raises
+    ------
+    BadInput
+        If the attribute is missing, not a number, negative or not finite.
     """
+    if raw is None:
+        raise BadInput(f"{where} has no time attribute.")
     try:
-        value = float(raw or 0.0)
+        value = float(raw)
     except ValueError:
-        return 0.0
-    return value if math.isfinite(value) else 0.0
+        value = math.nan
+    if not math.isfinite(value) or value < 0:
+        raise BadInput(f"{where} has an unreadable time {raw!r}.")
+    return value
 
 
 def _shared_setups(testcase: ElementTree.Element) -> tuple[SharedSetup, ...]:
@@ -300,20 +317,25 @@ def parse_junit(path: Path) -> list[CaseTiming]:
     Raises
     ------
     BadInput
-        If the file is missing, empty, unparseable or has no testcases: the gate
-        measured nothing, which must fail loudly.
+        If the file is missing, unreadable, empty, unparseable, has no testcases
+        or has a testcase without a usable time: the gate measured nothing (or
+        nothing it can trust), which must fail loudly.
     """
     if not path.is_file():
         raise BadInput(
             f"JUnit XML not found at {path}; the coverage run must write it, or "
             "this gate measured nothing."
         )
-    if not path.read_bytes().strip():
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise BadInput(f"JUnit XML at {path} is unreadable: {exc}") from exc
+    if not data.strip():
         raise BadInput(f"JUnit XML at {path} is empty.")
     try:
         # Our own test run's report, not untrusted input.
-        root = ElementTree.parse(path).getroot()  # nosec B314
-    except ElementTree.ParseError as exc:
+        root = ElementTree.fromstring(data)  # nosec B314
+    except (ElementTree.ParseError, ValueError) as exc:
         raise BadInput(f"JUnit XML at {path} is unparseable: {exc}") from exc
     testcases = list(root.iter("testcase"))
     if not testcases:
@@ -323,7 +345,10 @@ def parse_junit(path: Path) -> list[CaseTiming]:
         CaseTiming(
             tc.get("classname", ""),
             tc.get("name", ""),
-            _seconds(tc.get("time")),
+            _seconds(
+                tc.get("time"),
+                f"{path}: testcase {tc.get('classname', '')}::{tc.get('name', '')}",
+            ),
             _shared_setups(tc),
             dialect,
             tc.find("skipped") is not None,
@@ -347,10 +372,19 @@ def parse_allowlist(path: Path) -> set[str]:
     -------
     set[str]
         Allowlisted ``"{classname}::{name}"`` ids.
+
+    Raises
+    ------
+    BadInput
+        If the file exists but cannot be read as text.
     """
     if not path.exists():
         return set()
-    entries = (line.split("#", 1)[0].strip() for line in path.read_text().splitlines())
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise BadInput(f"allowlist {path} is unreadable: {exc}") from exc
+    entries = (line.split("#", 1)[0].strip() for line in text.splitlines())
     return {entry for entry in entries if entry}
 
 
@@ -499,8 +533,9 @@ def measure_alone(case: CaseTiming, template: str) -> float | None:
         With ``{junit}`` in the template, the test's charged time from the
         re-run's JUnit; otherwise the command's wall-clock, which counts only
         when it exits 0. ``None`` when it could not be measured (did not start,
-        timed out, wrote no usable JUnit, or failed): deliberately NOT "fast",
-        the caller fails closed on it.
+        timed out, failed, wrote no usable JUnit, or ran no test: a skipped
+        match is not a measurement): deliberately NOT "fast", the caller fails
+        closed on it.
     """
     with tempfile.TemporaryDirectory() as tmp:
         xml = Path(tmp) / "alone.xml"
@@ -524,12 +559,15 @@ def measure_alone(case: CaseTiming, template: str) -> float | None:
             timings = parse_junit(xml)
         except BadInput:
             return None
-    exact = [t.charged for t in timings if t.test_id == case.test_id]
+    ran = [t for t in timings if not t.skipped]
+    exact = [t.charged for t in ran if t.test_id == case.test_id]
     if exact:
         return max(exact)
+    if any(t.test_id == case.test_id for t in timings):
+        return None  # found, but skipped alone: no measurement
     # A parametrized id can differ in the re-run; take the slowest test that ran
-    # rather than reporting "unmeasurable".
-    return max((t.charged for t in timings if not t.skipped), default=None)
+    # rather than reporting "unmeasurable" (None when nothing ran at all).
+    return max((t.charged for t in ran), default=None)
 
 
 def default_recheck_workers() -> int:
@@ -603,13 +641,14 @@ def budget_factor(settings: Mapping[str, Any], pinned: float | None) -> float:
             raise BadInput(f"--factor {pinned!r} is not a positive finite number.")
         print(
             f"test-speed guard: runner class {name}: runner-speed factor "
-            f"{pinned:.2f}, pinned with --factor (not calibrated).",
+            f"{pinned:.2f}, pinned with --factor (not calibrated; a pin bypasses "
+            f"the {low:g}-{high:g} clamp).",
             file=sys.stderr,
         )
         if not low <= pinned <= high:
             print(
                 f"test-speed guard: note: the pinned factor is outside the "
-                f"calibrated {low:g}-{high:g} range; using it as given.",
+                f"{low:g}-{high:g} clamp; using it as given.",
                 file=sys.stderr,
             )
         return pinned
@@ -663,8 +702,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--factor",
         type=float,
         default=None,
-        help="Pin the runner-speed factor both budgets are scaled by instead of "
-        "calibrating this machine. Must be positive and finite.",
+        help="Escape hatch: pin the runner-speed factor both budgets are scaled "
+        "by instead of calibrating this machine. A pin bypasses the configured "
+        "factor_low-factor_high clamp. Must be positive and finite.",
     )
     p.add_argument(
         "--no-recheck",
@@ -802,6 +842,7 @@ def main(argv: list[str] | None = None) -> int:
         settings = runner_speed.load_settings(args.config)
         template = _check_template(args.rerun)
         timings = parse_junit(args.junit)
+        allow = parse_allowlist(args.allowlist)
         # Calibrate first, alone: every re-measure below runs after it.
         scale = budget_factor(settings, args.factor)
     except (ValueError, SystemExit) as exc:
@@ -817,7 +858,6 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
 
-    allow = parse_allowlist(args.allowlist)
     # With --no-recheck there is no solo time, so only the budget itself applies.
     line = budget * float(settings["recheck_fraction"]) if args.recheck else budget
     suspects = sorted(

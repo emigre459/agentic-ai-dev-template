@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import time
 from collections.abc import Mapping
@@ -117,7 +118,7 @@ def calibrate(repeats: int = 5) -> float:
 
 
 def _positive(value: object) -> bool:
-    """Return whether ``value`` is a positive JSON number (``bool`` excluded).
+    """Return whether ``value`` is a positive finite number (``bool`` excluded).
 
     Parameters
     ----------
@@ -129,7 +130,12 @@ def _positive(value: object) -> bool:
     bool
         True for a positive ``int`` or ``float``.
     """
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
 
 
 def _validate(section: object, where: str) -> dict[str, Any]:
@@ -304,11 +310,11 @@ def factor(measured_s: float, reference_s: float, *, low: float, high: float) ->
     Raises
     ------
     ValueError
-        If ``reference_s`` is not positive (a division by zero or a negative
-        factor) or ``low`` exceeds ``high`` (the clamp would silently return
+        If ``reference_s`` is not positive or is NaN (a division by zero, a
+        negative factor, or a NaN the clamp would pass through) or ``low`` exceeds ``high`` (the clamp would silently return
         ``low``).
     """
-    if reference_s <= 0:
+    if not reference_s > 0:  # also rejects NaN
         raise ValueError(f"reference_s must be positive, got {reference_s!r}")
     if low > high:
         raise ValueError(f"low ({low!r}) must not exceed high ({high!r})")

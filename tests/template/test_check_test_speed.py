@@ -193,6 +193,124 @@ def test_empty_junit_is_exit_2(
     assert "junit.xml" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("time_attr", ["", 'time="abc"', 'time="nan"', 'time="-1"'])
+def test_a_testcase_without_a_usable_time_is_exit_2(
+    tmp_path: Path, time_attr: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A missing time must not read as 0 s, which would pass that test."""
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuites name="pytest tests"><testsuite>'
+        f'<testcase classname="{_PY_MOD}" name="test_a" {time_attr} />'
+        "</testsuite></testsuites>"
+    )
+    code = cts.main(
+        [
+            "--junit",
+            str(junit),
+            "--allowlist",
+            str(tmp_path / "allow.txt"),
+            "--rerun",
+            _RERUN,
+            "--config",
+            str(_config(tmp_path)),
+            "--factor",
+            "1",
+        ]
+    )
+    assert code == 2
+    assert "test_a" in capsys.readouterr().err
+
+
+def test_an_unreadable_junit_is_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    junit = _junit(tmp_path / "junit.xml", [_case("test_a", 1.0)])
+
+    def _deny(self: Path) -> bytes:
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "read_bytes", _deny)
+    code = cts.main(
+        [
+            "--junit",
+            str(junit),
+            "--allowlist",
+            str(tmp_path / "allow.txt"),
+            "--rerun",
+            _RERUN,
+            "--config",
+            str(_config(tmp_path)),
+            "--factor",
+            "1",
+        ]
+    )
+    assert code == 2
+    assert "unreadable" in capsys.readouterr().err
+
+
+def test_an_undecodable_junit_is_exit_2(tmp_path: Path) -> None:
+    junit = tmp_path / "junit.xml"
+    junit.write_bytes(
+        b'<?xml version="1.0" encoding="utf-8"?><testsuites name="\xff\xfe">'
+        b'<testcase classname="m" name="t" time="1" /></testsuites>'
+    )
+    with pytest.raises(cts.BadInput, match="unparseable"):
+        cts.parse_junit(junit)
+
+
+@pytest.mark.parametrize("kind", ["undecodable", "directory"])
+def test_an_unreadable_allowlist_is_exit_2(
+    tmp_path: Path,
+    kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    allowlist = tmp_path / "allow"
+    if kind == "directory":
+        allowlist.mkdir()
+    else:
+        allowlist.write_bytes(b"\xff\xfe\x00bad")
+    junit = _junit(tmp_path / "junit.xml", [_case("test_a", 1.0)])
+    code = cts.main(
+        [
+            "--junit",
+            str(junit),
+            "--allowlist",
+            str(allowlist),
+            "--rerun",
+            _RERUN,
+            "--config",
+            str(_config(tmp_path)),
+            "--factor",
+            "1",
+        ]
+    )
+    assert code == 2
+    assert "allowlist" in capsys.readouterr().err
+
+
+def test_a_pinned_factor_says_it_bypasses_the_clamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = _run(
+        tmp_path,
+        [_case("test_a", 1.0)],
+        factor="3",
+        measure=_FakeMeasure({}),
+        monkeypatch=monkeypatch,
+    )
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "bypasses the 0.5-2 clamp" in err
+    assert "30.00s per test" in err
+    assert "bypasses" in cts._build_parser().format_help()
+
+
 def test_bad_config_is_exit_2(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -673,6 +791,69 @@ def test_measure_reads_the_test_from_the_rerun_junit(tmp_path: Path) -> None:
     )
     timing = cts.CaseTiming(_PY_MOD, "test_a", 20.0)
     assert cts.measure_alone(timing, template) == 12.5
+
+
+def _writer(tmp_path: Path, xml: str) -> str:
+    """Return a ``--rerun`` template whose command writes ``xml`` to ``{junit}``."""
+    runner = tmp_path / "writer.py"
+    runner.write_text(
+        "import sys\nfrom pathlib import Path\n"
+        f"Path(sys.argv[1]).write_text({xml!r})\n"
+    )
+    return (
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(runner))} {{junit}} {{test}}"
+    )
+
+
+def test_a_rerun_whose_exact_match_is_skipped_is_unmeasurable(tmp_path: Path) -> None:
+    """A skipped re-run is 0 s, which must not pass an over-budget test."""
+    template = _writer(
+        tmp_path,
+        '<testsuites name="pytest tests"><testsuite>'
+        f'<testcase classname="{_PY_MOD}" name="test_a" time="0"><skipped /></testcase>'
+        f'<testcase classname="{_PY_MOD}" name="other" time="0.1" />'
+        "</testsuite></testsuites>",
+    )
+    assert cts.measure_alone(cts.CaseTiming(_PY_MOD, "test_a", 20.0), template) is None
+
+
+def test_a_rerun_with_no_tests_is_unmeasurable(tmp_path: Path) -> None:
+    template = _writer(
+        tmp_path,
+        '<testsuites name="pytest tests"><testsuite>'
+        f'<testcase classname="{_PY_MOD}" name="other" time="0"><skipped /></testcase>'
+        "</testsuite></testsuites>",
+    )
+    assert cts.measure_alone(cts.CaseTiming(_PY_MOD, "test_a", 20.0), template) is None
+    empty = _writer(tmp_path, '<testsuites name="pytest tests"></testsuites>')
+    assert cts.measure_alone(cts.CaseTiming(_PY_MOD, "test_a", 20.0), empty) is None
+
+
+def test_an_unmeasurable_skip_fails_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = _writer(
+        tmp_path,
+        '<testsuites name="pytest tests"><testsuite>'
+        f'<testcase classname="{_PY_MOD}" name="test_a" time="0"><skipped /></testcase>'
+        "</testsuite></testsuites>",
+    )
+    junit = _junit(tmp_path / "junit.xml", [_case("test_a", 20.0)])
+    code = cts.main(
+        [
+            "--junit",
+            str(junit),
+            "--allowlist",
+            str(tmp_path / "allow.txt"),
+            "--rerun",
+            template,
+            "--config",
+            str(_config(tmp_path)),
+            "--factor",
+            "1",
+        ]
+    )
+    assert code == 1
 
 
 def test_measure_without_a_junit_placeholder_times_the_command() -> None:

@@ -75,7 +75,7 @@ def test_factor_rejects_an_inverted_clamp() -> None:
         rs.factor(1.0, 1.0, low=2.0, high=0.5)
 
 
-@pytest.mark.parametrize("reference", [0.0, -1.0])
+@pytest.mark.parametrize("reference", [0.0, -1.0, float("nan")])
 def test_factor_rejects_a_non_positive_reference(reference: float) -> None:
     with pytest.raises(ValueError, match="reference_s"):
         rs.factor(1.0, reference, low=0.5, high=2.0)
@@ -180,6 +180,30 @@ def test_load_settings_reads_a_given_file(tmp_path: Path) -> None:
 def test_load_settings_rejects_a_bad_section(tmp_path: Path, section: Any) -> None:
     with pytest.raises(ValueError, match="test_speed"):
         rs.load_settings(_write_config(tmp_path, section))
+
+
+@pytest.mark.parametrize(
+    ("key", "inner"),
+    [
+        ("budget_seconds", None),
+        ("shared_setup_budget_seconds", None),
+        ("factor_high", None),
+        ("reference_seconds", "runner-a"),
+    ],
+)
+def test_load_settings_rejects_non_finite_numbers(
+    tmp_path: Path, key: str, inner: str | None
+) -> None:
+    """JSON's ``Infinity`` decodes to a float; an infinite budget disables the guard."""
+    section = _settings()
+    if inner is None:
+        section[key] = 12345.5
+    else:
+        section[key][inner] = 12345.5
+    path = _write_config(tmp_path, section)
+    path.write_text(path.read_text().replace("12345.5", "Infinity"))
+    with pytest.raises(ValueError, match="test_speed"):
+        rs.load_settings(path)
 
 
 def test_load_settings_rejects_a_missing_section(tmp_path: Path) -> None:
