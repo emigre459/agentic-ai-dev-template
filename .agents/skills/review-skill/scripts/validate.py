@@ -12,6 +12,10 @@ Usage::
 
     python3 validate.py <path-to-skill-directory-or-SKILL.md> [--json <report.json>]
 
+Known limit, by design: running any relative path the skill does not ship fails,
+even a harmless one such as ``source .venv/bin/activate``; keep such steps out of
+the skill's instructions or describe them in prose.
+
 Exit codes: 0 when no check failed, 1 when at least one check failed, 2 on a
 usage error. ``--json`` writes ``{"results": [{"level", "check", "message"}]}``.
 """
@@ -551,15 +555,15 @@ def check_scripts(skill_dir: str) -> None:
 
 # Words that run a script: `python3 x`, `uv run x`, `bash x`, ... The lookbehind
 # keeps `uv run` from matching inside a longer word or path.
-_RUN_VERB_RE = re.compile(r"(?<![\w./$-])(uv\s+run|python3?|bash|sh|source)(?=\s)")
+_RUN_VERB_RE = re.compile(r"(?<![\w./$-])(uv\s+run|python3?|bash|sh)(?=\s)")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 # A command position inside a shell snippet: line start (after a `$ ` prompt)
 # or right after a control operator.
 _COMMAND_START_RE = re.compile(r"(?:^|&&|\|\||[;|])\s*(?:\$\s+)?([^\s&|;]+)")
-# The POSIX `. path` spelling of `source path`; only at a command position, since
-# a lone "." elsewhere is just the end of a sentence.
-_DOT_SOURCE_RE = re.compile(r"(?:^|&&|\|\||[;|])\s*(?:\$\s+)?\.\s+([^\s&|;]+)")
+# `source path` and its POSIX spelling `. path`; only at a command position,
+# since "source" and "." are ordinary prose ("open source", end of a sentence).
+_SOURCE_RE = re.compile(r"(?:^|&&|\|\||[;|])\s*(?:\$\s+)?(?:source|\.)\s+([^\s&|;]+)")
 # A `skills/<name>/` path segment (`.agents/skills/<name>/...` and friends).
 _SKILLS_SEGMENT_RE = re.compile(r"(?:^|/)skills/([^/]+)/")
 _PLACEHOLDER_CHARS = ("<", ">", "$", "{", "}", "*", "?")
@@ -599,8 +603,8 @@ def _runner_target(verb: str, rest: str) -> str | None:
     Parameters
     ----------
     verb : str
-        The matched run word: ``uv run``, ``python``, ``python3``, ``bash``,
-        ``sh`` or ``source``.
+        The matched run word: ``uv run``, ``python``, ``python3``, ``bash`` or
+        ``sh``.
     rest : str
         The remainder of the line after ``verb``.
 
@@ -611,11 +615,7 @@ def _runner_target(verb: str, rest: str) -> str | None:
         runner is given a module (``-m``), inline code (``-c``) or a plain
         command name such as ``pytest``.
     """
-    kind = "uv run" if verb.startswith("uv") else "python"
-    if verb.startswith("python"):
-        kind = "python"
-    elif not verb.startswith("uv"):
-        kind = "bash"
+    kind = "uv run" if verb.startswith("uv") else "bash" if "sh" in verb else "python"
     tokens = rest.split()
     skip_value = False
     i = 0
@@ -643,10 +643,12 @@ def _script_invocations(text: str) -> set[str]:
     """Return every script path ``text`` tells the reader to run.
 
     Two shapes count as an instruction to run something: a run word
-    (``python3``, ``python``, ``bash``, ``sh``, ``uv run``, ``source``, or ``.``
-    at a command position) followed by a path, anywhere in the text; and a bare
-    path-like command (``scripts/x.py --flag``) in a fenced block or as the
-    start of an inline code span with arguments.
+    (``python3``, ``python``, ``bash``, ``sh``, ``uv run``) followed by a path,
+    anywhere in the text; ``source`` or ``.`` followed by a path, at a command
+    position only; and a bare path-like command (``scripts/x.py --flag``) in a
+    fenced block or as the start of an inline code span with arguments. A
+    command position is a line start in a fence, the start of an inline code
+    span, or right after ``&&``, ``||``, ``;``, ``|`` or a ``$`` prompt.
     A prose pointer such as ``../sibling/SKILL.md`` is neither.
 
     Parameters
@@ -673,9 +675,9 @@ def _script_invocations(text: str) -> set[str]:
         snippets = [line] if in_fence else []
         snippets += [m.group(1) for m in _INLINE_CODE_RE.finditer(line)]
         for snippet in snippets:
-            for match in _DOT_SOURCE_RE.finditer(snippet):
+            for match in _SOURCE_RE.finditer(snippet):
                 token = match.group(1).rstrip(_TRAILING_JUNK)
-                if _is_pathlike(token):
+                if _is_pathlike(token) and token.strip("/"):
                     found.add(token)
             for match in _COMMAND_START_RE.finditer(snippet):
                 token = match.group(1).rstrip(_TRAILING_JUNK)
@@ -730,10 +732,7 @@ def _problem_with(skill_dir: Path, target: str) -> str | None:
             return "resolves outside the skill"
         return None
     if not (skill_dir / target).exists():
-        return (
-            "not shipped in this skill (a relative path is read against the "
-            "skill root; the repository root's scripts/ is not part of a skill)"
-        )
+        return "this skill does not ship that file"
     return None
 
 
@@ -744,13 +743,12 @@ def check_external_script_references(skill_dir: Path, body: str) -> None:
     own ``scripts/`` and is invoked as ``python3 <skill-dir>/scripts/<name>.py``.
     Scanned text is the ``SKILL.md`` body plus every ``.md`` file under
     ``references/``. An instruction to run is a run word (``python3``,
-    ``python``, ``bash``, ``sh``, ``uv run``, ``source``, or ``.`` at a command
+    ``python``, ``bash``, ``sh``, ``uv run``, or ``source`` / ``.`` at a command
     position) followed by a path, or a bare ``scripts/x`` command. It fails
     when the path resolves outside ``skill_dir``, names a file the skill does
-    not ship (relative paths are read against the skill root, so this also
-    catches the repository root's ``scripts/``, which is machinery, not part of
-    any skill; reach it through ``make``), or has a ``skills/<name>/`` segment
-    naming another skill (``.agents/skills/other/scripts/x.py``). Paths
+    not ship (relative paths are read against the skill root), or has a
+    ``skills/<name>/`` segment naming another skill
+    (``.agents/skills/other/scripts/x.py``). Paths
     containing a placeholder (``<skill-dir>/...``, ``${VAR}/...``) or a glob
     are exempt, and prose pointers such as ``../<sibling>/SKILL.md`` are
     allowed.

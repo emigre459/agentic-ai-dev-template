@@ -164,6 +164,21 @@ def test_the_skills_own_repo_relative_path_passes(tmp_path: Path) -> None:
     assert levels(results, EXTERNAL_CHECK) == ["PASS"]
 
 
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Open source / closed source tools differ.",
+        "This is the source docs/notes.md for it.",
+        "Use the source ../other-skill/SKILL.md as background.",
+    ],
+)
+def test_source_in_prose_is_not_a_command(tmp_path: Path, sentence: str) -> None:
+    skill = make_skill(tmp_path, "my-skill", sentence)
+    code, results = run_validator(skill, tmp_path)
+    assert code == 0, results
+    assert levels(results, EXTERNAL_CHECK) == ["PASS"]
+
+
 def test_an_end_of_sentence_dot_is_not_a_source_command(tmp_path: Path) -> None:
     skill = make_skill(
         tmp_path,
