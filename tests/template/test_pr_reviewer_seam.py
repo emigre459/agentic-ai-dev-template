@@ -14,8 +14,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
-import sys
 import subprocess  # nosec B404 -- fixed argv, in-repo git, no shell
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any

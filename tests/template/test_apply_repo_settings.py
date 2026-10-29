@@ -7,15 +7,15 @@ from typing import NoReturn
 import pytest
 
 from scripts.apply_repo_settings import (
-    find_main_ruleset,
-    ruleset_matches,
-    merge_settings_match,
-    security_settings_match,
-    plan_actions,
-    load_desired,
     _current_rulesets,
     _gh_json,
+    find_main_ruleset,
+    load_desired,
+    merge_settings_match,
+    plan_actions,
     ruleset_for_phase,
+    ruleset_matches,
+    security_settings_match,
 )
 
 REPO_SETTINGS = Path(__file__).resolve().parents[2] / ".github" / "repo-settings"

@@ -78,6 +78,7 @@ def _run(
         [bash, str(_SCRIPT), "1", *config_args, "--timeout-min", "0", *extra],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
         cwd=tmp_path,
         timeout=30,
@@ -215,7 +216,10 @@ def _is_old_bash(path: str) -> bool:
     if not Path(path).exists():
         return False
     out = subprocess.run(  # nosec B603 -- fixed argv, local bash, no shell
-        [path, "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True
+        [path, "-c", "echo ${BASH_VERSINFO[0]}"],
+        capture_output=True,
+        text=True,
+        check=False,
     ).stdout.strip()
     return out.isdigit() and int(out) < 4
 

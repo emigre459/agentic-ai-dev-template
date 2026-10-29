@@ -1,9 +1,9 @@
 from scripts.init_template import (
+    fill_placeholders,
     filter_html_markers,
     filter_yaml_markers,
     strip_interview,
     strip_stack_job_prefix,
-    fill_placeholders,
 )
 
 
