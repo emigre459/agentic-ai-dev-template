@@ -70,7 +70,8 @@ from urllib.parse import quote
 DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[4] / ".github" / "pr-reviewer.json"
 )
-# The repo a relative ``notes`` path is resolved against (the config's repo).
+# The fallback repo root for a relative ``notes`` path, when the config doesn't sit
+# at ``<repo>/.github/pr-reviewer.json`` (e.g. ``--config /tmp/x.json``).
 _REPO_ROOT = DEFAULT_CONFIG_PATH.parents[1]
 
 
@@ -168,12 +169,23 @@ def _argv(value: Any) -> bool:
     )
 
 
-def _load_notes(path: Path, key: str, value: Any) -> str | None:
-    """Validate one adapter's ``notes``: null, or an existing file inside the repo.
+def _notes_root(config_path: Path) -> Path:
+    """Return the repo a relative ``notes`` path belongs to.
 
-    The value is used literally: no ``~``, environment variables, absolute path or
-    stray whitespace, and once resolved (symlinks included) it must be a regular file
-    under the repo root. An agent opens this path, so nothing may point outside.
+    The config's own repo when it sits at ``<repo>/.github/pr-reviewer.json``;
+    otherwise the repo the script was installed in.
+    """
+    resolved = config_path.resolve()
+    if resolved.parent.name == ".github":
+        return resolved.parents[1]
+    return _REPO_ROOT.resolve()
+
+
+def _load_notes(path: Path, key: str, value: Any) -> str | None:
+    """Validate one adapter's ``notes`` as written: null, or a literal relative path.
+
+    No ``~``, environment variables, absolute path, ``..`` or stray whitespace. Every
+    loader applies this; whether the file exists is ``_check_notes_file``'s job.
     """
     if value is None:
         return None
@@ -190,20 +202,36 @@ def _load_notes(path: Path, key: str, value: Any) -> str | None:
         or ".." in PurePosixPath(value).parts
         or ".." in PureWindowsPath(value).parts
     ):
-        problem = "must be a literal repo-relative path (no absolute path, ~, $, %, '..' or stray spaces)"
-    else:
-        root = _REPO_ROOT.resolve()
-        target = (root / value).resolve()
-        if not target.is_relative_to(root):
-            problem = "resolves outside the repo (check for a symlink)"
-        elif not target.is_file():
-            problem = f"names no file in the repo ({root / value})"
+        problem = (
+            "must be a literal repo-relative path (no absolute path, ~, $, %, "
+            "'..' or stray spaces)"
+        )
     if problem:
         raise ValueError(
             f"{path}: reviewers.{key}.notes {problem}. Point it at a notes file "
             "inside the repo, or set it to null."
         )
     return value
+
+
+def _check_notes_file(path: Path, key: str, notes: str) -> str:
+    """Resolve ``notes`` (symlinks included) and require a file inside the repo.
+
+    Only the agent-facing path calls this: the agent opens the returned absolute
+    path. The merge gate never reads notes, so a renamed file mustn't block PRs.
+    """
+    root = _notes_root(path)
+    target = (root / notes).resolve()
+    if not target.is_relative_to(root):
+        problem = "resolves outside the repo (check for a symlink)"
+    elif not target.is_file():
+        problem = f"names no file in the repo ({root / notes})"
+    else:
+        return str(target)
+    raise ValueError(
+        f"{path}: reviewers.{key}.notes {problem}. Point it at a notes file inside "
+        "the repo, or set it to null."
+    )
 
 
 def _positive_int(value: Any) -> bool:
@@ -410,6 +438,9 @@ class ReviewerAdapter(NamedTuple):
     # ``references/reviewers/<key>.md``; it adds to the bundled notes, never replaces
     # them. Lets a consuming repo document a reviewer without editing the skill.
     notes: str | None = None
+    # The absolute file ``notes`` resolved to, set only when the loader was asked to
+    # check it (``check_notes=True``): the file the agent opens.
+    notes_file: str | None = None
 
 
 class RoundCaps(NamedTuple):
@@ -527,9 +558,15 @@ def _pattern_list(
 
 
 def load_reviewer(
-    config_path: Path | None = None, key: str | None = None
+    config_path: Path | None = None,
+    key: str | None = None,
+    *,
+    check_notes: bool = False,
 ) -> ReviewerAdapter:
     """Load and validate one reviewer adapter (the ``active`` one unless ``key``).
+
+    ``check_notes`` also requires the adapter's ``notes`` to resolve to a file inside
+    the repo and sets ``notes_file``; the agent-facing CLI asks for it.
 
     Raises
     ------
@@ -740,6 +777,7 @@ def load_reviewer(
         allow_empty=True,
     )
 
+    notes = _load_notes(path, chosen, raw.get("notes"))
     return ReviewerAdapter(
         key=chosen,
         display_name=raw["display_name"],
@@ -772,7 +810,12 @@ def load_reviewer(
         rate_limit_notice_marker=notice,
         local_preflight=preflight,
         local_review=local_review,
-        notes=_load_notes(path, chosen, raw.get("notes")),
+        notes=notes,
+        notes_file=(
+            _check_notes_file(path, chosen, notes)
+            if check_notes and notes is not None
+            else None
+        ),
     )
 
 
@@ -2167,9 +2210,9 @@ def collect_state(
         "reviewer": adapter.key,
         "reviewer_name": adapter.display_name,
         "check_name": adapter.check_name,
-        # The adapter's repo-owned notes file (repo-relative, validated), read after
-        # the bundled references/reviewers/<key>.md; null when it has none.
-        "notes": adapter.notes,
+        # The adapter's repo-owned notes file, resolved and checked (absolute path),
+        # read after the bundled references/reviewers/<key>.md; null when it has none.
+        "notes": adapter.notes_file,
         "trigger_comment": adapter.trigger_comment,
         "self_resolves_threads": adapter.self_resolves_threads,
         "verdict": verdict,
@@ -2270,7 +2313,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
-        adapter = load_reviewer(args.config)
+        adapter = load_reviewer(args.config, check_notes=True)
     except NoActiveReviewer as exc:
         print(json.dumps({"reviewer": None, "configured": False, "detail": str(exc)}))
         return

@@ -183,7 +183,8 @@ python3 .agents/skills/resolve-pr-concerns/scripts/reviewer_state.py --config /t
 rm -rf docs/reviewers
 ```
 
-**Expect:** JSON with `"reviewer": "bugbot"` and `"notes": "docs/reviewers/bugbot-extra.md"`.
+**Expect:** JSON with `"reviewer": "bugbot"` and `"notes"` set to the absolute path of
+`docs/reviewers/bugbot-extra.md` in your checkout (the resolved file the agent opens).
 
 ## 7. Read the diff
 
