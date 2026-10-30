@@ -62,7 +62,7 @@ import re
 import subprocess  # nosec B404 -- fixed gh argv, no shell
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 from urllib.parse import quote
 
@@ -164,6 +164,28 @@ def _argv(value: Any) -> bool:
         and bool(value)
         and all(isinstance(arg, str) and arg for arg in value)
     )
+
+
+def _load_notes(path: Path, key: str, value: Any) -> str | None:
+    """Validate one adapter's ``notes``: null, or a path that stays inside the repo."""
+    if value is None:
+        return None
+    posix, windows = PurePosixPath(str(value)), PureWindowsPath(str(value))
+    if (
+        not isinstance(value, str)
+        or not value
+        or value.startswith("~")
+        or posix.is_absolute()
+        or windows.drive
+        or windows.root
+        or ".." in posix.parts
+        or ".." in windows.parts
+    ):
+        raise ValueError(
+            f"{path}: reviewers.{key}.notes must be null or a repo-relative path to "
+            "a notes file inside the repo (no absolute path, ~ or '..')."
+        )
+    return value
 
 
 def _positive_int(value: Any) -> bool:
@@ -366,6 +388,10 @@ class ReviewerAdapter(NamedTuple):
     # round (it reads the local pool, not the PR quota), and the local review itself.
     local_preflight: PreflightSpec | None
     local_review: LocalReviewSpec | None
+    # A repo-owned notes file (repo-relative) read after the bundled
+    # ``references/reviewers/<key>.md``; it adds to the bundled notes, never replaces
+    # them. Lets a consuming repo document a reviewer without editing the skill.
+    notes: str | None = None
 
 
 class RoundCaps(NamedTuple):
@@ -500,8 +526,8 @@ def load_reviewer(
     if not path.is_file():
         raise FileNotFoundError(
             f"PR-reviewer config not found at {path}. Create .github/pr-reviewer.json "
-            "naming the active reviewer (see the resolve-pr-concerns skill's "
-            "references/reviewers/), or pass --config."
+            "naming the active reviewer, or pass --config. The resolve-pr-concerns "
+            "skill's references/reviewers/ documents the shipped adapters."
         )
     try:
         config = json.loads(path.read_text())
@@ -728,6 +754,7 @@ def load_reviewer(
         rate_limit_notice_marker=notice,
         local_preflight=preflight,
         local_review=local_review,
+        notes=_load_notes(path, chosen, raw.get("notes")),
     )
 
 

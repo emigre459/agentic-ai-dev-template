@@ -341,6 +341,28 @@ def test_loader_unknown_active_lists_known_keys(tmp_path: Path) -> None:
         load_reviewer(_write(tmp_path, config))
 
 
+def test_notes_absent_or_null_loads_as_none(tmp_path: Path) -> None:
+    """``notes`` is optional: a reviewer with only bundled notes needs none."""
+    config = _config_with()
+    config["reviewers"]["x"].pop("notes", None)
+    assert load_reviewer(_write(tmp_path, config)).notes is None
+    assert load_reviewer(_write(tmp_path, _config_with(notes=None))).notes is None
+
+
+def test_notes_relative_path_loads(tmp_path: Path) -> None:
+    config = _config_with(notes="docs/reviewers/acme.md")
+    assert load_reviewer(_write(tmp_path, config)).notes == "docs/reviewers/acme.md"
+
+
+@pytest.mark.parametrize(
+    "notes", ["/etc/x.md", "C:\\x.md", "~/x.md", "a/../../x.md", "..", "", 3]
+)
+def test_notes_rejects_paths_outside_repo(tmp_path: Path, notes: Any) -> None:
+    """A repo's notes file must live in the repo: no absolute path, ``~`` or ``..``."""
+    with pytest.raises(ValueError, match=r"reviewers\.x\.notes"):
+        load_reviewer(_write(tmp_path, _config_with(notes=notes)))
+
+
 def test_loader_missing_check_name_raises(tmp_path: Path) -> None:
     config = _config_with()
     del config["reviewers"]["x"]["check_name"]

@@ -69,7 +69,11 @@ _FIELDS: dict[str, tuple[type | None, ...]] = {
     # Local review rounds and the local allowance check (null = PR rounds only).
     "local_preflight": (dict, None),
     "local_review": (dict, None),
+    # Optional: a repo-owned notes file read after the bundled notes.
+    "notes": (str, None),
 }
+# Fields an adapter may leave out entirely (every other field must be present).
+_OPTIONAL_FIELDS = frozenset({"notes"})
 _INCREMENTAL_FIELDS = tuple(f for f in _FIELDS if f.startswith("incremental_"))
 _FINAL_REVIEW_FIELDS = tuple(f for f in _FIELDS if f.startswith(("final_", "command_")))
 
@@ -127,6 +131,8 @@ def test_active_reviewer_is_configured() -> None:
 def test_every_adapter_is_well_formed(key: str) -> None:
     adapter = _load_config()["reviewers"][key]
     for field, types in _FIELDS.items():
+        if field in _OPTIONAL_FIELDS and field not in adapter:
+            continue
         assert field in adapter, f"reviewer {key!r} is missing {field!r}"
         value = adapter[field]
         ok = any(value is None if t is None else isinstance(value, t) for t in types)
@@ -171,11 +177,27 @@ def test_every_adapter_is_well_formed(key: str) -> None:
         )
 
 
+def _has_notes(key: str, adapter: dict[str, Any]) -> bool:
+    """Return whether bundled notes or a repo-owned ``notes`` file documents it."""
+    notes = adapter.get("notes")
+    return (_NOTES_DIR / f"{key}.md").is_file() or (
+        isinstance(notes, str) and (_REPO / notes).is_file()
+    )
+
+
+def test_a_reviewer_with_neither_notes_source_is_undocumented() -> None:
+    assert not _has_notes("no-such-reviewer", {"notes": None})
+    assert not _has_notes("no-such-reviewer", {"notes": "docs/absent.md"})
+    assert _has_notes("no-such-reviewer", {"notes": "README.md"})
+
+
 @pytest.mark.parametrize("key", _KEYS)
 def test_every_reviewer_has_a_notes_file(key: str) -> None:
-    assert (_NOTES_DIR / f"{key}.md").is_file(), (
-        f"Add {_NOTES_DIR.relative_to(_REPO)}/{key}.md describing the reviewer's "
-        "detection quirks -- skill prose points agents there."
+    assert _has_notes(key, _load_config()["reviewers"][key]), (
+        f"Document the {key} reviewer's detection quirks: in the template, add "
+        f"{_NOTES_DIR.relative_to(_REPO)}/{key}.md; in a repo that vendors the "
+        "skills, set the adapter's `notes` to a repo-owned file -- skill prose "
+        "points agents there."
     )
 
 
