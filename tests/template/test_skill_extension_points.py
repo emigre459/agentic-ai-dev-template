@@ -6,10 +6,15 @@ paragraph, naming its own ``.agents/skill-config/<skill>.md``, the precedence or
 and the hard stops no file can lift. The paragraph must match exactly (only the
 skill name varies) and come before the first ``## `` section, so a partial load
 still sees it.
+
+No skill may tell the agent to create or edit files in a skill folder either (its
+own or another vendored one): that edit would be lost the same way. The phrase
+guard below is a heuristic over known wordings, not a proof.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -106,4 +111,86 @@ def test_preflight_names_only_its_own_skill(skill_md: Path) -> None:
     assert not wrong, (
         f"{skill_md.relative_to(REPO_ROOT)} names another skill's config file: "
         f"{wrong}"
+    )
+
+
+# A prohibition ("never edit …") is the rule this guard enforces, not a breach.
+_NOT_FORBIDDEN = r"(?<!never )(?<!not )(?<!don't )"
+_EDIT_VERB = (
+    _NOT_FORBIDDEN + r"\b(?:add|create|write|edit|modify|update|change|patch)\b"
+)
+SELF_EDIT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        # A verb and a skill-folder path in the same sentence of one line.
+        _EDIT_VERB + r"[^.\n]*`?references/",
+        _EDIT_VERB + r"[^.\n]*\.agents/skills/",
+        _EDIT_VERB + r"[^.\n]*\.claude/skills",
+        _EDIT_VERB + r"[^.\n]*SKILL\.md",
+        _NOT_FORBIDDEN + r"\b(?:edit|modify|update|change|patch)\b "
+        r"(?:this|the|its own|a vendored|the vendored) skill\b(?!'s)",
+    )
+)
+
+
+def self_edit_hits(text: str) -> list[str]:
+    """Return the lines of ``text`` that tell the agent to edit a skill folder.
+
+    Parameters
+    ----------
+    text : str
+        A skill file's contents.
+
+    Returns
+    -------
+    list[str]
+        Each matching line, stripped, in file order.
+    """
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if any(pattern.search(line) for pattern in SELF_EDIT_PATTERNS)
+    ]
+
+
+@pytest.mark.parametrize(
+    "wording",
+    [
+        "To add a reviewer, add an adapter entry to the config, a "
+        "`references/reviewers/<key>.md` notes file, and an allow entry.",
+        "If the reviewer is wrong, edit this skill to match.",
+        "Update `.agents/skills/` as relevant.",
+    ],
+)
+def test_self_edit_patterns_catch_known_wordings(wording: str) -> None:
+    assert self_edit_hits(wording) == [wording]
+
+
+@pytest.mark.parametrize(
+    "wording",
+    [
+        "Before interpreting a review, read the adapter's quirks in "
+        "`references/reviewers/<active>.md` (skill-root-relative).",
+        "Run `scripts/validate.py` from the skill root.",
+        "Never edit a vendored skill folder in place.",
+        "A config may change this skill's defaults.",
+    ],
+)
+def test_self_edit_patterns_ignore_reads(wording: str) -> None:
+    assert self_edit_hits(wording) == []
+
+
+def test_no_skill_tells_the_agent_to_edit_a_skill_folder() -> None:
+    hits = [
+        f"{path.relative_to(REPO_ROOT)}:{n}: {line.strip()[:120]}"
+        for path in sorted(SKILLS_DIR.rglob("*"))
+        if path.suffix in {".md", ".py"}
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if self_edit_hits(line)
+    ]
+    assert not hits, (
+        "These lines tell the agent to create or edit files in a skill folder, "
+        "which `npx skills update` would wipe. Point repo-specific changes at "
+        "`.agents/skill-config/<skill>.md` (or a repo-owned path) and skill "
+        "changes upstream instead:\n" + "\n".join(hits)
     )

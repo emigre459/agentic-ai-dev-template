@@ -140,6 +140,8 @@ Present findings in this format:
 
 If there are failures or actionable improvements, ask the user if they'd like you to fix the issues. If yes, make the edits and re-run the validator to confirm.
 
+**A vendored skill is never fixed in place.** If the reviewed skill is vendored (its `SKILL.md` carries a `**Repo config first:**` preflight, or `skills-lock.json` lists it) and this repo is not the template that publishes it (no `scripts/init_template.py`), an in-place edit would be wiped by the next `npx skills update`. Offer instead: an `.agents/skill-config/<skill>.md` entry for repo-specific behavior, or an upstream PR to the template for a fix to the skill itself.
+
 ## Edge cases
 
 - **Skill has no references/, scripts/, or assets/ folders**: This is fine for simple skills. Skip those sections in the review rather than flagging their absence.

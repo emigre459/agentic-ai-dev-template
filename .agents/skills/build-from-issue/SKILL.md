@@ -375,7 +375,7 @@ Satisfied → continue.
 ## Step 9: Update Agent Docs
 
 - Review `AGENTS.md` — update if the feature introduces new patterns, tools, modules, or workflows agents should know about. Keep always-on memory lean: prefer a `.agents/rules/` rule or a `references/` doc over appending to `AGENTS.md`, unless the change is a genuinely universal, always-on command or routing pointer (`.agents/rules/shared/default-to-shareable-rules.md`).
-- Check for any other agent-facing docs in the repo (e.g., `CLAUDE.md`, or `.agents/skills/` — the canonical skills dir, read via the `.claude/skills` symlink in Claude Code) and update as relevant.
+- Check for any other agent-facing docs in the repo (e.g., `CLAUDE.md`, or the repo's own skills in the canonical `.agents/skills/` dir, read via the `.claude/skills` symlink in Claude Code) and bring them up to date. A vendored skill (one carrying a `**Repo config first:**` preflight) is read-only outside the template that publishes it (no `scripts/init_template.py`): put what it needs for this repo in `.agents/skill-config/<skill>.md`, and offer an upstream PR for a fix to the skill itself.
 - Keep updates factual and concise.
 
 ## Step 11: Finalize the Branch
