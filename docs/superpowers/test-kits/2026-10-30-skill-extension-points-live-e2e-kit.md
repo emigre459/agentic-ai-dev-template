@@ -27,12 +27,12 @@ this session:
 export DISABLE_TELEMETRY=1
 ```
 
-Check out the PR branch (replace `<PR>` with the PR number):
+Check out the PR branch (PR #58):
 
 ```bash
 gh repo clone emigre459/agentic-ai-dev-template ext-points-review
 cd ext-points-review
-gh pr checkout <PR>
+gh pr checkout 58
 make tooling_deps
 REVIEW_DIR=$PWD   # step 6 comes back here
 ```
@@ -66,10 +66,10 @@ message names `upgrade-deps`. After the `mv`, `git status --short` prints nothin
 ```bash
 rm -rf /tmp/ext-points-demo && mkdir /tmp/ext-points-demo && cd /tmp/ext-points-demo
 git init -q
-npx -y skills add https://github.com/emigre459/agentic-ai-dev-template/tree/<branch> --skill build-from-issue -a claude-code -y
+npx -y skills add https://github.com/emigre459/agentic-ai-dev-template/tree/issue-48 --skill build-from-issue -a claude-code -y
 ```
 
-Use the PR's head branch for `<branch>` (`issue-48`). For Cursor, use `-a cursor`; the
+For Cursor, use `-a cursor`; the
 skill then lands in `.agents/skills/` instead of `.claude/skills/`. The rest of this
 runbook says `.claude/skills/`, so swap the path if you use Cursor.
 
@@ -136,7 +136,7 @@ ignored".)
 ```bash
 echo "LOCAL-EDIT-MARKER" >> .claude/skills/build-from-issue/SKILL.md
 shasum .agents/skill-config/build-from-issue.md
-npx -y skills add https://github.com/emigre459/agentic-ai-dev-template/tree/<branch> --skill build-from-issue -a claude-code -y
+npx -y skills add https://github.com/emigre459/agentic-ai-dev-template/tree/issue-48 --skill build-from-issue -a claude-code -y
 grep -c LOCAL-EDIT-MARKER .claude/skills/build-from-issue/SKILL.md
 shasum .agents/skill-config/build-from-issue.md
 ```
@@ -156,7 +156,7 @@ Back in your checkout of the template:
 ```bash
 cd "$REVIEW_DIR"
 jq '.active="bugbot" | .reviewers.bugbot.notes="../outside.md"' .github/pr-reviewer.json > /tmp/cfg-bad.json
-python3 .agents/skills/resolve-pr-concerns/scripts/reviewer_state.py --config /tmp/cfg-bad.json --repo emigre459/agentic-ai-dev-template --pr <PR>; echo "exit=$?"
+python3 .agents/skills/resolve-pr-concerns/scripts/reviewer_state.py --config /tmp/cfg-bad.json --repo emigre459/agentic-ai-dev-template --pr 58; echo "exit=$?"
 ```
 
 **Expect:** a traceback whose last line reads `ValueError: /tmp/cfg-bad.json:
@@ -168,7 +168,7 @@ A typo'd path is rejected too:
 
 ```bash
 jq '.active="bugbot" | .reviewers.bugbot.notes="docs/reviewers/typo.md"' .github/pr-reviewer.json > /tmp/cfg-missing.json
-python3 .agents/skills/resolve-pr-concerns/scripts/reviewer_state.py --config /tmp/cfg-missing.json --repo emigre459/agentic-ai-dev-template --pr <PR> 2>&1 | tail -1
+python3 .agents/skills/resolve-pr-concerns/scripts/reviewer_state.py --config /tmp/cfg-missing.json --repo emigre459/agentic-ai-dev-template --pr 58 2>&1 | tail -1
 ```
 
 **Expect:** `... reviewers.bugbot.notes names no file in the repo (...docs/reviewers/typo.md) ...`.
@@ -179,7 +179,7 @@ agent to take the path from this output, never straight from the config):
 ```bash
 mkdir -p docs/reviewers && printf '# extra bugbot notes\n' > docs/reviewers/bugbot-extra.md
 jq '.active="bugbot" | .reviewers.bugbot.notes="docs/reviewers/bugbot-extra.md"' .github/pr-reviewer.json > /tmp/cfg-ok.json
-python3 .agents/skills/resolve-pr-concerns/scripts/reviewer_state.py --config /tmp/cfg-ok.json --repo emigre459/agentic-ai-dev-template --pr <PR> | head -9
+python3 .agents/skills/resolve-pr-concerns/scripts/reviewer_state.py --config /tmp/cfg-ok.json --repo emigre459/agentic-ai-dev-template --pr 58 | head -9
 rm -rf docs/reviewers
 ```
 
