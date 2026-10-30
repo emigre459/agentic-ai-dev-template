@@ -176,8 +176,8 @@ Each migration file defines both `upgrade()` and `downgrade()`.
 Names the active PR reviewer and its adapter, the review-round caps
 (`review_rounds`) and the per-test speed budget (`test_speed`). To use a reviewer this
 template doesn't ship, add an adapter entry and point its `notes` at a notes file your
-repo owns. The skill reads it after any bundled notes; a path outside the repo is
-rejected.
+repo owns. The skill reads it after any bundled notes; a path that leaves the repo or
+names no file is rejected.
 
 ```json
 {

@@ -12,7 +12,9 @@ Swapping reviewers is a config edit — never hardcode a vendor in skills or rul
 not installed): post no trigger or final-review comment, run no local review, and
 don't wait for a review — `resolve-pr-concerns` falls back to its Step 1b pre-pass.
 Vendor quirks live in
-`.agents/skills/resolve-pr-concerns/references/reviewers/<active>.md`.
+`.agents/skills/resolve-pr-concerns/references/reviewers/<active>.md` and, for a
+reviewer the repo set up itself, in the repo-owned file its adapter's `notes` names
+(read both when both exist).
 
 The reviewer's trigger behavior is usually a **per-repo setting on the vendor's
 side**, not something this repo controls:

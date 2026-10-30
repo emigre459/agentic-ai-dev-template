@@ -15,9 +15,9 @@ recreates each skill folder, so an edit inside one is silently lost.
 
 ## Which repo am I in?
 
-- **The template** (`scripts/init_template.py` exists; `make init` deletes it, so a
-  fork of the template made to send PRs upstream counts too): this is the skills'
-  canonical home. Edit them in place, with the usual tests and review.
+- **The template** (`scripts/init_template.py` exists at the repo root; `make init`
+  deletes it, so a fork of the template made to send PRs upstream counts too): this
+  is the skills' canonical home. Edit them in place, with the usual tests and review.
 - **Any other repo**, including one created from the template: vendored skill
   folders are **read-only**. Never edit, add or delete files inside them, and never
   let another skill (such as `review-skill`) do it for you.
@@ -52,7 +52,10 @@ template's copy is generalized and harness-agnostic, so the upstream change usua
 needs a hand-reconciled diff, not a verbatim copy. Until it lands, put what this
 repo needs in its extension points.
 
-## Out of scope
+## Which skills are vendored
 
-A repo's own runtime/domain/product skills (anything without the preflight, which
-nothing vendors) are that repo's code. Edit them like any other file.
+A skill is **vendored** if its `SKILL.md` carries the `**Repo config first:**`
+preflight or `skills-lock.json` lists it (a third-party skill installed with
+`npx skills add` has no preflight but is replaced on update all the same). Every
+other skill is the repo's own runtime/domain/product code: edit it like any other
+file.

@@ -34,6 +34,7 @@ gh repo clone emigre459/agentic-ai-dev-template ext-points-review
 cd ext-points-review
 gh pr checkout <PR>
 make tooling_deps
+REVIEW_DIR=$PWD   # step 6 comes back here
 ```
 
 ## 1. Automated checks
@@ -148,28 +149,41 @@ Side note, not a failure: `npx skills update` when upstream hasn't changed repor
 "All project skills are up to date" and *keeps* a local edit, with no warning.
 Flagging that drift is #49's job, not this PR's.
 
-## 6. A reviewer's `notes` path must stay inside the repo
+## 6. A reviewer's `notes` path must name a real file inside the repo
 
 Back in your checkout of the template:
 
 ```bash
-cd -   # back to ext-points-review
+cd "$REVIEW_DIR"
 jq '.active="bugbot" | .reviewers.bugbot.notes="../outside.md"' .github/pr-reviewer.json > /tmp/cfg-bad.json
 python3 .agents/skills/resolve-pr-concerns/scripts/reviewer_state.py --config /tmp/cfg-bad.json --repo emigre459/agentic-ai-dev-template --pr <PR>; echo "exit=$?"
 ```
 
 **Expect:** a traceback whose last line reads `ValueError: /tmp/cfg-bad.json:
-reviewers.bugbot.notes must be null or a repo-relative path to a notes file inside
-the repo ...`, then `exit=1`. (This script reports every config error as a
-traceback; that's existing behavior.)
+reviewers.bugbot.notes must be a literal repo-relative path (no absolute path, ~, $,
+%, '..' or stray spaces) ...`, then `exit=1`. (This script reports every config
+error as a traceback; that's existing behavior.)
+
+A typo'd path is rejected too:
 
 ```bash
-jq '.active="bugbot" | .reviewers.bugbot.notes="docs/reviewers/bugbot-extra.md"' .github/pr-reviewer.json > /tmp/cfg-ok.json
-python3 .agents/skills/resolve-pr-concerns/scripts/reviewer_state.py --config /tmp/cfg-ok.json --repo emigre459/agentic-ai-dev-template --pr <PR> | head -8
+jq '.active="bugbot" | .reviewers.bugbot.notes="docs/reviewers/typo.md"' .github/pr-reviewer.json > /tmp/cfg-missing.json
+python3 .agents/skills/resolve-pr-concerns/scripts/reviewer_state.py --config /tmp/cfg-missing.json --repo emigre459/agentic-ai-dev-template --pr <PR> 2>&1 | tail -1
 ```
 
-**Expect:** JSON starting with `"head_sha"` and `"reviewer": "bugbot"`, so the repo
-path loaded.
+**Expect:** `... reviewers.bugbot.notes names no file in the repo (...docs/reviewers/typo.md) ...`.
+
+And a real repo file loads, and the script reports it as `notes` (the skill tells the
+agent to take the path from this output, never straight from the config):
+
+```bash
+mkdir -p docs/reviewers && printf '# extra bugbot notes\n' > docs/reviewers/bugbot-extra.md
+jq '.active="bugbot" | .reviewers.bugbot.notes="docs/reviewers/bugbot-extra.md"' .github/pr-reviewer.json > /tmp/cfg-ok.json
+python3 .agents/skills/resolve-pr-concerns/scripts/reviewer_state.py --config /tmp/cfg-ok.json --repo emigre459/agentic-ai-dev-template --pr <PR> | head -9
+rm -rf docs/reviewers
+```
+
+**Expect:** JSON with `"reviewer": "bugbot"` and `"notes": "docs/reviewers/bugbot-extra.md"`.
 
 ## 7. Read the diff
 
@@ -189,7 +203,8 @@ git diff origin/main -- .agents/skills | grep -c "^+\*\*Repo config first"
 
 Judgment calls worth a second opinion (from the design's "Calls made" section):
 - repos made from the template are read-only too, recognized by
-  `scripts/init_template.py` being absent;
+  `scripts/init_template.py` being absent from the repo root;
+- "vendored" means the skill carries the preflight or `skills-lock.json` lists it;
 - `notes` adds to the bundled notes, never replaces them;
 - the gate stays `make pr_check`, and no file can substitute another command;
 - "output outside the repo" means outside the worktree, so in-repo paths stay
@@ -204,8 +219,8 @@ Judgment calls worth a second opinion (from the design's "Calls made" section):
 | 3 | Agent follows a skill-config line | |
 | 4 | Agent refuses a hard-stop config line | |
 | 5 | Config survives a reinstall; an in-place edit doesn't | |
-| 6 | `notes` outside the repo is rejected; inside loads | |
+| 6 | `notes` outside the repo or missing is rejected; a real repo file loads | |
 | 7 | Diff reads well; judgment calls hold up | |
 
 Leave findings as PR review comments, ideally on the line in question. Clean up with
-`rm -rf /tmp/ext-points-demo /tmp/cfg-bad.json /tmp/cfg-ok.json`.
+`rm -rf /tmp/ext-points-demo /tmp/cfg-bad.json /tmp/cfg-missing.json /tmp/cfg-ok.json`.
