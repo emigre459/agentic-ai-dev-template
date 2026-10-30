@@ -137,16 +137,23 @@ SELF_EDIT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         ),
     )
 )
-# A prohibition ("never edit …", "must not, ever, edit …") is the rule this guard
-# enforces, not a breach: a negation earlier in the same sentence clears the match.
-_NEGATION = re.compile(r"\b(?:never|not|no)\b|n't\b", re.IGNORECASE)
+# A prohibition ("never edit …", "must not, under any circumstances, edit …") is the
+# rule this guard enforces, not a breach. The negation must govern the verb: it ends
+# the clause right before it, with only intensifiers ("ever", "-ly" adverbs, "under
+# any circumstances") between them, so "if X is not right, edit …" still counts.
+_GOVERNING_NEGATION = re.compile(
+    r"(?:\b(?:never|not)|n't)"
+    r"(?:[\s,]+(?:ever|under any circumstances|\w+ly))*[\s,]*$",
+    re.IGNORECASE,
+)
+_CLAUSE_END = ".?!;"
 
 
 def _tells_to_edit(line: str) -> bool:
     for pattern in SELF_EDIT_PATTERNS:
         for match in pattern.finditer(line):
-            sentence_start = line.rfind(".", 0, match.start()) + 1
-            if not _NEGATION.search(line, sentence_start, match.start()):
+            start = max(line.rfind(end, 0, match.start()) for end in _CLAUSE_END) + 1
+            if not _GOVERNING_NEGATION.search(line[start : match.start()]):
                 return True
     return False
 
@@ -179,6 +186,11 @@ def self_edit_hits(text: str) -> list[str]:
         "Put the new adapter's notes in `references/reviewers/<key>.md`.",
         "Fix this skill in place.",
         "Rewrite this skill's Step 3.",
+        "If the reviewer is not right, edit this skill to match.",
+        "If there is no config file, add a section to `SKILL.md`.",
+        "When the vendor doesn't answer, update `.agents/skills/x/references/y.md`.",
+        "Don't wait for the bot; edit this skill instead.",
+        "Not sure? Fix this skill.",
     ],
 )
 def test_self_edit_patterns_catch_known_wordings(wording: str) -> None:
