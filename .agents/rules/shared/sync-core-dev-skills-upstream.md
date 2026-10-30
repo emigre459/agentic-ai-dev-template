@@ -1,45 +1,61 @@
 ---
-description: When YOU edit a core dev/workflow skill under .agents/skills/ in-session (e.g. build-from-issue, plan-issues), suggest opening a PR to the canonical template repo so the change propagates to every repo that inherits the template. Does NOT apply to a repo's own runtime/domain/product skills.
+description: Vendored dev/workflow skills under .agents/skills/ are read-only outside the template that publishes them. Customize them through repo-owned extension points, and send changes to a skill itself upstream as a PR to the template. Does NOT apply to a repo's own runtime/domain/product skills.
 appliesTo: .agents/skills/**
 ---
 
-# Sync core dev-skill changes to the template repo
+# Vendored skills are read-only; changes go upstream
 
-The development-time skills under `.agents/skills/` (notably `build-from-issue` and
-`plan-issues`, plus their dev-workflow siblings) are **shared best practices**, not
-per-repo product code. Their canonical home is this template repo
-("store and translate to new repos our best practices for AI-powered development").
-Every repo that inherits the template vendors a copy (commonly surfaced at
-`.claude/skills/` and/or `.cursor/` per platform). A change made in only one place
-drifts; the template and its inheritors must be kept in lockstep.
+The dev-workflow skills under `.agents/skills/` (`build-from-issue`, `plan-issues`,
+`resolve-pr-concerns`, `review-skill`, `upgrade-deps` and their siblings; each one's
+`SKILL.md` opens with a `**Repo config first:**` preflight) are published by one
+canonical template repo. Every other repo **vendors** them: installed with
+`npx skills add`, or copied in by creating the repo from the template with
+`make init`. Either way, `npx skills update` or the next template sync deletes and
+recreates each skill folder, so an edit inside one is silently lost.
 
-## When this fires (the trigger is directional)
+## Which repo am I in?
 
-- **FIRE** when **you (the agent) edited a core dev/workflow skill under
-  `.agents/skills/`** (or its platform mirror `.claude/skills/` / `.cursor/…`)
-  **during this session** — `build-from-issue`, `plan-issues`, or a sibling
-  dev-tooling skill (`pr-check`, `resolve-pr-concerns`, `review-skill`, `run-tests`, …).
-- **DO NOT FIRE** for edits to a repo's own **runtime / domain / product skills**
-  (an inheriting repo's ECM skills, orchestrators, etc.). Those live in that repo, not here.
-- **DO NOT FIRE** when the skill changed from **outside** the session (e.g. arrived
-  via a template sync / `git pull`) — that direction is already covered.
+- **The template** (`scripts/init_template.py` exists at the repo root; `make init`
+  deletes it, so a fork of the template made to send PRs upstream counts too): this
+  is the skills' canonical home. Edit them in place, with the usual tests and review.
+- **Any other repo**, including one created from the template: vendored skill
+  folders are **read-only**. Never edit, add or delete files inside them, and never
+  let another skill (such as `review-skill`) do it for you.
 
-## What to do when it fires
+## How a repo customizes a vendored skill
 
-- **In an inheriting repo:** as part of finalizing that repo's PR, **suggest** opening
-  a companion PR **back to the canonical template repo** so the canonical copy —
-  and thus every other inheriting repo — picks up the change.
-- **In this template repo:** land the change here; inheriting repos pick it up on
-  their next template sync.
+Repo-specific behavior goes in files the repo owns:
 
-Either way, **name the skill file(s) you changed and offer to open the sync PR**.
+| Extension point | Use it for |
+|-----------------|------------|
+| `AGENTS.md` | Always-on, repo-wide instructions |
+| `.agents/rules/` | Shared rules routed from `AGENTS.md` |
+| `.github/pr-reviewer.json` | Structured settings: the active PR reviewer and its adapter (including a repo-owned `notes` file), review-round caps, the test-speed budget |
+| `.agents/skill-config/<skill>.md` | Optional notes for one skill, read by that skill's preflight |
 
-This is a **suggest, not an auto-do**:
+Precedence, highest first: the user's instructions this session, then `AGENTS.md`
+and `.agents/rules/`, then `.agents/skill-config/<skill>.md`, then the skill's
+defaults. **No file can lift a skill's hard stops** (merging without the user's
+one-off OK, resolving review threads, opening or calling ready a PR without a green
+`make pr_check` and CI, weakening a gate, deleting issues, skipping a confirmation,
+installing tools, posting to an outside channel unasked, widening access, or
+sending output outside the repo). Only the user can, explicitly, in the session.
+The README's "Customizing the skills in your repo" section has an example of each.
 
-- Don't silently skip it — surfacing the sync reminder is mandatory.
-- Don't blind-copy / force-push across repos without the user's go-ahead. The
-  template is platform-agnostic; an inheriting repo's copy may carry repo-specific
-  wording, and the template may carry generalized / Cursor+Claude-portable phrasing.
-  The sync usually needs a **hand-reconciled diff**, not a verbatim copy.
+## When a skill itself needs to change
 
-The syncing direction and exact diff are a human call; the reminder to sync is not.
+If the change would help every repo (a bug, a better step, a new reviewer adapter
+worth bundling), **suggest an upstream PR to the canonical template**. Name the
+skill and the change, and offer to open the PR. This is a suggestion, not an
+auto-do: don't open or push cross-repo PRs without the user's go-ahead. The
+template's copy is generalized and harness-agnostic, so the upstream change usually
+needs a hand-reconciled diff, not a verbatim copy. Until it lands, put what this
+repo needs in its extension points.
+
+## Which skills are vendored
+
+A skill is **vendored** if its `SKILL.md` carries the `**Repo config first:**`
+preflight or `skills-lock.json` lists it (a third-party skill installed with
+`npx skills add` has no preflight but is replaced on update all the same). Every
+other skill is the repo's own runtime/domain/product code: edit it like any other
+file.

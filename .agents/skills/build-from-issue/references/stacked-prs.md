@@ -81,7 +81,7 @@ A plan may still record the decision explicitly with `Stack: none - <reason>`.
 - **Don't pad layers.** Aim for a few hundred to roughly 1.5k changed lines each.
 - **Every layer must be one the reviewer can review.** A layer over the configured
   reviewer's file limit (`resolve-pr-concerns`' `references/reviewers/<active>.md`
-  says if it has one) can't get `review-gate`
+  or the adapter's repo-owned `notes` file says if it has one) can't get `review-gate`
   green, and a stack can't be merged with a ruleset bypass. Land such a change as its
   own PR first and build the stack on top of it.
 - **Prefer one new test file per layer** when several layers would append tests to the
