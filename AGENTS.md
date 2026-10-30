@@ -61,7 +61,7 @@ speed check) before a PR is opened.
 | `make test_speed_check` | Per-test speed guard over the last `make coverage` run (budget in `.github/pr-reviewer.json` → `test_speed`) |
 | `make pr_check` | `lint` + `security`, then `coverage` + `test_speed_check` |
 | `make apply_repo_settings_bootstrap TARGET_REPO=owner/repo` | Apply setup-safe repository settings before the initialization PR |
-| `make finalize_repo_settings TARGET_REPO=owner/repo` | Enable final required CI checks after the initialization PR merges |
+| `make finalize_repo_settings TARGET_REPO=owner/repo` | Enable final required CI checks and the merge queue after the initialization PR merges |
 | `make cc` | Launch Claude Code with this repo's settings |
 
 ## Skills
@@ -89,6 +89,10 @@ permissions to subagents.
 - Reference the issue in the PR body (`Closes #N`).
 - Checkpoint-commit per logical slice (see `.agents/rules/shared/checkpoint-commits.md`).
 - Squash-merge only; the `main` ruleset enforces PR review-thread resolution.
+- Where GitHub offers it (org-owned repos), `main` uses a merge queue: merge with
+  "Merge when ready", and don't merge `main` into a branch just because it's
+  behind — the queue tests each PR against the latest `main`. Every required check
+  must also run on `merge_group`, or the queue waits on it until it times out.
 
 ## Where LLM instructions live
 

@@ -58,7 +58,7 @@ THEN run, in order:
   preflight).
 - `make apply_repo_settings_bootstrap TARGET_REPO="$TARGET_REPO"`. This applies
   PR/merge preferences and security settings but deliberately defers the new
-  required CI checks until the workflow exists on `main`. It prints the planned
+  required CI checks and the merge queue until the workflow exists on `main`. It prints the planned
   operations and asks for confirmation. If the shell cannot answer, show the plan
   to the user, confirm through the interview tool, then rerun as
   `python3 scripts/apply_repo_settings.py --repo "$TARGET_REPO" --phase bootstrap --yes`;
@@ -79,7 +79,14 @@ THEN run, in order:
   `make finalize_repo_settings TARGET_REPO="$TARGET_REPO"`. Show the final plan
   and honor its confirmation prompt (same `--yes` fallback, with `--phase final`
   and only after the user confirms). This second phase enables the required
-  `lint`, `tests`, and `security` checks now that the CI workflow exists on main.
+  `lint`, `tests`, and `security` checks now that the CI workflow exists on main,
+  and a **merge queue** on `main`. Tell the user that from then on PRs merge with
+  "Merge when ready": the queue tests each PR against the latest `main` (plus any
+  PRs queued ahead of it) and merges them in order, so nobody catches branches up
+  by hand when several agents land work at once. GitHub offers merge queues only
+  on organization-owned repos (public, or private on Enterprise Cloud); on any
+  other repo the script prints a "no merge queue" notice, skips the rule, and PRs
+  merge directly as before.
 - Tell the user the template ships with **no automated PR reviewer active**
   (`"active": null` in `.github/pr-reviewer.json`), so the agent skills fall
   back to a local subagent review and never post reviewer trigger comments. If
@@ -115,7 +122,8 @@ settings, skip confirmation prompts, or continue after a preflight failure.
   Claude Code.
 - **Canonical repo settings** in `.github/repo-settings/` — applied first with
   `make apply_repo_settings_bootstrap` and finalized after the setup PR merges
-  with `make finalize_repo_settings`.
+  with `make finalize_repo_settings`, which also turns on a merge queue where
+  GitHub offers one.
 
 ## Customizing the skills in your repo
 
