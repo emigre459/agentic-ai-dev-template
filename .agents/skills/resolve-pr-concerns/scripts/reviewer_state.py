@@ -70,6 +70,8 @@ from urllib.parse import quote
 DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[4] / ".github" / "pr-reviewer.json"
 )
+# The repo a relative ``notes`` path is resolved against (the config's repo).
+_REPO_ROOT = DEFAULT_CONFIG_PATH.parents[1]
 
 
 class NoActiveReviewer(Exception):
@@ -167,23 +169,39 @@ def _argv(value: Any) -> bool:
 
 
 def _load_notes(path: Path, key: str, value: Any) -> str | None:
-    """Validate one adapter's ``notes``: null, or a path that stays inside the repo."""
+    """Validate one adapter's ``notes``: null, or an existing file inside the repo.
+
+    The value is used literally: no ``~``, environment variables, absolute path or
+    stray whitespace, and once resolved (symlinks included) it must be a regular file
+    under the repo root. An agent opens this path, so nothing may point outside.
+    """
     if value is None:
         return None
-    posix, windows = PurePosixPath(str(value)), PureWindowsPath(str(value))
-    if (
-        not isinstance(value, str)
-        or not value
+    problem = None
+    if not isinstance(value, str) or not value:
+        problem = "must be null or a non-empty path"
+    elif (
+        value != value.strip()
         or value.startswith("~")
-        or posix.is_absolute()
-        or windows.drive
-        or windows.root
-        or ".." in posix.parts
-        or ".." in windows.parts
+        or any(char in value for char in "$%")
+        or PurePosixPath(value).is_absolute()
+        or PureWindowsPath(value).drive
+        or PureWindowsPath(value).root
+        or ".." in PurePosixPath(value).parts
+        or ".." in PureWindowsPath(value).parts
     ):
+        problem = "must be a literal repo-relative path (no absolute path, ~, $, %, '..' or stray spaces)"
+    else:
+        root = _REPO_ROOT.resolve()
+        target = (root / value).resolve()
+        if not target.is_relative_to(root):
+            problem = "resolves outside the repo (check for a symlink)"
+        elif not target.is_file():
+            problem = f"names no file in the repo ({root / value})"
+    if problem:
         raise ValueError(
-            f"{path}: reviewers.{key}.notes must be null or a repo-relative path to "
-            "a notes file inside the repo (no absolute path, ~ or '..')."
+            f"{path}: reviewers.{key}.notes {problem}. Point it at a notes file "
+            "inside the repo, or set it to null."
         )
     return value
 
@@ -2149,6 +2167,9 @@ def collect_state(
         "reviewer": adapter.key,
         "reviewer_name": adapter.display_name,
         "check_name": adapter.check_name,
+        # The adapter's repo-owned notes file (repo-relative, validated), read after
+        # the bundled references/reviewers/<key>.md; null when it has none.
+        "notes": adapter.notes,
         "trigger_comment": adapter.trigger_comment,
         "self_resolves_threads": adapter.self_resolves_threads,
         "verdict": verdict,

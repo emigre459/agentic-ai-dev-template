@@ -349,16 +349,49 @@ def test_notes_absent_or_null_loads_as_none(tmp_path: Path) -> None:
     assert load_reviewer(_write(tmp_path, _config_with(notes=None))).notes is None
 
 
-def test_notes_relative_path_loads(tmp_path: Path) -> None:
+@pytest.fixture
+def notes_repo(tmp_path: Path, monkeypatch: Any) -> Path:
+    """Stand in a repo root holding one notes file, with a file outside it."""
+    repo = tmp_path / "repo"
+    (repo / "docs" / "reviewers").mkdir(parents=True)
+    (repo / "docs" / "reviewers" / "acme.md").write_text("# Acme quirks\n")
+    (tmp_path / "outside.md").write_text("secret\n")
+    (repo / "docs" / "reviewers" / "escape.md").symlink_to(tmp_path / "outside.md")
+    monkeypatch.setattr(reviewer_state, "_REPO_ROOT", repo)
+    return repo
+
+
+def test_notes_relative_path_loads(tmp_path: Path, notes_repo: Path) -> None:
     config = _config_with(notes="docs/reviewers/acme.md")
     assert load_reviewer(_write(tmp_path, config)).notes == "docs/reviewers/acme.md"
 
 
 @pytest.mark.parametrize(
-    "notes", ["/etc/x.md", "C:\\x.md", "~/x.md", "a/../../x.md", "..", "", 3]
+    "notes",
+    [
+        "/etc/x.md",
+        "C:\\x.md",
+        "~/x.md",
+        "a/../../x.md",
+        "..",
+        "",
+        3,
+        "$HOME/.ssh/config",
+        "%USERPROFILE%\\x.md",
+        " docs/reviewers/acme.md",
+        "docs/reviewers/missing.md",
+        "docs/reviewers",
+        "docs/reviewers/escape.md",
+    ],
 )
-def test_notes_rejects_paths_outside_repo(tmp_path: Path, notes: Any) -> None:
-    """A repo's notes file must live in the repo: no absolute path, ``~`` or ``..``."""
+def test_notes_rejects_paths_outside_repo_or_missing(
+    tmp_path: Path, notes_repo: Path, notes: Any
+) -> None:
+    """The notes file must be a real file inside the repo, named literally.
+
+    No absolute path, ``~``, ``..``, environment variable, stray whitespace, missing
+    file, directory, or symlink that resolves outside the repo.
+    """
     with pytest.raises(ValueError, match=r"reviewers\.x\.notes"):
         load_reviewer(_write(tmp_path, _config_with(notes=notes)))
 

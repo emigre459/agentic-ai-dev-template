@@ -178,17 +178,26 @@ def test_every_adapter_is_well_formed(key: str) -> None:
 
 
 def _has_notes(key: str, adapter: dict[str, Any]) -> bool:
-    """Return whether bundled notes or a repo-owned ``notes`` file documents it."""
+    """Return whether the reviewer is documented, with no dangling ``notes`` path.
+
+    Bundled notes or a repo-owned ``notes`` file must exist, and a ``notes`` path
+    that is set must name a real file even when bundled notes exist too.
+    """
     notes = adapter.get("notes")
-    return (_NOTES_DIR / f"{key}.md").is_file() or (
-        isinstance(notes, str) and (_REPO / notes).is_file()
-    )
+    if notes is not None:
+        return isinstance(notes, str) and (_REPO / notes).is_file()
+    return (_NOTES_DIR / f"{key}.md").is_file()
 
 
 def test_a_reviewer_with_neither_notes_source_is_undocumented() -> None:
     assert not _has_notes("no-such-reviewer", {"notes": None})
     assert not _has_notes("no-such-reviewer", {"notes": "docs/absent.md"})
     assert _has_notes("no-such-reviewer", {"notes": "README.md"})
+
+
+def test_a_dangling_notes_path_fails_even_with_bundled_notes() -> None:
+    assert _has_notes("bugbot", {"notes": None})
+    assert not _has_notes("bugbot", {"notes": "docs/absent.md"})
 
 
 @pytest.mark.parametrize("key", _KEYS)
