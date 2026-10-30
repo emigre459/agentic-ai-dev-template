@@ -156,8 +156,10 @@ def self_edit_hits(text: str) -> list[str]:
 @pytest.mark.parametrize(
     "wording",
     [
-        "To add a reviewer, add an adapter entry to the config, a "
-        "`references/reviewers/<key>.md` notes file, and an allow entry.",
+        (
+            "To add a reviewer, add an adapter entry to the config, a "
+            "`references/reviewers/<key>.md` notes file, and an allow entry."
+        ),
         "If the reviewer is wrong, edit this skill to match.",
         "Update `.agents/skills/` as relevant.",
     ],
@@ -169,8 +171,10 @@ def test_self_edit_patterns_catch_known_wordings(wording: str) -> None:
 @pytest.mark.parametrize(
     "wording",
     [
-        "Before interpreting a review, read the adapter's quirks in "
-        "`references/reviewers/<active>.md` (skill-root-relative).",
+        (
+            "Before interpreting a review, read the adapter's quirks in "
+            "`references/reviewers/<active>.md` (skill-root-relative)."
+        ),
         "Run `scripts/validate.py` from the skill root.",
         "Never edit a vendored skill folder in place.",
         "A config may change this skill's defaults.",
