@@ -198,3 +198,50 @@ def test_no_skill_tells_the_agent_to_edit_a_skill_folder() -> None:
         "`.agents/skill-config/<skill>.md` (or a repo-owned path) and skill "
         "changes upstream instead:\n" + "\n".join(hits)
     )
+
+
+README = REPO_ROOT / "README.md"
+SYNC_RULE = (
+    REPO_ROOT / ".agents" / "rules" / "shared" / "sync-core-dev-skills-upstream.md"
+)
+README_SECTION = "## Customizing the skills in your repo"
+
+
+def _readme_section() -> str:
+    text = README.read_text(encoding="utf-8")
+    assert README_SECTION in text, f"README.md needs a '{README_SECTION}' section"
+    section: list[str] = []
+    in_fence = False
+    # The section ends at the next H2 outside a code fence (its examples hold H2s).
+    for line in text.split(README_SECTION, 1)[1].splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+        elif line.startswith("## ") and not in_fence:
+            break
+        section.append(line)
+    return "\n".join(section)
+
+
+@pytest.mark.parametrize(
+    "extension_point",
+    [
+        "AGENTS.md",
+        ".agents/rules/",
+        ".github/pr-reviewer.json",
+        ".agents/skill-config/",
+    ],
+)
+def test_readme_documents_each_extension_point(extension_point: str) -> None:
+    assert extension_point in _readme_section()
+
+
+def test_readme_gives_an_example_per_extension_point() -> None:
+    section = _readme_section()
+    assert section.count("```") >= 8, "one fenced example per extension point"
+    assert '"notes"' in section, "show a reviewer adapter's repo-owned notes path"
+
+
+def test_sync_rule_says_vendored_skills_are_read_only() -> None:
+    text = SYNC_RULE.read_text(encoding="utf-8")
+    assert "read-only" in text and "upstream" in text
+    assert "may carry repo-specific wording" not in text

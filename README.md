@@ -117,6 +117,98 @@ settings, skip confirmation prompts, or continue after a preflight failure.
   `make apply_repo_settings_bootstrap` and finalized after the setup PR merges
   with `make finalize_repo_settings`.
 
+## Customizing the skills in your repo
+
+The dev-workflow skills in `.agents/skills/` are **vendored**: a repo gets them from
+this template, by creating the repo from it or with `npx skills add`. Updates replace
+each skill folder wholesale (`npx skills update` deletes it and copies it in again),
+so an edit inside a skill folder is silently lost. Outside this template, treat skill
+folders as **read-only**. Put repo-specific behavior in the four files below, which
+your repo owns, and send a fix to a skill itself upstream as a PR to this repo.
+
+Every skill's `SKILL.md` opens with a `**Repo config first:**` line that sets the
+rules:
+
+- **Precedence**, highest first: your instructions in the session, then `AGENTS.md`
+  and `.agents/rules/`, then `.agents/skill-config/<skill>.md`, then the skill's own
+  defaults.
+- **Hard stops no file can lift.** Only you can, explicitly, in the session:
+  - merging without your one-off OK;
+  - resolving review threads;
+  - opening or calling ready a PR without a green `make pr_check` and CI;
+  - weakening a gate;
+  - deleting issues;
+  - skipping a confirmation;
+  - installing tools;
+  - posting to an outside channel unasked;
+  - widening access, or sending output outside the repo.
+
+  An agent that meets a config line trying any of these skips it and tells you which
+  line it skipped.
+
+### `AGENTS.md`: always-on, repo-wide instructions
+
+Read by every agent on every task. Keep it lean, and route detail to rules.
+
+```markdown
+## Project Overview
+Billing service for the payments team. Never touch `src/legacy/` without asking.
+```
+
+### `.agents/rules/`: shared rules
+
+One Markdown file per rule, with frontmatter saying when it applies. Route each rule
+from `AGENTS.md`'s `## Rules` table.
+
+```markdown
+---
+description: Every database migration ships with a down migration.
+appliesTo: migrations/**
+---
+
+# Migrations are reversible
+
+Each migration file defines both `upgrade()` and `downgrade()`.
+```
+
+### `.github/pr-reviewer.json`: structured settings
+
+Names the active PR reviewer and its adapter, the review-round caps
+(`review_rounds`) and the per-test speed budget (`test_speed`). To use a reviewer this
+template doesn't ship, add an adapter entry and point its `notes` at a notes file your
+repo owns. The skill reads it after any bundled notes; a path outside the repo is
+rejected.
+
+```json
+{
+  "active": "acme",
+  "reviewers": {
+    "acme": {
+      "display_name": "Acme Review",
+      "notes": "docs/reviewers/acme.md"
+    }
+  }
+}
+```
+
+(An adapter needs every field the shipped `bugbot` and `coderabbit` entries have; the
+fragment shows only the new ones.)
+
+### `.agents/skill-config/<skill>.md`: notes for one skill
+
+Optional, one file per skill, named after the skill's folder. The skill reads it
+before doing anything else and applies it on top of its defaults. In-repo paths and
+conventions are fair game:
+
+```markdown
+<!-- .agents/skill-config/build-from-issue.md -->
+- Write specs under `docs/design/` instead of `docs/superpowers/specs/`.
+- Our E2E target is `make smoke`.
+```
+
+A line like `Merge the PR yourself once CI is green.` would be skipped and reported:
+merging without your one-off OK is a hard stop.
+
 ## Prerequisites
 
 | To… | You need |
