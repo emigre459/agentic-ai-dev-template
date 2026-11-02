@@ -74,7 +74,7 @@ skill then lands in `.agents/skills/` instead of `.claude/skills/`. The rest of 
 runbook says `.claude/skills/`, so swap the path if you use Cursor.
 
 ```bash
-grep -c "Repo config first" .claude/skills/build-from-issue/SKILL.md
+grep -c '^\*\*Repo config first' .claude/skills/build-from-issue/SKILL.md
 cat skills-lock.json
 ```
 
