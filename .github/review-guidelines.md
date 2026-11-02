@@ -7,8 +7,9 @@ it's to keep the signal-to-noise ratio high so reviewers actually read every fin
 
 It is vendor-neutral on purpose: no reviewer reads this path by itself. Each
 reviewer's notes file
-(`.agents/skills/resolve-pr-concerns/references/reviewers/<key>.md`) says how to
-wire it into that reviewer's own config.
+(`.agents/skills/resolve-pr-concerns/references/reviewers/<key>.md`, or the
+repo-owned file its adapter's `notes` names) says how to wire it into that
+reviewer's own config.
 
 If a finding falls into one of the categories below, skip it. If you're unsure
 whether a finding qualifies, **default to reporting** — false negatives are worse

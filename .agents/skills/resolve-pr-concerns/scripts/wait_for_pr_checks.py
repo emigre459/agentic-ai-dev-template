@@ -474,8 +474,9 @@ def load_reviewer(explicit: str | None) -> Reviewer:
     if explicit == "" or not path.is_file():
         _err(f"PR-reviewer config not found: {path if explicit is None else explicit}")
         _err(
-            "Create .github/pr-reviewer.json naming the active reviewer (see "
-            "resolve-pr-concerns references/reviewers/), or pass --config PATH."
+            "Create .github/pr-reviewer.json naming the active reviewer, or pass "
+            "--config PATH. The resolve-pr-concerns skill's references/reviewers/ "
+            "documents the shipped adapters."
         )
         raise _Stop(EXIT_USAGE)
     try:

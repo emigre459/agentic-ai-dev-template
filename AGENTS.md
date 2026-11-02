@@ -71,6 +71,12 @@ them through the `.claude/skills` symlink; Cursor reads `.agents/skills/` native
 When writing or editing a skill, keep it harness-agnostic — see
 `.agents/rules/shared/harness-agnostic-skills.md` (canonical paths, skill-root-relative
 bundled files, and which `SKILL.md` frontmatter is portable vs Claude-Code-only).
+Outside the template that publishes them, the vendored dev-workflow skills are
+read-only (updates replace their folders): customize one through
+`.agents/skill-config/<skill>.md`, `AGENTS.md`, `.agents/rules/` or
+`.github/pr-reviewer.json`, never by editing `.agents/skills/` — see
+`.agents/rules/shared/sync-core-dev-skills-upstream.md` and the README's
+"Customizing the skills in your repo".
 
 ## Hooks
 

@@ -341,6 +341,94 @@ def test_loader_unknown_active_lists_known_keys(tmp_path: Path) -> None:
         load_reviewer(_write(tmp_path, config))
 
 
+def test_notes_absent_or_null_loads_as_none(tmp_path: Path) -> None:
+    """``notes`` is optional: a reviewer with only bundled notes needs none."""
+    config = _config_with()
+    config["reviewers"]["x"].pop("notes", None)
+    assert load_reviewer(_write(tmp_path, config)).notes is None
+    assert load_reviewer(_write(tmp_path, _config_with(notes=None))).notes is None
+
+
+@pytest.fixture
+def notes_repo(tmp_path: Path, monkeypatch: Any) -> Path:
+    """Stand in a repo root holding one notes file, with a file outside it."""
+    repo = tmp_path / "repo"
+    (repo / "docs" / "reviewers").mkdir(parents=True)
+    (repo / "docs" / "reviewers" / "acme.md").write_text("# Acme quirks\n")
+    (tmp_path / "outside.md").write_text("secret\n")
+    (repo / "docs" / "reviewers" / "escape.md").symlink_to(tmp_path / "outside.md")
+    monkeypatch.setattr(reviewer_state, "_REPO_ROOT", repo)
+    return repo
+
+
+def test_notes_relative_path_loads(tmp_path: Path, notes_repo: Path) -> None:
+    config = _write(tmp_path, _config_with(notes="docs/reviewers/acme.md"))
+    adapter = load_reviewer(config, check_notes=True)
+    assert adapter.notes == "docs/reviewers/acme.md"
+    # The agent opens the resolved file, exactly the one that was checked.
+    assert adapter.notes_file == str(notes_repo / "docs/reviewers/acme.md")
+
+
+def test_notes_resolve_against_the_configs_own_repo(tmp_path: Path) -> None:
+    """A config at ``<repo>/.github/pr-reviewer.json`` checks ``notes`` in <repo>.
+
+    Not in whatever tree the script happens to be installed under (a user-level
+    skill install sits outside the repo).
+    """
+    repo = tmp_path / "consumer"
+    (repo / ".github").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "acme.md").write_text("# Acme\n")
+    config = repo / ".github" / "pr-reviewer.json"
+    config.write_text(json.dumps(_config_with(notes="docs/acme.md")))
+    adapter = load_reviewer(config, check_notes=True)
+    assert adapter.notes_file == str((repo / "docs" / "acme.md").resolve())
+
+
+def test_missing_notes_file_only_fails_the_agent_facing_check(
+    tmp_path: Path, notes_repo: Path
+) -> None:
+    """The merge gate never reads notes, so a renamed file must not block PRs."""
+    config = _write(tmp_path, _config_with(notes="docs/reviewers/missing.md"))
+    assert load_reviewer(config).notes == "docs/reviewers/missing.md"
+    with pytest.raises(ValueError, match=r"reviewers\.x\.notes names no file"):
+        load_reviewer(config, check_notes=True)
+
+
+@pytest.mark.parametrize(
+    "notes",
+    [
+        "/etc/x.md",
+        "C:\\x.md",
+        "~/x.md",
+        "a/../../x.md",
+        "..",
+        "",
+        3,
+        "$HOME/.ssh/config",
+        "%USERPROFILE%\\x.md",
+        " docs/reviewers/acme.md",
+    ],
+)
+def test_notes_rejects_non_literal_or_escaping_paths(
+    tmp_path: Path, notes: Any
+) -> None:
+    """Rejected by every loader: no absolute path, ``~``, ``..``, env var or spaces."""
+    with pytest.raises(ValueError, match=r"reviewers\.x\.notes"):
+        load_reviewer(_write(tmp_path, _config_with(notes=notes)))
+
+
+@pytest.mark.parametrize(
+    "notes",
+    ["docs/reviewers/missing.md", "docs/reviewers", "docs/reviewers/escape.md"],
+)
+def test_notes_check_rejects_missing_dirs_and_symlink_escapes(
+    tmp_path: Path, notes_repo: Path, notes: str
+) -> None:
+    with pytest.raises(ValueError, match=r"reviewers\.x\.notes"):
+        load_reviewer(_write(tmp_path, _config_with(notes=notes)), check_notes=True)
+
+
 def test_loader_missing_check_name_raises(tmp_path: Path) -> None:
     config = _config_with()
     del config["reviewers"]["x"]["check_name"]
