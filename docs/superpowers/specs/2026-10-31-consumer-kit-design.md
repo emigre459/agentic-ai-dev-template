@@ -133,14 +133,20 @@ for freshness against upstream).
 2. **`make init` starts a new repo on the release.** For each lock entry with a `ref`,
    it replaces `.agents/skills/<name>/` with that tag's folder, fetched with plain git
    from the template's GitHub URL (no Node needed). Then it checks the result against
-   `computedHash`. Network failure, or a hash mismatch, fails init loudly.
+   `computedHash`. Network failure, or a hash mismatch, fails init loudly. With a
+   pinned lock it also deletes every `.agents/skills/<name>/` the lock doesn't list
+   (unreleased skills added on main after the tag), and fails if a workflow still
+   references a local `./.github/actions/skills-*` copy after the rewrite.
 3. A stdlib Node script reproduces the CLI's
    `computedHash` exactly (same algorithm, same `localeCompare` sort; credit
    vercel-labs/skills, MIT). Modes:
    - `check`: for every lock entry, find the installed folder and fail when its hash
      differs, naming each skill that drifted and what to do;
-   - `write`: regenerate the template's own entries from a given tag's content. Template
-     only; `make skills_lock` wraps it, and the re-pin PR uses it.
+   - `write`: regenerate the template's own entries from a given tag's content (the
+     skill set is the tag's, not the working tree's). Template only; `make skills_lock`
+     wraps it, and the re-pin PR uses it. Without a tag it refuses to overwrite a lock
+     that has a `ref` (that would silently un-pin the template); delete the lock to
+     un-pin on purpose.
 
    Its location is the builder's call (see below). It must reach callers through the
    reusable workflow at the same ref as that workflow.

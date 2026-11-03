@@ -21,7 +21,9 @@
 // verified against that tag's copy of the skill folder (the tag must be
 // fetched), one without against the working tree. `write` regenerates the
 // template's lock from the folders under .agents/skills/ that hold a SKILL.md;
-// with --tag each entry gets `ref` and the hash of the folder as tagged. In
+// with --tag it lists them from that tag's tree, and each entry gets `ref` and
+// the hash of the folder as tagged. Without --tag it lists the working tree,
+// and refuses (exit 2) to overwrite a lock whose entries have a `ref`. In
 // template mode the working-tree hash covers only files git does not ignore
 // (so local bytecode or .DS_Store never reach the lock); plain `check` and
 // `hash` hash every file on disk, exactly as the skills CLI does.
@@ -260,12 +262,15 @@ async function check(root, { template }) {
   }
   if (problems.length === 0) return 0;
   console.log(problems.join('\n'));
+  // A pinned lock must be re-pinned with TAG: a bare `make skills_lock` would
+  // drop every ref (and `write` refuses to).
+  const ref = Object.values(lock.skills).find((entry) => typeof entry.ref === 'string')?.ref;
+  const remedy = ref === undefined ? '`make skills_lock`' : `\`make skills_lock TAG=${ref}\` (or TAG=<newest release tag>)`;
   console.log(
     (template
       ? [
           'skills-lock.json no longer matches the template skills. If the change is',
-          'intended, run `make skills_lock` (add TAG=vX.Y.Z for a release) and commit',
-          'skills-lock.json.',
+          `intended, run ${remedy} and commit skills-lock.json.`,
         ]
       : [
           'Vendored skills must match skills-lock.json. Revert the edit, or move',
@@ -293,17 +298,82 @@ async function listTemplateSkills(root) {
   return names.sort();
 }
 
+/**
+ * Names of the template's skills as released at `tag`: folders directly under
+ * .agents/skills/ that hold a SKILL.md in that tag's tree. Skills added on main
+ * after the tag are unreleased and stay out of a lock pinned to it.
+ */
+async function listTemplateSkillsAtTag(root, tag) {
+  let listing;
+  try {
+    ({ stdout: listing } = await run(
+      'git',
+      ['ls-tree', '-r', '-z', '--name-only', `refs/tags/${tag}`, '--', `${TEMPLATE_SKILLS_DIR}/`],
+      { cwd: root, maxBuffer: 64 * 1024 * 1024 },
+    ));
+  } catch (error) {
+    throw new UsageError(`cannot list ${TEMPLATE_SKILLS_DIR} at tag ${tag}: ${error.message}`);
+  }
+  const prefix = `${TEMPLATE_SKILLS_DIR}/`;
+  const names = listing
+    .split('\0')
+    .filter((path) => path.startsWith(prefix))
+    .map((path) => path.slice(prefix.length).split('/'))
+    .filter((parts) => parts.length === 2 && parts[1] === 'SKILL.md')
+    .map((parts) => parts[0]);
+  if (names.length === 0) {
+    throw new UsageError(`tag ${tag} has no skills under ${TEMPLATE_SKILLS_DIR}/`);
+  }
+  return names.sort();
+}
+
+/**
+ * Throw a UsageError when the existing lock pins any entry to a `ref`: `write`
+ * without --tag would silently un-pin the template, so `make init` would start
+ * new repos on unreleased main. A lock that is not valid JSON (say, mid-merge
+ * conflict) counts as pinned when its text mentions a "ref" key.
+ */
+async function assertNotPinned(root) {
+  const lockPath = join(root, LOCK_FILE);
+  let text;
+  try {
+    text = await readFile(lockPath, 'utf-8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw new UsageError(`cannot read ${lockPath}: ${error.message}`);
+  }
+  let pinned;
+  try {
+    const skills = JSON.parse(text)?.skills;
+    pinned =
+      typeof skills === 'object' &&
+      skills !== null &&
+      Object.values(skills).some((entry) => typeof entry?.ref === 'string');
+  } catch {
+    pinned = /"ref"\s*:/.test(text);
+  }
+  if (pinned) {
+    throw new UsageError(
+      `${lockPath} is pinned to a release (its entries have a "ref"); writing it without --tag would un-pin it. ` +
+        'Pass --tag <newest release tag> (make skills_lock TAG=vX.Y.Z), or delete skills-lock.json first if you mean to un-pin.',
+    );
+  }
+}
+
 /** Regenerate skills-lock.json for the template's own skills; return the exit code. */
 async function write(root, { tag }) {
+  let names;
   if (tag !== null) {
     assertTagName(tag);
     await assertTagExists(root, tag);
-  }
-  let names;
-  try {
-    names = await listTemplateSkills(root);
-  } catch (error) {
-    throw new UsageError(`cannot list ${TEMPLATE_SKILLS_DIR} under ${root}: ${error.message}`);
+    names = await listTemplateSkillsAtTag(root, tag);
+  } else {
+    await assertNotPinned(root);
+    try {
+      names = await listTemplateSkills(root);
+    } catch (error) {
+      throw new UsageError(`cannot list ${TEMPLATE_SKILLS_DIR} under ${root}: ${error.message}`);
+    }
   }
   const skills = {};
   for (const name of names) {
