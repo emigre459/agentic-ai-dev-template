@@ -1,0 +1,95 @@
+name: skills update
+
+# Nightly: open (or refresh) one "Update agent skills" PR from the skills CLI's
+# newest releases. The PR never merges itself. Secrets, all optional, pick the
+# identity that pushes the branch and opens the PR:
+#   SKILLS_UPDATE_APP_ID + SKILLS_UPDATE_APP_PRIVATE_KEY  a GitHub App (its push
+#                                                         triggers the PR's CI)
+#   SKILLS_UPDATE_TOKEN                                   a fine-grained PAT (same)
+# With neither, the run uses GITHUB_TOKEN, whose pushes do not trigger CI, so the
+# action dispatches ci.yml on the branch instead.
+#
+# `make init` rewrites the local action path below to the remote action at the
+# skills release the new repo starts on; keep the `uses:` line unquoted.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  DISABLE_TELEMETRY: "1"
+
+concurrency:
+  group: skills-update
+  cancel-in-progress: false
+
+jobs:
+  skills-update:
+    name: skills update
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    # Secrets cannot be read in step `if:`s; mapped to env they can be tested there.
+    # An unset secret is the empty string.
+    env:
+      SKILLS_UPDATE_APP_ID: ${{ secrets.SKILLS_UPDATE_APP_ID }}
+      SKILLS_UPDATE_APP_PRIVATE_KEY: ${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}
+      SKILLS_UPDATE_TOKEN: ${{ secrets.SKILLS_UPDATE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # The template itself ships no skills of its own to update: skip it. A
+      # job-level `if:` runs before checkout, so the test is a step output.
+      - name: Detect the template repo
+        id: template
+        run: |
+          if test -f scripts/init_template.py; then
+            echo "is_template=true" >> "$GITHUB_OUTPUT"
+            echo "Template repo (scripts/init_template.py present): nothing to update."
+          else
+            echo "is_template=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v7
+        if: steps.template.outputs.is_template != 'true'
+        with:
+          node-version: "22"
+      - name: Mint a GitHub App token
+        id: app
+        if: >-
+          steps.template.outputs.is_template != 'true'
+          && env.SKILLS_UPDATE_APP_ID != ''
+          && env.SKILLS_UPDATE_APP_PRIVATE_KEY != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.SKILLS_UPDATE_APP_ID }}
+          private-key: ${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}
+      # App token, else the PAT, else the workflow's GITHUB_TOKEN. Only the last
+      # needs ci.yml dispatched: App and PAT pushes trigger pull_request CI.
+      - name: Choose the token
+        id: token
+        if: steps.template.outputs.is_template != 'true'
+        env:
+          APP_TOKEN: ${{ steps.app.outputs.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${APP_TOKEN:-}" ]; then
+            value="$APP_TOKEN"; dispatch=false
+          elif [ -n "${SKILLS_UPDATE_TOKEN:-}" ]; then
+            value="$SKILLS_UPDATE_TOKEN"; dispatch=false
+          else
+            value="$GITHUB_TOKEN"; dispatch=true
+          fi
+          echo "::add-mask::$value"
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+          echo "dispatch=$dispatch" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/skills-update
+        if: steps.template.outputs.is_template != 'true'
+        with:
+          token: ${{ steps.token.outputs.value }}
+          dispatch-ci: ${{ steps.token.outputs.dispatch }}
