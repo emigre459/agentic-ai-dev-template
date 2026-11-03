@@ -13,6 +13,8 @@ inputs:
       push is made as this token's identity (a GitHub App or PAT push triggers the
       PR's pull_request CI; a GITHUB_TOKEN push does not). It needs contents: write
       and pull-requests: write, plus actions: write when dispatch-ci is "true".
+      Only the push and the PR step see it: the `npx skills@latest` steps run with
+      the job's own github.token instead.
     required: true
   dispatch-ci:
     description: >-
@@ -61,8 +63,30 @@ runs:
         git fetch origin "$BRANCH" || echo "No existing $BRANCH on origin"
         git checkout -B "$BRANCH" "origin/$BASE"
 
+    # The unpinned `npx skills@latest` steps get the job's own token (enough to
+    # read public sources), never `inputs.token`: a PAT or App token must not
+    # reach third-party code. Only the push-credential step and the PR helper
+    # below see `inputs.token`.
+    - name: Bump tag-pinned skills to their newest releases
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GITHUB_TOKEN: ${{ github.token }}
+        DISABLE_TELEMETRY: "1"
+      run: |
+        summary="$(node "$RUNNER_TEMP/skills_bump_pins.mjs" --root .)"
+        echo "SKILLS_UPDATE_SUMMARY=$summary" >> "$GITHUB_ENV"
+
+    - name: Update branch-tracking skills
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        DISABLE_TELEMETRY: "1"
+      run: npx -y skills@latest update -p -y
+
     # actions/checkout persists GITHUB_TOKEN as an http extraheader; left alone, every
-    # push would go out as GITHUB_TOKEN whatever `token` is. Replace it with `token`.
+    # push would go out as GITHUB_TOKEN whatever `token` is. Replace it with `token`,
+    # only now, after the npx steps, so they never find it in .git/config either.
     - name: Push with the token input
       shell: bash
       env:
@@ -77,23 +101,6 @@ runs:
         # An empty value resets any header the checkout stored in an included config.
         git config --local --add "$key" ""
         git config --local --add "$key" "AUTHORIZATION: basic $encoded"
-
-    - name: Bump tag-pinned skills to their newest releases
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.token }}
-        GITHUB_TOKEN: ${{ inputs.token }}
-        DISABLE_TELEMETRY: "1"
-      run: |
-        summary="$(node "$RUNNER_TEMP/skills_bump_pins.mjs" --root .)"
-        echo "SKILLS_UPDATE_SUMMARY=$summary" >> "$GITHUB_ENV"
-
-    - name: Update branch-tracking skills
-      shell: bash
-      env:
-        GITHUB_TOKEN: ${{ inputs.token }}
-        DISABLE_TELEMETRY: "1"
-      run: npx -y skills@latest update -p -y
 
     - name: Open or refresh the update PR
       shell: bash

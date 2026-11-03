@@ -9,7 +9,8 @@
 #   REMOTE                 git remote (default origin)
 #   GH_CMD                 the gh executable (default gh); the test seam
 #   PR_LABELS              space-separated labels, applied best-effort after creation
-#   DISPATCH_CI            "true" to dispatch $CI_WORKFLOW on the branch (default true)
+#   DISPATCH_CI            "true" to dispatch $CI_WORKFLOW on the branch (default true);
+#                          the PR body then says which pull_request-only checks did not run
 #   CI_WORKFLOW            workflow file to dispatch (default ci.yml)
 #   SKILLS_UPDATE_SUMMARY  bump-pins.mjs's JSON; builds the PR body (may be empty or {})
 #
@@ -43,7 +44,8 @@ git rev-parse --verify -q "refs/remotes/$REMOTE/$BASE" >/dev/null \
 
 # --- PR body, from bump-pins.mjs's JSON -------------------------------------
 build_body() {
-  SKILLS_UPDATE_BASE="$BASE" node -e '
+  SKILLS_UPDATE_BASE="$BASE" SKILLS_UPDATE_DISPATCH_CI="$DISPATCH_CI" \
+    SKILLS_UPDATE_CI_WORKFLOW="$CI_WORKFLOW" node -e '
     const raw = (process.env.SKILLS_UPDATE_SUMMARY || "").trim();
     let s = {};
     if (raw) {
@@ -62,6 +64,17 @@ build_body() {
     section("Removed upstream (kept)", list(s.removed).map((r) =>
       "- `" + r.name + "` (" + r.source + ")"));
     section("No releases found", list(s.no_releases).map((src) => "- " + src));
+    // GITHUB_TOKEN path: say plainly which checks this PR did not get.
+    if (process.env.SKILLS_UPDATE_DISPATCH_CI === "true") {
+      section("CI on this PR", [
+        "This branch was pushed with the workflow `GITHUB_TOKEN`, whose pushes do not trigger `pull_request` workflows, so `" +
+          process.env.SKILLS_UPDATE_CI_WORKFLOW + "` was dispatched on it with `workflow_dispatch` instead. " +
+          "Checks that run only on `pull_request` (such as `review-gate`) did not run on this PR.",
+        "",
+        "To get the PR its full CI, set the `SKILLS_UPDATE_TOKEN` secret (a fine-grained PAT), or the " +
+          "`SKILLS_UPDATE_APP_ID` and `SKILLS_UPDATE_APP_PRIVATE_KEY` secrets (a GitHub App).",
+      ]);
+    }
     out.push("", "This branch is rebuilt on the latest `" + process.env.SKILLS_UPDATE_BASE +
       "` every night, so it is force-pushed whenever the update changes. This PR never merges itself: review the diff and merge it yourself.");
     process.stdout.write(out.join("\n") + "\n");

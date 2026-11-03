@@ -272,6 +272,9 @@ def test_source_without_releases_is_reported(bump: _Bump) -> None:
     assert summary["no_releases"] == [_SOURCE]
     assert summary["bumped"] == []
     assert bump.calls("npx") == []
+    # Shown in the run even when no PR opens (stdout stays pure JSON).
+    (warning,) = [ln for ln in result.stderr.splitlines() if "::warning::" in ln]
+    assert warning.startswith("::warning::") and _SOURCE in warning
 
 
 @needs_node
@@ -309,6 +312,10 @@ def test_removed_upstream_skill_kept_and_flagged(bump: _Bump) -> None:
     (npx,) = bump.calls("npx")
     assert npx.count("--skill") == 1 and "gone" not in npx
     assert (bump.root / ".agents/skills/gone/SKILL.md").exists()  # kept on disk
+    # Shown in the run even when no PR opens (stdout stays pure JSON).
+    (warning,) = [ln for ln in result.stderr.splitlines() if "::warning::" in ln]
+    assert warning.startswith("::warning::")
+    assert "gone" in warning and _SOURCE in warning and "v0.2.0" in warning
 
 
 @needs_node
@@ -743,6 +750,24 @@ def test_dispatch_disabled_with_token_path(helper: _Helper) -> None:
     assert helper.push_count() == 1
     assert len(helper.gh_calls("pr", "create")) == 1
     assert helper.gh_calls("workflow") == []
+    # An App/PAT push runs the PR's own pull_request CI: nothing to explain.
+    assert "CI on this PR" not in helper.pr_body()
+
+
+@needs_bash
+@needs_node
+def test_body_says_which_checks_did_not_run_on_the_github_token_path(
+    helper: _Helper,
+) -> None:
+    helper.make_drift()
+    result = helper.run(DISPATCH_CI="true")
+    assert result.returncode == 0, result.stderr
+    body = helper.pr_body()
+    assert "## CI on this PR" in body
+    note = body.split("## CI on this PR", 1)[1]
+    assert "workflow_dispatch" in note
+    assert "`pull_request`" in note and "review-gate" in note
+    assert "SKILLS_UPDATE_TOKEN" in note and "SKILLS_UPDATE_APP_ID" in note
 
 
 @needs_bash
@@ -860,6 +885,10 @@ def _steps() -> list[dict[str, Any]]:
     return steps
 
 
+_BUMP_RUN = 'node "$RUNNER_TEMP/skills_bump_pins.mjs"'
+_HELPER_RUN = 'bash "$RUNNER_TEMP/skills_update_pr.sh"'
+
+
 def _step_index(fragment: str) -> int:
     (index,) = [i for i, s in enumerate(_steps()) if fragment in s["run"]]
     return index
@@ -891,8 +920,27 @@ def test_the_push_credential_comes_from_the_token_input() -> None:
     assert "::add-mask::" in step["run"]
     assert "set -x" not in step["run"]
     helper = _step_index('bash "$RUNNER_TEMP/skills_update_pr.sh"')
-    assert _step_index("git checkout -B") < index < helper
+    # Written to .git/config only after both npx steps, right before the helper.
+    assert index == helper - 1
+    assert _step_index("skills@latest update") < index
+    assert _step_index(_BUMP_RUN) < index
     assert steps[-1]["env"]["GH_TOKEN"] == "${{ inputs.token }}"  # gh uses it too
+
+
+def test_the_token_input_never_reaches_the_npx_steps() -> None:
+    steps = _steps()
+    credential = _step_index("extraheader")
+    holders = [i for i, s in enumerate(steps) if "inputs.token" in yaml.safe_dump(s)]
+    # Only the push-credential step and the PR helper see the chosen token; the
+    # unpinned `npx skills@latest` steps get the job's own token (public reads).
+    assert holders == [credential, _step_index(_HELPER_RUN)]
+    for step in steps[:credential]:
+        assert "inputs.token" not in yaml.safe_dump(step), step["name"]
+    for fragment in (_BUMP_RUN, "skills@latest update"):
+        env = steps[_step_index(fragment)]["env"]
+        assert env["GITHUB_TOKEN"] == "${{ github.token }}", fragment
+        assert env.get("GH_TOKEN", "${{ github.token }}") == "${{ github.token }}"
+    assert steps[_step_index(_BUMP_RUN)]["env"]["GH_TOKEN"] == ("${{ github.token }}")
 
 
 @needs_bash
@@ -1065,28 +1113,20 @@ def test_update_workflow_token_precedence() -> None:
 
 @needs_bash
 @pytest.mark.parametrize(
-    ("env", "has_app", "has_pat", "warns"),
+    ("env", "has_app", "has_pat"),
     [
-        ({}, "false", "false", False),
-        ({"APP_ID": "id-4242", "APP_KEY": "key-SECRET"}, "true", "false", False),
+        ({}, "false", "false"),
+        ({"APP_ID": "id-4242", "APP_KEY": "key-SECRET"}, "true", "false"),
         (
             {"APP_ID": "id-4242", "APP_KEY": "key-SECRET", "PAT": "pat-SECRET"},
             "true",
             "true",
-            False,
         ),
-        ({"PAT": "pat-SECRET"}, "false", "true", False),
-        ({"APP_ID": "id-4242", "APP_KEY": ""}, "false", "false", True),
-        (
-            {"APP_ID": "", "APP_KEY": "key-SECRET", "PAT": "pat-SECRET"},
-            "false",
-            "true",
-            True,
-        ),
+        ({"PAT": "pat-SECRET"}, "false", "true"),
     ],
 )
-def test_secrets_probe_writes_only_booleans_and_warns_on_half_app(
-    tmp_path: Path, env: dict[str, str], has_app: str, has_pat: str, warns: bool
+def test_secrets_probe_writes_only_booleans(
+    tmp_path: Path, env: dict[str, str], has_app: str, has_pat: str
 ) -> None:
     out = tmp_path / "github_output"
     out.write_text("")
@@ -1099,7 +1139,37 @@ def test_secrets_probe_writes_only_booleans_and_warns_on_half_app(
     )
     written = dict(ln.split("=", 1) for ln in out.read_text().splitlines())
     assert written == {"has_app": has_app, "has_pat": has_pat}
-    assert ("::warning::" in result.stdout) is warns
+    assert "::warning::" not in result.stdout + result.stderr
+    assert all(v not in result.stdout + result.stderr for v in env.values() if v)
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"APP_ID": "id-4242", "APP_KEY": ""},
+        {"APP_ID": "", "APP_KEY": "key-SECRET", "PAT": "pat-SECRET"},
+    ],
+    ids=["id-only", "key-only-with-pat"],
+)
+def test_secrets_probe_fails_on_a_half_configured_app(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    out = tmp_path / "github_output"
+    out.write_text("")
+    result = subprocess.run(  # nosec B603 B607 -- the workflow's own step script
+        ["bash", "-euo", "pipefail", "-c", _caller_step("secrets")["run"]],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(out), **env},
+    )
+    # A misconfiguration fails the run; it never falls back to another token.
+    assert result.returncode == 1
+    assert "::error::" in result.stdout
+    assert "SKILLS_UPDATE_APP_ID" in result.stdout
+    assert "SKILLS_UPDATE_APP_PRIVATE_KEY" in result.stdout
+    assert out.read_text() == ""
     assert all(v not in result.stdout + result.stderr for v in env.values() if v)
 
 

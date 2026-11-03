@@ -54,8 +54,11 @@ jobs:
         with:
           node-version: "22"
       # Secrets are handed to exactly one step each and never put in job or workflow
-      # env, where the unpinned `npx skills@latest` in the action could read them.
-      # This probe sees them and writes only booleans (an unset secret is "").
+      # env. The token chosen below goes to the action's `token` input, which only
+      # its push-credential and PR steps see; its unpinned `npx skills@latest` steps
+      # run with the job's own github.token. This probe sees the secrets and writes
+      # only booleans (an unset secret is ""). Half an App is a misconfiguration:
+      # the run fails rather than quietly falling back to another token.
       - name: Detect configured secrets
         id: secrets
         if: steps.template.outputs.is_template != 'true'
@@ -68,7 +71,8 @@ jobs:
           if [ -n "${APP_ID:-}" ] && [ -n "${APP_KEY:-}" ]; then
             has_app=true
           elif [ -n "${APP_ID:-}" ] || [ -n "${APP_KEY:-}" ]; then
-            echo "::warning::Only one of SKILLS_UPDATE_APP_ID and SKILLS_UPDATE_APP_PRIVATE_KEY is set; ignoring the GitHub App."
+            echo "::error::Only one of SKILLS_UPDATE_APP_ID and SKILLS_UPDATE_APP_PRIVATE_KEY is set. Set both to use the GitHub App, or delete the one that is set."
+            exit 1
           fi
           has_pat=false
           if [ -n "${PAT:-}" ]; then has_pat=true; fi
