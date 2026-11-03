@@ -260,17 +260,20 @@ def plan_label_actions(
 ) -> list[Action]:
     """Plan label changes: create what's missing, update what drifted, never delete.
 
-    Labels the repo has beyond ``desired_labels`` are left alone. Names match
-    exactly, as on GitHub's label endpoints.
+    Labels the repo has beyond ``desired_labels`` are left alone. GitHub treats
+    label names case-insensitively (creating ``minor`` next to ``Minor`` is a 422),
+    so a case-variant is never created: it is renamed to the desired casing, and
+    the PATCH action carries the LIVE name, which addresses the label's URL.
     """
-    live = {label["name"]: label for label in current_labels}
+    live = {label["name"].casefold(): label for label in current_labels}
     actions: list[Action] = []
     for label in desired_labels:
         name = label["name"]
-        if name not in live:
+        existing = live.get(name.casefold())
+        if existing is None:
             actions.append(("label", "POST", name))
-        elif not _label_matches(label, live[name]):
-            actions.append(("label", "PATCH", name))
+        elif existing["name"] != name or not _label_matches(label, existing):
+            actions.append(("label", "PATCH", existing["name"]))
     return actions
 
 
@@ -430,14 +433,24 @@ def _apply_actions(
                 input=json.dumps(desired.security),
             )
         elif kind == "label":
-            label = next(lbl for lbl in desired.labels if lbl["name"] == ident)
+            label = next(
+                lbl
+                for lbl in desired.labels
+                if lbl["name"].casefold() == str(ident).casefold()
+            )
             endpoint = f"repos/{repo}/labels"
+            payload = label
             if method == "PATCH":
+                # `ident` is the live name; rename it when its casing differs so
+                # release-drafter's label match is exact.
                 endpoint += f"/{quote(str(ident), safe='')}"
+                payload = {k: v for k, v in label.items() if k != "name"}
+                if ident != label["name"]:
+                    payload["new_name"] = label["name"]
             _run_gh(
                 ["api", "--method", method, endpoint, "--input", "-"],
                 runner,
-                input=json.dumps(label),
+                input=json.dumps(payload),
             )
 
 
