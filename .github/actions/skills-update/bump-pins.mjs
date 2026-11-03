@@ -12,7 +12,11 @@
 //   1. `gh api repos/<source>/releases --paginate`: the newest release that is
 //      neither a draft nor a prerelease and is tagged vMAJOR.MINOR.PATCH.
 //   2. If it is newer than the pin: `gh api repos/<source>/git/trees/<tag>?recursive=1`
-//      lists the skills upstream at that tag (every blob ending /SKILL.md).
+//      lists the skills upstream at that tag. Only SKILL.md files exactly one level
+//      under a skill root count; the roots are the parents of the installed
+//      skills' folders (from each entry's `skillPath`, e.g. `skills` or
+//      `.agents/skills`), so a fixture SKILL.md elsewhere in the repo is not a
+//      skill. Installed and upstream skills are matched by `skillPath`, not name.
 //   3. The skills installed from the source that still exist upstream are
 //      reinstalled at the new tag with ONE call per source:
 //      `npx -y skills@latest add <source>#<tag> --skill <n> ... -a <agent> -y`
@@ -118,19 +122,38 @@ function newestStableTag(source) {
   return tags.length ? tags.reduce((a, b) => (compareSemver(b, a) > 0 ? b : a)) : null;
 }
 
-/** Names of the skills (parent dirs of SKILL.md) that `source` holds at `tag`. */
-function upstreamSkills(source, tag) {
+/** Parent directory of a POSIX path, "" for a top-level entry. */
+function parentOf(path) {
+  const parent = dirname(path);
+  return parent === '.' ? '' : parent;
+}
+
+/**
+ * The skill root of a lock entry: the parent of its skill folder, from
+ * `skillPath` (`<root>/<name>/SKILL.md`; root "" when the folder is top-level).
+ * Null when `skillPath` is not of that shape.
+ */
+function skillRootOf(skillPath) {
+  if (typeof skillPath !== 'string' || !skillPath.endsWith('/SKILL.md')) return null;
+  return parentOf(parentOf(skillPath));
+}
+
+/**
+ * The SKILL.md paths `source` holds at `tag` exactly one level under one of
+ * `roots`, as a Set. Anything deeper or elsewhere (fixtures, nested examples)
+ * is not a skill.
+ */
+function upstreamSkillPaths(source, tag, roots) {
   const out = sh('gh', ['api', `repos/${source}/git/trees/${tag}?recursive=1`]);
   const [tree] = parseConcatenatedJson(out);
   if (!tree || !Array.isArray(tree.tree)) fail(`unexpected tree listing for ${source}@${tag}`);
   if (tree.truncated) fail(`the tree listing for ${source}@${tag} is truncated`);
-  const names = new Set();
+  const paths = new Set();
   for (const entry of tree.tree) {
-    if (entry.type === 'blob' && entry.path.endsWith('/SKILL.md')) {
-      names.add(basename(dirname(entry.path)));
-    }
+    if (entry.type !== 'blob' || !entry.path.endsWith('/SKILL.md')) continue;
+    if (roots.has(parentOf(parentOf(entry.path)))) paths.add(entry.path);
   }
-  return names;
+  return paths;
 }
 
 /** `universal` when the skill folder lives under .agents/skills/, else `claude-code`. */
@@ -166,14 +189,18 @@ function main() {
     .filter(([, e]) => e && typeof e.source === 'string')
     .filter(([, e]) => (e.sourceType ?? 'github') === 'github');
 
-  // source -> every skill name installed from it (any ref), and the tag-pinned
-  // ones grouped by ref.
+  // source -> Map(name -> skillPath) of every skill installed from it (any ref),
+  // and the tag-pinned names grouped by ref.
   const installedBySource = new Map();
   const pinnedBySource = new Map();
   for (const [name, e] of entries) {
-    if (!installedBySource.has(e.source)) installedBySource.set(e.source, new Set());
-    installedBySource.get(e.source).add(name);
-    if (typeof e.ref === 'string' && SEMVER_TAG.test(e.ref)) {
+    const pinned = typeof e.ref === 'string' && SEMVER_TAG.test(e.ref);
+    if (pinned && skillRootOf(e.skillPath) === null) {
+      fail(`${LOCK_FILE}: skill ${name} has no usable skillPath (${JSON.stringify(e.skillPath)})`);
+    }
+    if (!installedBySource.has(e.source)) installedBySource.set(e.source, new Map());
+    installedBySource.get(e.source).set(name, e.skillPath);
+    if (pinned) {
       if (!pinnedBySource.has(e.source)) pinnedBySource.set(e.source, new Map());
       const byRef = pinnedBySource.get(e.source);
       if (!byRef.has(e.ref)) byRef.set(e.ref, []);
@@ -181,25 +208,32 @@ function main() {
     }
   }
 
-  const available = new Map(); // `${source}\0${name}` -> {source, name}
+  const available = new Map(); // `${source}\0${skillPath}` -> {source, name}
   for (const [source, byRef] of pinnedBySource) {
     const newest = newestStableTag(source);
     if (newest === null) {
       summary.no_releases.push(source);
       continue;
     }
+    const installed = installedBySource.get(source);
+    const installedPaths = new Set(installed.values());
+    const roots = new Set();
+    for (const skillPath of installedPaths) {
+      const skillRoot = skillRootOf(skillPath);
+      if (skillRoot !== null) roots.add(skillRoot);
+    }
     for (const [ref, names] of byRef) {
       if (compareSemver(newest, ref) <= 0) continue;
 
-      const upstream = upstreamSkills(source, newest);
-      for (const name of upstream) {
-        if (!installedBySource.get(source).has(name)) {
-          available.set(`${source}\0${name}`, { source, name });
+      const upstream = upstreamSkillPaths(source, newest, roots);
+      for (const path of upstream) {
+        if (!installedPaths.has(path)) {
+          available.set(`${source}\0${path}`, { source, name: basename(parentOf(path)) });
         }
       }
-      const keep = names.filter((n) => upstream.has(n));
+      const keep = names.filter((n) => upstream.has(installed.get(n)));
       for (const name of names) {
-        if (!upstream.has(name)) summary.removed.push({ name, source });
+        if (!upstream.has(installed.get(name))) summary.removed.push({ name, source });
       }
       if (keep.length === 0) continue;
 

@@ -8,9 +8,11 @@ description: >-
 inputs:
   token:
     description: >-
-      Token for gh and git pushes (GITHUB_TOKEN, a GitHub App token or a PAT). It
-      needs contents: write and pull-requests: write, plus actions: write when
-      dispatch-ci is "true".
+      Token for gh AND for git pushes (GITHUB_TOKEN, a GitHub App token or a PAT).
+      The action replaces the checkout's persisted git credentials with it, so the
+      push is made as this token's identity (a GitHub App or PAT push triggers the
+      PR's pull_request CI; a GITHUB_TOKEN push does not). It needs contents: write
+      and pull-requests: write, plus actions: write when dispatch-ci is "true".
     required: true
   dispatch-ci:
     description: >-
@@ -38,11 +40,14 @@ inputs:
 runs:
   using: composite
   steps:
-    # Copy the helper OUTSIDE the work tree first: the checkout below replaces the
-    # work tree with the base branch's content, and the helper must not vanish with it.
-    - name: Stage the PR helper outside the work tree
+    # Copy both scripts OUTSIDE the work tree first: the checkout below replaces the
+    # work tree with the base branch's content, and they must not vanish with it
+    # (this also keeps the scripts and the YAML that calls them on the same ref).
+    - name: Stage the scripts outside the work tree
       shell: bash
-      run: cp "$GITHUB_ACTION_PATH/update-pr.sh" "$RUNNER_TEMP/skills_update_pr.sh"
+      run: |
+        cp "$GITHUB_ACTION_PATH/update-pr.sh" "$RUNNER_TEMP/skills_update_pr.sh"
+        cp "$GITHUB_ACTION_PATH/bump-pins.mjs" "$RUNNER_TEMP/skills_bump_pins.mjs"
 
     - name: Rebuild the update branch on the latest base
       shell: bash
@@ -56,6 +61,23 @@ runs:
         git fetch origin "$BRANCH" || echo "No existing $BRANCH on origin"
         git checkout -B "$BRANCH" "origin/$BASE"
 
+    # actions/checkout persists GITHUB_TOKEN as an http extraheader; left alone, every
+    # push would go out as GITHUB_TOKEN whatever `token` is. Replace it with `token`.
+    - name: Push with the token input
+      shell: bash
+      env:
+        PUSH_TOKEN: ${{ inputs.token }}
+      run: |
+        server="${GITHUB_SERVER_URL:-https://github.com}"
+        key="http.${server}/.extraheader"
+        encoded="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 | tr -d '\n')"
+        echo "::add-mask::$PUSH_TOKEN"
+        echo "::add-mask::$encoded"
+        git config --local --unset-all "$key" || true
+        # An empty value resets any header the checkout stored in an included config.
+        git config --local --add "$key" ""
+        git config --local --add "$key" "AUTHORIZATION: basic $encoded"
+
     - name: Bump tag-pinned skills to their newest releases
       shell: bash
       env:
@@ -63,7 +85,7 @@ runs:
         GITHUB_TOKEN: ${{ inputs.token }}
         DISABLE_TELEMETRY: "1"
       run: |
-        summary="$(node "$GITHUB_ACTION_PATH/bump-pins.mjs" --root .)"
+        summary="$(node "$RUNNER_TEMP/skills_bump_pins.mjs" --root .)"
         echo "SKILLS_UPDATE_SUMMARY=$summary" >> "$GITHUB_ENV"
 
     - name: Update branch-tracking skills

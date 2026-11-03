@@ -9,6 +9,7 @@ open-PR state in a file.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 _REPO = Path(__file__).resolve().parents[2]
 _ACTION = _REPO / ".github" / "actions" / "skills-update"
@@ -96,11 +98,16 @@ def _release(tag: str, *, draft: bool = False, prerelease: bool = False) -> dict
     return {"tag_name": tag, "draft": draft, "prerelease": prerelease}
 
 
-def _lock_entry(source: str = _SOURCE, ref: str | None = None) -> dict[str, str]:
+def _lock_entry(
+    source: str = _SOURCE, ref: str | None = None, skill_path: str | None = None
+) -> dict[str, str]:
+    """Build a lock entry (write_lock defaults ``skillPath`` to skills/<name>)."""
     entry = {"source": source}
     if ref is not None:
         entry["ref"] = ref
-    entry.update({"sourceType": "github", "skillPath": "x", "computedHash": "0" * 8})
+    entry.update({"sourceType": "github", "computedHash": "0" * 8})
+    if skill_path is not None:
+        entry["skillPath"] = skill_path
     return entry
 
 
@@ -123,6 +130,8 @@ class _Bump:
         (folder / "SKILL.md").write_text(f"# {name}\n")
 
     def write_lock(self, skills: dict[str, dict[str, str]]) -> None:
+        for name, entry in skills.items():
+            entry.setdefault("skillPath", f"skills/{name}/SKILL.md")
         (self.root / "skills-lock.json").write_text(
             json.dumps({"version": 1, "skills": skills}, indent=2) + "\n"
         )
@@ -300,6 +309,75 @@ def test_removed_upstream_skill_kept_and_flagged(bump: _Bump) -> None:
 
 
 @needs_node
+def test_nested_fixture_skill_md_is_not_listed_as_available(bump: _Bump) -> None:
+    bump.install("alpha")
+    bump.write_lock({"alpha": _lock_entry(ref="v0.1.0")})
+    bump.cfg["releases"][_SOURCE] = [[_release("v0.2.0")]]
+    bump.cfg["trees"][f"{_SOURCE}@v0.2.0"] = [
+        "skills/alpha/SKILL.md",
+        "skills/alpha/examples/inner/SKILL.md",  # nested below a skill
+        "tests/fixtures/demo-skill/SKILL.md",  # a fixture elsewhere in the repo
+        "SKILL.md",
+        "skills/real-new/SKILL.md",
+    ]
+    result = bump.run()
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["available"] == [
+        {"source": _SOURCE, "name": "real-new"}
+    ]
+
+
+@needs_node
+def test_skill_roots_come_from_the_installed_skill_paths(bump: _Bump) -> None:
+    bump.install("alpha")
+    bump.write_lock(
+        {"alpha": _lock_entry(ref="v0.1.0", skill_path=".agents/skills/alpha/SKILL.md")}
+    )
+    bump.cfg["releases"][_SOURCE] = [[_release("v0.2.0")]]
+    bump.cfg["trees"][f"{_SOURCE}@v0.2.0"] = [
+        ".agents/skills/alpha/SKILL.md",
+        ".agents/skills/newcomer/SKILL.md",
+        "skills/elsewhere/SKILL.md",  # not under the installed skills' root
+    ]
+    result = bump.run()
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(result.stdout)
+    assert summary["available"] == [{"source": _SOURCE, "name": "newcomer"}]
+    assert [b["name"] for b in summary["bumped"]] == ["alpha"]
+
+
+@needs_node
+def test_same_named_skill_at_another_path_does_not_count_as_installed(
+    bump: _Bump,
+) -> None:
+    bump.install("alpha")
+    bump.write_lock({"alpha": _lock_entry(ref="v0.1.0")})
+    bump.cfg["releases"][_SOURCE] = [[_release("v0.2.0")]]
+    # Upstream moved alpha: only a same-named skill under a different root remains.
+    bump.cfg["trees"][f"{_SOURCE}@v0.2.0"] = ["legacy/alpha/SKILL.md"]
+    result = bump.run()
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(result.stdout)
+    assert summary["removed"] == [{"name": "alpha", "source": _SOURCE}]
+    assert summary["available"] == []
+    assert summary["bumped"] == []
+    assert bump.calls("npx") == []
+
+
+@needs_node
+def test_pinned_entry_without_skill_path_is_an_error(bump: _Bump) -> None:
+    bump.install("alpha")
+    entry = _lock_entry(ref="v0.1.0")
+    bump.write_lock({"alpha": entry})
+    lock = json.loads((bump.root / "skills-lock.json").read_text())
+    del lock["skills"]["alpha"]["skillPath"]
+    (bump.root / "skills-lock.json").write_text(json.dumps(lock))
+    result = bump.run()
+    assert result.returncode != 0
+    assert "skillPath" in result.stderr
+
+
+@needs_node
 def test_one_cli_call_per_source_with_every_installed_skill(bump: _Bump) -> None:
     for name in ("alpha", "beta"):
         bump.install(name)
@@ -383,9 +461,14 @@ def flag(name):
     return args[args.index(name) + 1] if name in args else None
 
 
+cross = state + ".cross"  # a fork's open PR from a same-named branch (number inside)
+
 if args[:2] == ["pr", "list"]:
     if os.path.exists(state):
         sys.stdout.write(open(state).read().strip() + "\n")
+    elif os.path.exists(cross) and "isCrossRepository" not in flag("--jq"):
+        # Only a --jq that filters on isCrossRepository hides the fork's PR.
+        sys.stdout.write(open(cross).read().strip() + "\n")
 elif args[:2] == ["pr", "create"]:
     open(state, "w").write("7\n")
     open(body, "w").write(flag("--body") or "")
@@ -704,6 +787,31 @@ def test_existing_pr_body_is_refreshed(helper: _Helper) -> None:
 
 @needs_bash
 @needs_node
+def test_a_forks_pr_is_not_mistaken_for_the_update_pr(helper: _Helper) -> None:
+    Path(str(helper.state) + ".cross").write_text("9\n")
+    helper.make_drift()
+    result = helper.run()
+    assert result.returncode == 0, result.stderr
+    (create,) = helper.gh_calls("pr", "create")  # its own PR is created
+    assert create[create.index("--head") + 1] == "skills-update"
+    for call in helper.gh_calls("pr"):
+        assert "9" not in call  # the fork's PR is never edited or closed
+    listing, *_ = helper.gh_calls("pr", "list")
+    assert "number,isCrossRepository" in listing
+
+
+@needs_bash
+@needs_node
+def test_a_forks_pr_is_not_closed_when_there_is_no_drift(helper: _Helper) -> None:
+    Path(str(helper.state) + ".cross").write_text("9\n")
+    result = helper.run()
+    assert result.returncode == 0, result.stderr
+    assert helper.gh_calls("pr", "close") == []
+    assert helper.gh_calls("pr", "edit") == []
+
+
+@needs_bash
+@needs_node
 def test_precondition_head_must_be_the_update_branch(helper: _Helper) -> None:
     _git(helper.work, "checkout", "-q", "main")
     result = helper.run()
@@ -740,4 +848,84 @@ def test_action_is_a_composite_with_the_documented_inputs() -> None:
         assert f"\n  {name}:" in text, name
     assert "skills@latest update -p -y" in text
     assert 'DISABLE_TELEMETRY: "1"' in text
-    assert "actions/checkout" not in text  # the caller checks the repo out
+    assert "uses: actions/checkout" not in text  # the caller checks the repo out
+
+
+def _steps() -> list[dict[str, Any]]:
+    action = yaml.safe_load((_ACTION / "action.yml").read_text())
+    steps: list[dict[str, Any]] = action["runs"]["steps"]
+    return steps
+
+
+def _step_index(fragment: str) -> int:
+    (index,) = [i for i, s in enumerate(_steps()) if fragment in s["run"]]
+    return index
+
+
+def test_both_scripts_are_staged_before_the_checkout_and_run_from_there() -> None:
+    steps = _steps()
+    staging = _step_index('cp "$GITHUB_ACTION_PATH/bump-pins.mjs"')
+    staged = steps[staging]["run"]
+    assert 'cp "$GITHUB_ACTION_PATH/update-pr.sh" "$RUNNER_TEMP/' in staged
+    assert 'cp "$GITHUB_ACTION_PATH/bump-pins.mjs" "$RUNNER_TEMP/' in staged
+    checkout = _step_index("git checkout -B")
+    assert staging < checkout
+    bump = steps[_step_index("--root .")]["run"]
+    assert 'node "$RUNNER_TEMP/skills_bump_pins.mjs"' in bump
+    helper = steps[_step_index('bash "$RUNNER_TEMP/skills_update_pr.sh"')]["run"]
+    assert helper.strip() == 'bash "$RUNNER_TEMP/skills_update_pr.sh"'
+    # Nothing runs a script straight from the action dir (it may not survive the checkout).
+    for step in steps[checkout:]:
+        assert "$GITHUB_ACTION_PATH" not in step["run"]
+
+
+def test_the_push_credential_comes_from_the_token_input() -> None:
+    steps = _steps()
+    index = _step_index("extraheader")
+    step = steps[index]
+    assert step["env"]["PUSH_TOKEN"] == "${{ inputs.token }}"
+    assert "inputs.token" not in step["run"]  # reaches the script only via env
+    assert "::add-mask::" in step["run"]
+    assert "set -x" not in step["run"]
+    helper = _step_index('bash "$RUNNER_TEMP/skills_update_pr.sh"')
+    assert _step_index("git checkout -B") < index < helper
+    assert steps[-1]["env"]["GH_TOKEN"] == "${{ inputs.token }}"  # gh uses it too
+
+
+@needs_bash
+def test_the_push_credential_step_replaces_the_checkouts_auth_header(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    key = "http.https://github.com/.extraheader"
+    _git(repo, "config", "--local", key, "AUTHORIZATION: basic CHECKOUT-CREDENTIAL")
+    script = _steps()[_step_index("extraheader")]["run"]
+    token = "tok-SECRET-123"
+    env = {**os.environ, "PUSH_TOKEN": token}
+    env.pop("GITHUB_SERVER_URL", None)
+    result = subprocess.run(  # nosec B603 B607
+        ["bash", "-euo", "pipefail", "-c", script],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    raw = subprocess.run(  # nosec B603 B607 -- not stripped: the first value is ""
+        ["git", "config", "--local", "--get-all", key],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    headers = raw.removesuffix("\n").split("\n")
+    expected = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    assert headers == ["", f"AUTHORIZATION: basic {expected}"]
+    assert "CHECKOUT-CREDENTIAL" not in " ".join(headers)
+    # The token is only ever printed inside ::add-mask:: commands.
+    shown = [ln for ln in result.stdout.splitlines() if token in ln]
+    assert shown and all(ln.startswith("::add-mask::") for ln in shown)
+    assert token not in result.stderr
