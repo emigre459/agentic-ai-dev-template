@@ -37,6 +37,12 @@
       "skillPath": ".agents/skills/pr-check/SKILL.md",
       "computedHash": "c9c87fdc7474a5d67282a377f480225b6adc8eb534d12eedc2f36892454f294c"
     },
+    "release": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/release/SKILL.md",
+      "computedHash": "9da06040c65bc26e08e401f30b6442997ae1e9e617c0ee48e8d802e52bab38a2"
+    },
     "resolve-pr-concerns": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
