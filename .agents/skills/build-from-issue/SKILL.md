@@ -208,6 +208,11 @@ A fast sanity check before brainstorming — *not* a substitute for it. Use `Ask
 - The specific behaviors/capabilities you read into it.
 - Any scope/implementation assumptions you're making.
 - **Any open question the card itself poses** ("should we X?", "A or B?", "TBD") — name the fork and ask the user to pick. Never silently choose a branch the card left open.
+- **Release check** (one line in the read-back, so the user can correct the bump before work starts):
+  - Find the last published release: `gh release list --exclude-drafts --limit 1 --json tagName,publishedAt`.
+  - Count the PRs merged since it: `gh pr list --state merged --search "merged:>=<publishedAt date>" --json number`.
+  - Say: "Last release `vX.Y.Z`, N days ago, M PRs since. This card reads as a **patch / minor / major / no release** bump because <one reason>."
+  - On a repo with no published release, say so and suggest the first one, `v0.1.0`.
 - "Does this match your intent? Anything I'm missing or misreading?"
 
 Do not proceed until the user confirms. If they correct you, revise and re-confirm.
@@ -386,9 +391,9 @@ Satisfied → continue.
 
 **Reference the issue correctly — `Closes #N` is not automatic.** Use `Closes #N` only when merging the PR genuinely completes the card. When the branch delivers a *prerequisite* for #N, or one slice of a multi-PR card, write `Refs #N` and say in the body what remains open; otherwise the merge auto-closes a card that still has work, and the next session finds it closed and re-derives the scope from scratch.
 
-If Step 7 surfaced any approved deviations, surface them in the PR body under a "Deviations from issue text" section so reviewers see intent. (There is no changelog step: release notes come from GitHub Releases, which release-drafter drafts from merged PRs, so no file is edited per PR. To pick the semver bump for the next release, label the PR `minor` or `major`; no label means patch.)
+If Step 7 surfaced any approved deviations, surface them in the PR body under a "Deviations from issue text" section so reviewers see intent. (There is no changelog step: release notes come from GitHub Releases, which release-drafter drafts from merged PRs, so no file is edited per PR. To record the bump agreed at Step 2, label the PR once it exists: `gh pr edit <n> --add-label minor` or `--add-label major`; a patch bump takes no label.)
 
-**Stacked finalize** (only when the plan has a `## Stack` section; it replaces the single-PR gate and PR creation above, including `finishing-a-development-branch`'s push/PR option): run `make pr_check` on the **top** layer (it contains every layer's change) plus `make lint` on each lower layer; open every layer's PR with `gh stack submit` instead of `gh pr create`; then give each layer's PR its own body (the stack map, `Refs #N` / `Closes #N` per layer, and on lower layers a "don't merge from this PR" line). Each layer's PR is gated by its own CI. Details: `references/stacked-prs.md` ("Finalize").
+**Stacked finalize** (only when the plan has a `## Stack` section; it replaces the single-PR gate and PR creation above, including `finishing-a-development-branch`'s push/PR option): run `make pr_check` on the **top** layer (it contains every layer's change) plus `make lint` on each lower layer; open every layer's PR with `gh stack submit` instead of `gh pr create`; then give each layer's PR its own body (the stack map, `Refs #N` / `Closes #N` per layer, and on lower layers a "don't merge from this PR" line); put the `minor` / `major` label on the top layer's PR only. Each layer's PR is gated by its own CI. Details: `references/stacked-prs.md` ("Finalize").
 
 **The agent's job ends at merge-ready, and merge-ready is a report to the user, never a merge.** Merge-ready means pushed, PR open, CI green, the configured reviewer's verdict on the current head plus its final full review done when a reviewer is active (`resolve-pr-concerns` Step 5a; the vendor-neutral `review-gate` status shows both, and the reviewer's own status check alone is not evidence; with `"active": null` there is none), conversation resolved, and GitHub not reporting `CONFLICTING` / `DIRTY` — nor `BEHIND` when the base branch's rules require up-to-date branches (strict required status checks; with a merge queue a behind PR reads `CLEAN`). `merge_gate.py` reads the rules and decides. The user merges — or gives explicit, one-off permission to merge *that* PR, which never carries over to another. If `main` uses a **merge queue**, merging means "Merge when ready", which enqueues the PR, and the queue tests it against the latest `main` — so finalize is "gate locally + push + open PR + drive to merge-ready, then the user merges or enqueues it."
 
