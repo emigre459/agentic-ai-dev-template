@@ -1,13 +1,17 @@
 import json
+import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NoReturn
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from scripts.apply_repo_settings import (
     DEFERRED_RULE_TYPES,
+    _current_labels,
     _current_rulesets,
     _gh_json,
     _is_merge_queue_rejection,
@@ -35,6 +39,7 @@ def test_load_desired_reads_all_files() -> None:
         ]
         == "enabled"
     )
+    assert [label["name"] for label in desired.labels] == ["patch", "minor", "major"]
 
 
 def test_current_rulesets_fetches_full_detail_for_main_only() -> None:
@@ -423,6 +428,9 @@ def test_merge_queue_eligibility(repo: dict, org: dict | None, expected: str) ->
     assert reason  # every verdict explains itself in the notice
 
 
+_DESIRED_LABELS = json.loads((REPO_SETTINGS / "labels.json").read_text())
+
+
 class _FakeGh:
     """A stub `gh` for main(): serves GETs, records writes, can reject merge_queue."""
 
@@ -433,8 +441,11 @@ class _FakeGh:
         rulesets: list | None = None,
         reject_merge_queue: bool = False,
         fail_ruleset_with: str | None = None,
+        labels: list | None = None,
     ) -> None:
         self.repo, self.org, self.rulesets = repo, org, rulesets or []
+        self.labels = labels if labels is not None else list(_DESIRED_LABELS)
+        self.label_writes: list[tuple[str, str, dict]] = []
         self.reject_merge_queue = reject_merge_queue
         self.fail_ruleset_with = fail_ruleset_with
         self.calls: list[list[str]] = []
@@ -453,6 +464,10 @@ class _FakeGh:
                 body = self.rulesets[0]
             elif endpoint == "repos/acme/repo":
                 body = self.repo
+            elif endpoint.startswith("repos/acme/repo/labels?"):
+                query = parse_qs(urlsplit(endpoint).query)
+                page, size = int(query["page"][0]), int(query["per_page"][0])
+                body = self.labels[(page - 1) * size : page * size]
             elif endpoint == "orgs/acme":
                 if self.org is None:
                     raise subprocess.CalledProcessError(
@@ -462,8 +477,13 @@ class _FakeGh:
             else:
                 raise AssertionError(f"unexpected GET {cmd}")
             return SimpleNamespace(stdout=json.dumps(body))
+        method = args[args.index("--method") + 1]
         endpoint = args[args.index("--method") + 2]
-        if "/rulesets" in endpoint:
+        if "/labels" in endpoint:
+            self.label_writes.append(
+                (method, endpoint, json.loads(str(kwargs["input"])))
+            )
+        elif "/rulesets" in endpoint:
             payload = json.loads(str(kwargs["input"]))
             self.ruleset_writes.append(payload)
             types = {r["type"] for r in payload["rules"]}
@@ -635,3 +655,144 @@ def test_queue_rejections_are_recognized(detail: str) -> None:
 )
 def test_other_errors_are_not_queue_rejections(detail: str) -> None:
     assert not _is_merge_queue_rejection(RuntimeError(detail))
+
+
+# --- bump labels (release-drafter reads minor / major; no label means patch) ---
+
+_ALIGNED_REPO = {"allow_squash_merge": True, **_ALIGNED_SECURITY}
+
+
+def _label_plan(
+    current_labels: list[dict], desired_labels: list[dict]
+) -> Sequence[tuple[str, str, int | str | None]]:
+    """Plan with everything but labels aligned, so only label actions remain."""
+    return plan_actions(
+        current_rulesets=[],
+        current_merge=_ALIGNED_REPO,
+        desired_ruleset={},
+        desired_merge={"allow_squash_merge": True},
+        desired_security=_ALIGNED_SECURITY,
+        desired_labels=desired_labels,
+        current_labels=current_labels,
+    )[
+        1:
+    ]  # drop the ("ruleset", "POST", None) an empty live ruleset list implies
+
+
+_MINOR = {"name": "minor", "color": "0e8a16", "description": "Bump the minor version"}
+_MAJOR = {"name": "major", "color": "b60205", "description": "Bump the major version"}
+
+
+def test_shipped_labels_are_the_three_bump_labels() -> None:
+    labels = {label["name"]: label for label in load_desired(REPO_SETTINGS).labels}
+    assert set(labels) == {"patch", "minor", "major"}
+    assert len({label["color"] for label in labels.values()}) == 3  # distinct
+    for label in labels.values():
+        assert not label["color"].startswith("#")  # the API wants bare hex
+        assert label["description"]
+
+
+def test_plan_creates_missing_labels() -> None:
+    actions = _label_plan(current_labels=[_MINOR], desired_labels=[_MINOR, _MAJOR])
+    assert actions == [("label", "POST", "major")]
+
+
+def test_plan_updates_changed_label_color() -> None:
+    live = {**_MINOR, "color": "ffffff"}
+    actions = _label_plan(current_labels=[live], desired_labels=[_MINOR])
+    assert actions == [("label", "PATCH", "minor")]
+
+
+def test_plan_updates_changed_label_description() -> None:
+    live = {**_MINOR, "description": "something else"}
+    actions = _label_plan(current_labels=[live], desired_labels=[_MINOR])
+    assert actions == [("label", "PATCH", "minor")]
+
+
+def test_plan_treats_a_missing_description_as_empty() -> None:
+    """GitHub returns null for a label with no description."""
+    undescribed = {"name": "minor", "color": "0e8a16", "description": ""}
+    live = {**undescribed, "description": None}
+    assert _label_plan([live], [undescribed]) == []
+
+
+def test_plan_ignores_label_color_case() -> None:
+    live = {**_MINOR, "color": _MINOR["color"].upper()}
+    assert _label_plan([live], [_MINOR]) == []
+
+
+def test_plan_never_deletes_extra_labels() -> None:
+    extras = [{"name": "bug", "color": "d73a4a", "description": "Something broke"}]
+    assert _label_plan(current_labels=[_MINOR, *extras], desired_labels=[_MINOR]) == []
+
+
+def test_plan_matches_label_names_exactly() -> None:
+    """`Minor` is a different label from `minor`; the bump label is still missing."""
+    live = {**_MINOR, "name": "Minor"}
+    assert _label_plan([live], [_MINOR]) == [("label", "POST", "minor")]
+
+
+def test_current_labels_follows_pagination() -> None:
+    pages = {1: [_MINOR, _MAJOR], 2: [{"name": "bug", "color": "d73a4a"}], 3: []}
+    seen: list[str] = []
+
+    def fake_runner(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        seen.append(cmd[-1])
+        page = int(parse_qs(urlsplit(cmd[-1]).query)["page"][0])
+        return SimpleNamespace(stdout=json.dumps(pages[page]))
+
+    labels = _current_labels("acme/repo", fake_runner, per_page=2)
+    assert [label["name"] for label in labels] == ["minor", "major", "bug"]
+    assert seen == [
+        "repos/acme/repo/labels?per_page=2&page=1",
+        "repos/acme/repo/labels?per_page=2&page=2",
+    ]
+
+
+def test_bootstrap_phase_includes_labels() -> None:
+    gh = _FakeGh(_repo("Organization", "public"), labels=[])
+    assert (
+        main(["--repo", "acme/repo", "--phase", "bootstrap", "--yes"], runner=gh) == 0
+    )
+    assert [w[2]["name"] for w in gh.label_writes] == ["patch", "minor", "major"]
+
+
+def test_final_phase_includes_labels() -> None:
+    gh = _FakeGh(_repo("Organization", "public"), labels=[])
+    assert main(["--repo", "acme/repo", "--yes"], runner=gh) == 0
+    assert [w[2]["name"] for w in gh.label_writes] == ["patch", "minor", "major"]
+
+
+def test_apply_creates_labels_via_gh() -> None:
+    gh = _FakeGh(_repo("Organization", "public"), labels=[])
+    main(["--repo", "acme/repo", "--yes"], runner=gh)
+    method, endpoint, payload = gh.label_writes[0]
+    assert (method, endpoint) == ("POST", "repos/acme/repo/labels")
+    assert set(payload) == {"name", "color", "description"}
+
+
+def test_apply_updates_a_changed_label_via_gh() -> None:
+    stale = [{**label, "color": "ffffff"} for label in _DESIRED_LABELS]
+    gh = _FakeGh(_repo("Organization", "public"), labels=stale)
+    main(["--repo", "acme/repo", "--yes"], runner=gh)
+    assert {(m, e) for m, e, _ in gh.label_writes} == {
+        ("PATCH", "repos/acme/repo/labels/patch"),
+        ("PATCH", "repos/acme/repo/labels/minor"),
+        ("PATCH", "repos/acme/repo/labels/major"),
+    }
+
+
+def test_label_names_are_url_encoded_in_the_update_endpoint(tmp_path: Path) -> None:
+    odd = {"name": "needs review", "color": "ffffff", "description": "x"}
+    settings = tmp_path / "repo-settings"
+    shutil.copytree(REPO_SETTINGS, settings)
+    (settings / "labels.json").write_text(json.dumps([{**odd, "color": "000000"}]))
+    gh = _FakeGh(_repo("Organization", "public"), labels=[odd])
+    main(["--repo", "acme/repo", "--yes", "--settings-dir", str(settings)], runner=gh)
+    assert gh.label_writes[0][1] == "repos/acme/repo/labels/needs%20review"
+
+
+def test_labels_stay_a_no_op_on_rerun() -> None:
+    gh = _FakeGh(_repo("Organization", "public"))  # live labels == desired labels
+    main(["--repo", "acme/repo", "--yes"], runner=gh)
+    assert gh.label_writes == []
