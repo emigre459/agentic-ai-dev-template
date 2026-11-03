@@ -29,8 +29,9 @@
 // stdout is one line of JSON:
 //   {"bumped":[{name,source,from,to,notes_url}],"available":[{source,name}],
 //    "removed":[{name,source}],"no_releases":[source]}
-// Everything else (CLI chatter, errors) goes to stderr. Any failed `gh` or `npx`
-// call exits non-zero.
+// Everything else (CLI chatter, errors) goes to stderr, including one
+// `::warning::` line per "removed" and per "no_releases" entry. Any failed `gh`
+// or `npx` call exits non-zero.
 //
 // Standard library only, so the action needs no `npm install`. `gh` and `npx`
 // are looked up on PATH.
@@ -46,6 +47,15 @@ class Failure extends Error {}
 
 function fail(message) {
   throw new Failure(message);
+}
+
+/**
+ * A GitHub Actions `::warning::` on stderr (stdout is the JSON summary), so a
+ * removed skill or a source without releases shows in the run even when no PR
+ * opens.
+ */
+function warn(message) {
+  process.stderr.write(`::warning::bump-pins: ${message}\n`);
 }
 
 /** Run `cmd args` and return stdout. Non-zero exit or spawn error throws. */
@@ -213,6 +223,7 @@ function main() {
     const newest = newestStableTag(source);
     if (newest === null) {
       summary.no_releases.push(source);
+      warn(`${source} has no stable vX.Y.Z release; its tag-pinned skills were not checked for updates.`);
       continue;
     }
     const installed = installedBySource.get(source);
@@ -233,7 +244,9 @@ function main() {
       }
       const keep = names.filter((n) => upstream.has(installed.get(n)));
       for (const name of names) {
-        if (!upstream.has(installed.get(name))) summary.removed.push({ name, source });
+        if (upstream.has(installed.get(name))) continue;
+        summary.removed.push({ name, source });
+        warn(`skill ${name} is gone from ${source} at ${newest}; it was kept at ${ref}, not updated.`);
       }
       if (keep.length === 0) continue;
 
