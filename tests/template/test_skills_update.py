@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess  # nosec B404 -- fixed argv, in-repo scripts, no shell
@@ -993,28 +994,113 @@ def test_update_workflow_skips_template() -> None:
         assert step["if"].startswith(_NOT_TEMPLATE), step
 
 
+def _secret_uses(node: Any, found: list[str] | None = None) -> list[str]:
+    """Every ``secrets.<NAME>`` reference in ``node`` (any nesting)."""
+    found = [] if found is None else found
+    if isinstance(node, dict):
+        for value in node.values():
+            _secret_uses(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _secret_uses(value, found)
+    elif isinstance(node, str):
+        found.extend(re.findall(r"secrets\.([A-Z_]+)", node))
+    return found
+
+
 def test_update_workflow_token_precedence() -> None:
-    (job,) = _workflow("skills-update.yml")["jobs"].values()
-    # Secrets cannot appear in step `if:`s: they are mapped into job env first.
-    assert {"SKILLS_UPDATE_APP_ID", "SKILLS_UPDATE_APP_PRIVATE_KEY"} <= set(job["env"])
-    assert job["env"]["SKILLS_UPDATE_TOKEN"] == "${{ secrets.SKILLS_UPDATE_TOKEN }}"
+    wf = _workflow("skills-update.yml")
+    (job,) = wf["jobs"].values()
+    # No secret in workflow or job env: the unpinned `npx skills@latest` in the
+    # action would otherwise run with the App key / PAT in its environment.
+    assert not _secret_uses(wf["env"]) and not _secret_uses(job.get("env", {}))
 
     steps = _caller_steps()
-    app = next(s for s in steps if "create-github-app-token" in s.get("uses", ""))
-    assert "env.SKILLS_UPDATE_APP_ID != ''" in app["if"]
-    assert "env.SKILLS_UPDATE_APP_PRIVATE_KEY != ''" in app["if"]
-    assert app["with"]["app-id"] == "${{ secrets.SKILLS_UPDATE_APP_ID }}"
-    assert app["with"]["private-key"] == "${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}"
-
+    probe = _caller_step("secrets")
+    app = _caller_step("app")
     pick = _caller_step("token")
-    assert steps.index(app) < steps.index(pick)
-    assert pick["env"]["APP_TOKEN"] == f"${{{{ steps.{app['id']}.outputs.token }}}}"
+    assert steps.index(probe) < steps.index(app) < steps.index(pick)
+
+    assert probe["env"] == {
+        "APP_ID": "${{ secrets.SKILLS_UPDATE_APP_ID }}",
+        "APP_KEY": "${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}",
+        "PAT": "${{ secrets.SKILLS_UPDATE_TOKEN }}",
+    }
+    assert "create-github-app-token" in app["uses"]
+    assert "steps.secrets.outputs.has_app == 'true'" in app["if"]
+    assert app["with"] == {
+        "app-id": "${{ secrets.SKILLS_UPDATE_APP_ID }}",
+        "private-key": "${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}",
+        "permission-contents": "write",
+        "permission-pull-requests": "write",
+        "permission-actions": "write",
+    }
+    assert pick["env"]["APP_TOKEN"] == "${{ steps.app.outputs.token }}"
+    assert pick["env"]["SKILLS_UPDATE_TOKEN"] == "${{ secrets.SKILLS_UPDATE_TOKEN }}"
     assert pick["env"]["GITHUB_TOKEN"] == "${{ github.token }}"
+
+    # Each secret appears only in the step(s) that need it.
+    holders = {
+        s.get("id", s.get("uses")): sorted(set(_secret_uses(s)))
+        for s in steps
+        if _secret_uses(s)
+    }
+    assert holders == {
+        "secrets": [
+            "SKILLS_UPDATE_APP_ID",
+            "SKILLS_UPDATE_APP_PRIVATE_KEY",
+            "SKILLS_UPDATE_TOKEN",
+        ],
+        "app": ["SKILLS_UPDATE_APP_ID", "SKILLS_UPDATE_APP_PRIVATE_KEY"],
+        "token": ["SKILLS_UPDATE_TOKEN"],
+    }
 
     final = steps[-1]
     assert final["uses"] == "./.github/actions/skills-update"
-    assert final["with"]["token"] == "${{ steps.token.outputs.value }}"
-    assert final["with"]["dispatch-ci"] == "${{ steps.token.outputs.dispatch }}"
+    assert final["with"] == {
+        "token": "${{ steps.token.outputs.value }}",
+        "dispatch-ci": "${{ steps.token.outputs.dispatch }}",
+    }
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("env", "has_app", "has_pat", "warns"),
+    [
+        ({}, "false", "false", False),
+        ({"APP_ID": "id-4242", "APP_KEY": "key-SECRET"}, "true", "false", False),
+        (
+            {"APP_ID": "id-4242", "APP_KEY": "key-SECRET", "PAT": "pat-SECRET"},
+            "true",
+            "true",
+            False,
+        ),
+        ({"PAT": "pat-SECRET"}, "false", "true", False),
+        ({"APP_ID": "id-4242", "APP_KEY": ""}, "false", "false", True),
+        (
+            {"APP_ID": "", "APP_KEY": "key-SECRET", "PAT": "pat-SECRET"},
+            "false",
+            "true",
+            True,
+        ),
+    ],
+)
+def test_secrets_probe_writes_only_booleans_and_warns_on_half_app(
+    tmp_path: Path, env: dict[str, str], has_app: str, has_pat: str, warns: bool
+) -> None:
+    out = tmp_path / "github_output"
+    out.write_text("")
+    result = subprocess.run(  # nosec B603 B607 -- the workflow's own step script
+        ["bash", "-euo", "pipefail", "-c", _caller_step("secrets")["run"]],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(out), **env},
+    )
+    written = dict(ln.split("=", 1) for ln in out.read_text().splitlines())
+    assert written == {"has_app": has_app, "has_pat": has_pat}
+    assert ("::warning::" in result.stdout) is warns
+    assert all(v not in result.stdout + result.stderr for v in env.values() if v)
 
 
 @needs_bash

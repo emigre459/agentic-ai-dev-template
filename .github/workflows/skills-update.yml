@@ -34,12 +34,6 @@ jobs:
       contents: write
       pull-requests: write
       actions: write
-    # Secrets cannot be read in step `if:`s; mapped to env they can be tested there.
-    # An unset secret is the empty string.
-    env:
-      SKILLS_UPDATE_APP_ID: ${{ secrets.SKILLS_UPDATE_APP_ID }}
-      SKILLS_UPDATE_APP_PRIVATE_KEY: ${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}
-      SKILLS_UPDATE_TOKEN: ${{ secrets.SKILLS_UPDATE_TOKEN }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -59,16 +53,39 @@ jobs:
         if: steps.template.outputs.is_template != 'true'
         with:
           node-version: "22"
+      # Secrets are handed to exactly one step each and never put in job or workflow
+      # env, where the unpinned `npx skills@latest` in the action could read them.
+      # This probe sees them and writes only booleans (an unset secret is "").
+      - name: Detect configured secrets
+        id: secrets
+        if: steps.template.outputs.is_template != 'true'
+        env:
+          APP_ID: ${{ secrets.SKILLS_UPDATE_APP_ID }}
+          APP_KEY: ${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}
+          PAT: ${{ secrets.SKILLS_UPDATE_TOKEN }}
+        run: |
+          has_app=false
+          if [ -n "${APP_ID:-}" ] && [ -n "${APP_KEY:-}" ]; then
+            has_app=true
+          elif [ -n "${APP_ID:-}" ] || [ -n "${APP_KEY:-}" ]; then
+            echo "::warning::Only one of SKILLS_UPDATE_APP_ID and SKILLS_UPDATE_APP_PRIVATE_KEY is set; ignoring the GitHub App."
+          fi
+          has_pat=false
+          if [ -n "${PAT:-}" ]; then has_pat=true; fi
+          echo "has_app=$has_app" >> "$GITHUB_OUTPUT"
+          echo "has_pat=$has_pat" >> "$GITHUB_OUTPUT"
       - name: Mint a GitHub App token
         id: app
         if: >-
           steps.template.outputs.is_template != 'true'
-          && env.SKILLS_UPDATE_APP_ID != ''
-          && env.SKILLS_UPDATE_APP_PRIVATE_KEY != ''
+          && steps.secrets.outputs.has_app == 'true'
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.SKILLS_UPDATE_APP_ID }}
           private-key: ${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-actions: write
       # App token, else the PAT, else the workflow's GITHUB_TOKEN. Only the last
       # needs ci.yml dispatched: App and PAT pushes trigger pull_request CI.
       - name: Choose the token
@@ -76,6 +93,7 @@ jobs:
         if: steps.template.outputs.is_template != 'true'
         env:
           APP_TOKEN: ${{ steps.app.outputs.token }}
+          SKILLS_UPDATE_TOKEN: ${{ secrets.SKILLS_UPDATE_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           if [ -n "${APP_TOKEN:-}" ]; then
