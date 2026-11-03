@@ -116,6 +116,46 @@ def test_initialize_react_removes_root_python_tooling(template_tree: Path) -> No
     assert 'package-ecosystem: "bun"' in dependabot
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _ci_workflow(root: Path) -> dict[Any, Any]:
+    import yaml
+
+    data = yaml.safe_load((root / ".github" / "workflows" / "ci.yml").read_text())
+    data["on"] = data.pop(True, data.get("on"))  # YAML 1.1 reads `on:` as True
+    return data
+
+
+def test_ci_runs_skills_drift_everywhere() -> None:
+    ci = _ci_workflow(_REPO_ROOT)
+    job = ci["jobs"]["skills-drift"]
+    assert job["name"] == "skills drift"
+    assert {"pull_request", "merge_group"} <= set(ci["on"])
+    assert ci["on"]["push"] == {"branches": ["main"]}
+    # template mode checks a ref'd entry against the local tag: needs full history
+    checkout = next(s for s in job["steps"] if "actions/checkout" in s.get("uses", ""))
+    assert checkout["with"]["fetch-depth"] == 0
+    assert checkout["with"]["fetch-tags"] is True
+    assert any(s.get("uses") == "./.github/actions/skills-drift" for s in job["steps"])
+
+
+def test_ruleset_requires_skills_drift() -> None:
+    ruleset = json.loads(
+        (_REPO_ROOT / ".github" / "repo-settings" / "ruleset.json").read_text()
+    )
+    [rule] = [r for r in ruleset["rules"] if r["type"] == "required_status_checks"]
+    checks = rule["parameters"]["required_status_checks"]
+    assert {"context": "skills drift", "integration_id": 15368} in checks
+
+
+@pytest.mark.parametrize("stack", ["python", "react"])
+def test_skills_drift_job_survives_init(template_tree: Path, stack: str) -> None:
+    initialize(template_tree, stack, "acme-app", "app", apply_settings=False)
+    job = _ci_workflow(template_tree)["jobs"]["skills-drift"]
+    assert job["name"] == "skills drift"
+
+
 def test_initialize_rewrites_required_status_checks(template_tree: Path) -> None:
     import json
 
@@ -133,7 +173,7 @@ def test_initialize_rewrites_required_status_checks(template_tree: Path) -> None
     # the shipped rule requires the TEMPLATE's own contexts (python-lint, ...);
     # init must rewrite them to the post-init job ids exactly, or merges gate
     # forever on contexts that never report
-    assert contexts == {"lint", "tests", "security"}
+    assert contexts == {"lint", "tests", "security", "skills drift"}
     # pre-existing rules are preserved
     assert any(r["type"] == "pull_request" for r in ruleset["rules"])
 

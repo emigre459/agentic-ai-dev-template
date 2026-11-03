@@ -17,6 +17,22 @@ on:
 # required_status_checks contexts it writes into ruleset.json.
 # <<< STACK:template
 jobs:
+  # Stack-independent: outside every STACK marker so it survives `make init`.
+  # `make init` rewrites the local action path to the remote action at the lock's
+  # ref. Full history + tags: template mode verifies a lock entry's ref locally.
+  skills-drift:
+    name: skills drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - uses: ./.github/actions/skills-drift
+
 # >>> STACK:python
   python-lint:
     runs-on: ubuntu-latest
