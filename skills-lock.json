@@ -41,7 +41,7 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/resolve-pr-concerns/SKILL.md",
-      "computedHash": "0b91eaca1921c50cd6762d1b7ded0708feea7ca71ef11f14ee9a9353fe8d8147"
+      "computedHash": "358755957b1086241e23a6fc16f99b722d5c9257932c6f5ee2cce8106c5eeca3"
     },
     "review-skill": {
       "source": "emigre459/agentic-ai-dev-template",
@@ -59,7 +59,7 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/upgrade-deps/SKILL.md",
-      "computedHash": "b6ecb367d073ac6cefb9934e4e1054ce7b2722df8844ae97bb46c88e6fe2b766"
+      "computedHash": "bc36d6ebd5b3b9491654fd8c772a12cc886299d5c0960d1c631497ac1b668232"
     }
   }
 }

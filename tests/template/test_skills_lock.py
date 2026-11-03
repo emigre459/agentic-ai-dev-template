@@ -105,6 +105,7 @@ def test_check_defaults_root_to_cwd(tmp_path: Path) -> None:
 
 def test_check_template_flag_is_accepted(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path / "repo")
+    _git(repo, "init", "-q")  # template mode lists files with git
     result = _node("check", "--root", repo, "--template")
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -285,6 +286,56 @@ def test_template_check_ignores_unreleased_edits(tmp_path: Path) -> None:
     plain = _node("check", "--root", repo)
     assert plain.returncode == 1
     assert "DRIFT alpha" in plain.stdout
+
+
+def test_template_working_tree_hash_skips_gitignored_files(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    (repo / ".gitignore").write_text("__pycache__/\n.DS_Store\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "ignore")
+    clean_alpha = _hash_of(repo / ".agents/skills/alpha")
+    skill = repo / ".agents/skills/alpha"
+    (skill / "__pycache__").mkdir()
+    (skill / "__pycache__" / "x.pyc").write_bytes(b"\x00bytecode")
+    (skill / ".DS_Store").write_bytes(b"finder")
+    # Unignored untracked files still count: they are part of the working tree.
+    (repo / ".agents/skills/beta/new.md").write_text("new\n")
+    assert _hash_of(skill) != clean_alpha
+
+    assert _node("write", "--root", repo).returncode == 0
+    skills = _read_lock(repo)["skills"]
+    assert skills["alpha"]["computedHash"] == clean_alpha
+    assert skills["beta"]["computedHash"] != _hash_of(repo / ".agents/skills/alpha")
+
+    template = _node("check", "--root", repo, "--template")
+    assert template.returncode == 0, template.stdout + template.stderr
+    # The plain consumer check keeps exact CLI parity: it sees every file on disk.
+    plain = _node("check", "--root", repo)
+    assert plain.returncode == 1
+    assert "DRIFT alpha" in plain.stdout
+
+
+def test_template_check_flags_a_tracked_file_edit_despite_ignores(
+    tmp_path: Path,
+) -> None:
+    repo = _make_template(tmp_path / "repo")
+    (repo / ".gitignore").write_text("__pycache__/\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "ignore")
+    assert _node("write", "--root", repo).returncode == 0
+    (repo / ".agents/skills/alpha/extra.md").write_text("edited\n")
+    result = _node("check", "--root", repo, "--template")
+    assert result.returncode == 1
+    assert "DRIFT alpha" in result.stdout
+
+
+def test_template_check_flags_a_deleted_file(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    assert _node("write", "--root", repo).returncode == 0
+    (repo / ".agents/skills/alpha/extra.md").unlink()
+    result = _node("check", "--root", repo, "--template")
+    assert result.returncode == 1
+    assert "DRIFT alpha" in result.stdout
 
 
 def test_template_check_flags_a_stale_tag_hash(tmp_path: Path) -> None:
