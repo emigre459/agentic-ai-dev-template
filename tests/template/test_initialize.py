@@ -305,14 +305,15 @@ _NEEDS_NODE = pytest.mark.skipif(
 class _FakeGit:
     """Runner standing in for ``subprocess.run``: serves git from a local tree.
 
-    ``fetch`` succeeds (or raises when ``fail_fetch``); ``archive`` tars the
-    requested ``.agents/skills/<name>`` folders out of ``source``. Anything that
-    is not git (the node hash) is passed through to the real ``subprocess.run``.
+    ``init`` makes the scratch repo dir; ``fetch`` succeeds, or raises
+    ``fetch_error``; ``archive`` tars the requested ``.agents/skills/<name>``
+    folders out of ``source``. Anything that is not git (the node hash) is
+    passed through to the real ``subprocess.run``.
     """
 
-    def __init__(self, source: Path, *, fail_fetch: bool = False) -> None:
+    def __init__(self, source: Path, *, fetch_error: Exception | None = None) -> None:
         self.source = source
-        self.fail_fetch = fail_fetch
+        self.fetch_error = fetch_error
         self.git_calls: list[list[str]] = []
 
     def __call__(
@@ -321,11 +322,12 @@ class _FakeGit:
         if cmd[0] != "git":
             return subprocess.run(cmd, **kwargs)  # noqa: PLW1510  # nosec B603
         self.git_calls.append(list(cmd))
-        verb = cmd[3]  # ["git", "-C", <root>, <verb>, ...]
-        if verb == "fetch":
-            if self.fail_fetch:
-                raise subprocess.CalledProcessError(128, list(cmd))
-        elif verb == "archive":
+        if cmd[1] == "init":
+            Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
+        elif cmd[1] == "-C" and cmd[3] == "fetch":
+            if self.fetch_error is not None:
+                raise self.fetch_error
+        elif cmd[1] == "-C" and cmd[3] == "archive":
             out = Path(cmd[cmd.index("-o") + 1])
             with tarfile.open(out, "w") as tar:
                 for path in cmd[cmd.index("FETCH_HEAD") + 1 :]:
@@ -333,6 +335,19 @@ class _FakeGit:
         else:
             raise AssertionError(f"unexpected git command: {cmd}")
         return subprocess.CompletedProcess(list(cmd), 0, "", "")
+
+
+def _fetch_failure() -> subprocess.CalledProcessError:
+    return subprocess.CalledProcessError(128, ["git", "fetch"], stderr="no route")
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    """Every regular file under ``root`` (relative POSIX path -> bytes)."""
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and not p.is_symlink()
+    }
 
 
 def _no_commands(cmd: Sequence[str], **kwargs: Any) -> NoReturn:
@@ -389,11 +404,14 @@ def test_init_swaps_skills_to_pinned_tag(template_tree: Path, tmp_path: Path) ->
     assert (skills / "run-tests" / "SKILL.md").read_text() == "released run-tests\n"
     assert (skills / "pr-check" / "SKILL.md").read_text() == "released pr\n"
     assert not stale.exists()
-    root = str(template_tree)
-    assert fake.git_calls[0] == [
+    # The fetch goes into a throwaway repo, never the user's own .git.
+    init, fetch, *rest = fake.git_calls
+    scratch_repo = init[-1]
+    assert init == ["git", "init", "-q", scratch_repo]
+    assert fetch == [
         "git",
         "-C",
-        root,
+        scratch_repo,
         "fetch",
         "--depth",
         "1",
@@ -401,13 +419,13 @@ def test_init_swaps_skills_to_pinned_tag(template_tree: Path, tmp_path: Path) ->
         "tag",
         _REF,
     ]
-    archives = [c for c in fake.git_calls if c[3] == "archive"]
-    assert len(archives) == 2
-    assert all(c[:4] == ["git", "-C", root, "archive"] for c in archives)
-    assert all("--format=tar" in c and "FETCH_HEAD" in c for c in archives)
+    assert len(rest) == 2
+    assert all(c[:4] == ["git", "-C", scratch_repo, "archive"] for c in rest)
+    assert all("--format=tar" in c and "FETCH_HEAD" in c for c in rest)
+    assert not any(str(template_tree) in part for c in fake.git_calls for part in c)
 
 
-def test_init_fails_on_hash_mismatch_before_deleting_anything(
+def test_init_fails_on_hash_mismatch_before_touching_anything(
     template_tree: Path, tmp_path: Path
 ) -> None:
     source = _make_source(tmp_path, {"run-tests": "good\n", "pr-check": "good\n"})
@@ -415,22 +433,27 @@ def test_init_fails_on_hash_mismatch_before_deleting_anything(
     # The lock expects bytes the "release" does not contain, for the second skill.
     entries["pr-check"] = ("0" * 64, _REF)
     _write_lock(template_tree, entries)
-    original = template_tree / ".agents" / "skills" / "run-tests" / "SKILL.md"
-    before = original.read_text()
+    before = _snapshot(template_tree)
 
     with pytest.raises(RuntimeError, match="pr-check"):
         initialize(template_tree, "python", "acme-svc", "svc", runner=_FakeGit(source))
 
-    assert (template_tree / "scripts" / "init_template.py").exists()
-    # Nothing was replaced, not even the skill that did verify.
-    assert original.read_text() == before
+    # Not even the skill that did verify was replaced, and stacks/ is still there.
+    assert (template_tree / "stacks").is_dir()
+    assert _snapshot(template_tree) == before
+
+    # With the lock fixed, a retry succeeds.
+    _write_lock(template_tree, _released(source, "run-tests", "pr-check"))
+    initialize(template_tree, "python", "acme-svc", "svc", runner=_FakeGit(source))
+    assert not (template_tree / "stacks").exists()
 
 
-def test_init_fails_loudly_when_fetch_fails(
+def test_init_fails_loudly_when_fetch_fails_and_a_retry_works(
     template_tree: Path, tmp_path: Path
 ) -> None:
     source = _make_source(tmp_path, {"run-tests": "x\n"})
     _write_lock(template_tree, _released(source, "run-tests"))
+    before = _snapshot(template_tree)
 
     with pytest.raises(RuntimeError, match="network access") as excinfo:
         initialize(
@@ -438,11 +461,56 @@ def test_init_fails_loudly_when_fetch_fails(
             "python",
             "acme-svc",
             "svc",
-            runner=_FakeGit(source, fail_fetch=True),
+            runner=_FakeGit(source, fetch_error=_fetch_failure()),
         )
 
     assert _SOURCE in str(excinfo.value) and _REF in str(excinfo.value)
-    assert (template_tree / "scripts" / "init_template.py").exists()
+    assert "no route" in str(excinfo.value)
+    # Offline is the likely failure: the tree must be byte-for-byte untouched,
+    # stacks/ included, so re-running `make init` is possible.
+    assert (template_tree / "stacks").is_dir()
+    assert _snapshot(template_tree) == before
+
+    initialize(template_tree, "python", "acme-svc", "svc", runner=_FakeGit(source))
+    assert not (template_tree / "stacks").exists()
+    skill = template_tree / ".agents" / "skills" / "run-tests" / "SKILL.md"
+    assert skill.read_text() == "x\n"
+
+
+def test_init_says_git_is_missing_when_git_is_not_installed(
+    template_tree: Path, tmp_path: Path
+) -> None:
+    source = _make_source(tmp_path, {"run-tests": "x\n"})
+    _write_lock(template_tree, _released(source, "run-tests"))
+    fake = _FakeGit(source, fetch_error=FileNotFoundError("git"))
+
+    with pytest.raises(RuntimeError, match="git is not installed") as excinfo:
+        initialize(template_tree, "python", "acme-svc", "svc", runner=fake)
+
+    assert "network" not in str(excinfo.value)
+    assert (template_tree / "stacks").is_dir()
+
+
+@pytest.mark.parametrize(
+    ("name", "ref", "match"),
+    [
+        ("../escape", _REF, "invalid skill name"),
+        ("..", _REF, "invalid skill name"),
+        ("run-tests", "main", "not a release tag"),
+        ("run-tests", "v1.2", "not a release tag"),
+        ("run-tests", "--upload-pack=x", "not a release tag"),
+    ],
+)
+def test_init_rejects_unsafe_lock_values(
+    template_tree: Path, name: str, ref: str, match: str
+) -> None:
+    _write_lock(template_tree, {name: ("0" * 64, ref)})
+    before = _snapshot(template_tree)
+
+    with pytest.raises(RuntimeError, match=match):
+        initialize(template_tree, "python", "acme-svc", "svc", runner=_no_commands)
+
+    assert _snapshot(template_tree) == before
 
 
 def test_init_without_ref_keeps_tree_and_local_actions(template_tree: Path) -> None:
