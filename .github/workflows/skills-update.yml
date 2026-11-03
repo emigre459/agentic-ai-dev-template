@@ -1,7 +1,8 @@
 name: skills update
 
-# Nightly: open (or refresh) one "Update agent skills" PR from the skills CLI's
-# newest releases. The PR never merges itself. Secrets, all optional, pick the
+# Nightly, and after a merge to main that changes the skills: open (or refresh) one
+# "Update agent skills" PR from the skills CLI's newest releases, or close it once
+# main already has them. The PR never merges itself. Secrets, all optional, pick the
 # identity that pushes the branch and opens the PR:
 #   SKILLS_UPDATE_APP_ID + SKILLS_UPDATE_APP_PRIVATE_KEY  a GitHub App (its push
 #                                                         triggers the PR's CI)
@@ -16,6 +17,15 @@ on:
   schedule:
     - cron: "17 4 * * *"
   workflow_dispatch:
+  # Also right after a merge to main that changes the skills: when another PR
+  # already landed the pending updates, this run finds no drift and closes the
+  # stale update PR within minutes instead of at the next nightly run.
+  push:
+    branches: [main]
+    paths:
+      - skills-lock.json
+      - .agents/skills/**
+      - .claude/skills/**
 
 permissions: {}
 

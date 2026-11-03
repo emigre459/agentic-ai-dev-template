@@ -1013,7 +1013,7 @@ def _caller_step(step_id: str) -> dict[str, Any]:
 
 def test_update_workflow_triggers_and_permissions() -> None:
     wf = _workflow("skills-update.yml")
-    assert set(wf["on"]) == {"schedule", "workflow_dispatch"}
+    assert set(wf["on"]) == {"schedule", "workflow_dispatch", "push"}
     (entry,) = wf["on"]["schedule"]
     assert len(str(entry["cron"]).split()) == 5
     (job,) = wf["jobs"].values()
@@ -1024,6 +1024,21 @@ def test_update_workflow_triggers_and_permissions() -> None:
     }
     assert wf["env"]["DISABLE_TELEMETRY"] == "1"
     assert wf["concurrency"] == {"group": "skills-update", "cancel-in-progress": False}
+
+
+def test_update_workflow_reruns_when_main_changes_the_skills() -> None:
+    """Re-run on a merge to main that changes the skills.
+
+    A merge that already lands the updates then closes the stale PR within
+    minutes, not at the next nightly run (the no-drift path closes it).
+    """
+    push = _workflow("skills-update.yml")["on"]["push"]
+    assert push["branches"] == ["main"]
+    assert set(push["paths"]) == {
+        "skills-lock.json",
+        ".agents/skills/**",
+        ".claude/skills/**",
+    }
 
 
 def test_update_workflow_skips_template() -> None:
@@ -1233,5 +1248,5 @@ def test_update_workflow_survives_init_and_points_at_release(
     path = template_tree / ".github" / "workflows" / "skills-update.yml"
     assert f"uses: {_SOURCE}/.github/actions/skills-update@{_REF}\n" in path.read_text()
     assert "./.github/actions" not in path.read_text()
-    assert set(_workflow_at(path)["on"]) == {"schedule", "workflow_dispatch"}
+    assert set(_workflow_at(path)["on"]) == {"schedule", "workflow_dispatch", "push"}
     assert not (template_tree / ".github" / "actions" / "skills-update").exists()
