@@ -1,0 +1,17 @@
+# release-drafter config. Read by .github/workflows/release-drafter.yml (the
+# rolling draft, updated on every push to main) and release.yml (publishes it).
+#
+# The semver bump comes from a label on the merged PRs: `major`, `minor`, or
+# `patch`. With no label the bump is patch. The labels are created by
+# `make apply_repo_settings_bootstrap` (see .github/repo-settings/labels.json).
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+version-resolver:
+  major:
+    labels: [major]
+  minor:
+    labels: [minor]
+  patch:
+    labels: [patch]
+  default: patch
+template: '$CHANGES'

@@ -386,7 +386,7 @@ Satisfied → continue.
 
 **Reference the issue correctly — `Closes #N` is not automatic.** Use `Closes #N` only when merging the PR genuinely completes the card. When the branch delivers a *prerequisite* for #N, or one slice of a multi-PR card, write `Refs #N` and say in the body what remains open; otherwise the merge auto-closes a card that still has work, and the next session finds it closed and re-derives the scope from scratch.
 
-If Step 7 surfaced any approved deviations, surface them in the PR body under a "Deviations from issue text" section so reviewers see intent. (There is no changelog step: a shared `CHANGELOG.md` edited by every PR is a frequent source of catch-up-merge conflicts, so the merged-PR history is the record of what changed.)
+If Step 7 surfaced any approved deviations, surface them in the PR body under a "Deviations from issue text" section so reviewers see intent. (There is no changelog step: release notes come from GitHub Releases, which release-drafter drafts from merged PRs, so no file is edited per PR. To pick the semver bump for the next release, label the PR `minor` or `major`; no label means patch.)
 
 **Stacked finalize** (only when the plan has a `## Stack` section; it replaces the single-PR gate and PR creation above, including `finishing-a-development-branch`'s push/PR option): run `make pr_check` on the **top** layer (it contains every layer's change) plus `make lint` on each lower layer; open every layer's PR with `gh stack submit` instead of `gh pr create`; then give each layer's PR its own body (the stack map, `Refs #N` / `Closes #N` per layer, and on lower layers a "don't merge from this PR" line). Each layer's PR is gated by its own CI. Details: `references/stacked-prs.md` ("Finalize").
 
