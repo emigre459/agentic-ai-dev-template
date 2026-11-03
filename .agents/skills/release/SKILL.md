@@ -34,21 +34,29 @@ Use `AskUserQuestion` to show the version and the paragraph exactly as they will
 
 ## Step 5: Publish
 
+Record the time just before dispatching, then send the summary as JSON on stdin. A single-quoted heredoc keeps the shell from running backticks or expanding `$` in the paragraph, so the published text is exactly what the user approved:
+
 ```bash
-gh workflow run release.yml --ref main -f summary="<paragraph>"
-gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId'
+date -u +%Y-%m-%dT%H:%M:%SZ
+gh workflow run release.yml --ref main --json <<'JSON'
+{"summary": "<paragraph, JSON-escaped: \" for a quote, \n for a line break>"}
+JSON
+gh run list --workflow release.yml --event workflow_dispatch --json databaseId,createdAt
 gh run watch <run-id> --exit-status
 ```
 
-Pass the paragraph as one quoted argument (escape any quotes inside it). The workflow does nothing unless it runs on `main`. If the run fails, report the failure and stop: do not retry the publish unasked.
+Take the run whose `createdAt` is after the recorded time: a run from before the dispatch (or from someone else) can sit in the list. If none is that recent yet, list again after a few seconds. The workflow does nothing unless it runs on `main`. If the run fails, report the failure and stop: do not retry the publish unasked.
 
 ## Step 6: Verify and report
 
+Read the tag that was actually published; do not assume Step 1's version, since the drafter may have re-resolved it before the run:
+
 ```bash
+gh release list --exclude-drafts --limit 1 --json tagName
 gh release view vX.Y.Z
 ```
 
-Confirm the tag and the published (non-draft) release exist, then report the release URL and the version. If either is missing, say so; do not claim success.
+Use the first command's `tagName` for `vX.Y.Z`. Confirm the tag and the published (non-draft) release exist, then report the release URL and the version, and say so if it differs from the version the user approved. If either is missing, say so; do not claim success.
 
 ## Step 7: Re-pin the skills (template repo only)
 
@@ -67,4 +75,4 @@ Offer it to the user with `AskUserQuestion`; do it only on their OK, never autom
 - A summary of more than one paragraph, or one that lists every PR.
 - Merging the re-pin PR, or opening it without the user's OK.
 - Running the re-pin step in a repo that is not the template.
-- Reporting a release as published without `gh release view` showing it.
+- Reporting a release as published without `gh release view` showing it, or verifying Step 1's version instead of the tag that was published.

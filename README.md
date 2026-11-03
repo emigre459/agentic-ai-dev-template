@@ -220,8 +220,9 @@ merging without your one-off OK is a hard stop.
 ## Installing the skills
 
 A repo created from this template already has the skills: `make init` installs the
-template's latest release and records it in `skills-lock.json`. To add them to any
-other repo, install a release by its tag with the [skills CLI](https://github.com/vercel-labs/skills):
+release pinned in the template's `skills-lock.json` (the last re-pinned tag, not
+necessarily the newest release) and keeps that pin. To add them to any other repo,
+install a release by its tag with the [skills CLI](https://github.com/vercel-labs/skills):
 
 ```bash
 npx skills add emigre459/agentic-ai-dev-template#vX.Y.Z
@@ -257,9 +258,9 @@ repository secret, or neither:
 | `SKILLS_UPDATE_TOKEN` | A fine-grained personal access token with contents and pull requests: write. Its pushes trigger the PR's CI normally. |
 | neither | The workflow's `GITHUB_TOKEN`. Its pushes do not trigger CI, so the workflow dispatches `ci.yml` on the branch instead. Turn on Settings, Actions, General, "Allow GitHub Actions to create and approve pull requests", or the PR cannot be opened. |
 
-GitHub disables scheduled workflows after 60 days without repository activity. If the
-nightly PR stops appearing, open the Actions tab, pick "skills update" and re-enable it.
-A repo that merges its update PRs regularly never reaches that point.
+On public repositories, GitHub disables scheduled workflows after 60 days without
+repository activity (private repositories are not affected). If the nightly PR stops
+appearing, open the Actions tab, pick "skills update" and re-enable it.
 
 ### Adopting the kit in an existing repo
 
@@ -284,6 +285,16 @@ it can be a required check:
           node-version: "22"
       - uses: emigre459/agentic-ai-dev-template/.github/actions/skills-drift@vX.Y.Z
 ```
+
+The update action's CI handling needs three things from your CI workflow. On the
+`GITHUB_TOKEN` path it runs `gh workflow run ci.yml --ref skills-update`, and a failure
+there fails the nightly run and leaves the PR without checks, so unmergeable:
+
+- the CI workflow has a `workflow_dispatch:` trigger, so it can be dispatched;
+- it is named `ci.yml`, or the copied workflow passes its name in the action's
+  `ci-workflow:` input;
+- the `skills drift` job runs on `pull_request`, `push` to `main`, `merge_group` and
+  `workflow_dispatch`, so the required check reports on the update PR and in the queue.
 
 Then add `skills drift` to the required checks of your `main` ruleset (repos made
 from the template get this from `make finalize_repo_settings`).
