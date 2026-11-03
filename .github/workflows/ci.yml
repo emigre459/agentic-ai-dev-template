@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Dispatched on the skills-update branch when its push used GITHUB_TOKEN, whose
+  # pushes do not trigger pull_request runs.
+  workflow_dispatch:
   # Merge-queue commits: the required jobs must report on the
   # gh-readonly-queue/main/* commit or a merge queue never merges it.
   merge_group:

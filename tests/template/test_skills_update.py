@@ -22,6 +22,8 @@ from typing import Any
 import pytest
 import yaml
 
+from scripts.init_template import initialize
+
 _REPO = Path(__file__).resolve().parents[2]
 _ACTION = _REPO / ".github" / "actions" / "skills-update"
 _BUMP = _ACTION / "bump-pins.mjs"
@@ -929,3 +931,151 @@ def test_the_push_credential_step_replaces_the_checkouts_auth_header(
     shown = [ln for ln in result.stdout.splitlines() if token in ln]
     assert shown and all(ln.startswith("::add-mask::") for ln in shown)
     assert token not in result.stderr
+
+
+# --------------------------------------------------------------------------- #
+# skills-update.yml: the nightly caller workflow and its token path
+# --------------------------------------------------------------------------- #
+
+_WORKFLOWS = _REPO / ".github" / "workflows"
+_NOT_TEMPLATE = "steps.template.outputs.is_template != 'true'"
+
+
+def _workflow_at(path: Path) -> dict[Any, Any]:
+    data = yaml.safe_load(path.read_text())
+    assert isinstance(data, dict)
+    data["on"] = data.pop(True, data.get("on"))  # YAML 1.1 reads a bare `on:` as True
+    return data
+
+
+def _workflow(name: str) -> dict[Any, Any]:
+    return _workflow_at(_WORKFLOWS / name)
+
+
+def _caller_steps() -> list[dict[str, Any]]:
+    (job,) = _workflow("skills-update.yml")["jobs"].values()
+    steps: list[dict[str, Any]] = job["steps"]
+    return steps
+
+
+def _caller_step(step_id: str) -> dict[str, Any]:
+    return next(s for s in _caller_steps() if s.get("id") == step_id)
+
+
+def test_update_workflow_triggers_and_permissions() -> None:
+    wf = _workflow("skills-update.yml")
+    assert set(wf["on"]) == {"schedule", "workflow_dispatch"}
+    (entry,) = wf["on"]["schedule"]
+    assert len(str(entry["cron"]).split()) == 5
+    (job,) = wf["jobs"].values()
+    assert job["permissions"] == {
+        "contents": "write",
+        "pull-requests": "write",
+        "actions": "write",
+    }
+    assert wf["env"]["DISABLE_TELEMETRY"] == "1"
+    assert wf["concurrency"] == {"group": "skills-update", "cancel-in-progress": False}
+
+
+def test_update_workflow_skips_template() -> None:
+    (job,) = _workflow("skills-update.yml")["jobs"].values()
+    # A job-level `if:` is evaluated before checkout, on an empty workspace, so the
+    # template test is a step output after checkout and gates every later step.
+    assert "if" not in job
+    steps = _caller_steps()
+    assert steps[0]["uses"].startswith("actions/checkout@")
+    assert steps[0]["with"]["fetch-depth"] == 0
+    probe = _caller_step("template")
+    assert steps.index(probe) == 1
+    assert "scripts/init_template.py" in probe["run"]
+    assert "is_template=" in probe["run"] and "GITHUB_OUTPUT" in probe["run"]
+    for step in steps[2:]:
+        assert step["if"].startswith(_NOT_TEMPLATE), step
+
+
+def test_update_workflow_token_precedence() -> None:
+    (job,) = _workflow("skills-update.yml")["jobs"].values()
+    # Secrets cannot appear in step `if:`s: they are mapped into job env first.
+    assert {"SKILLS_UPDATE_APP_ID", "SKILLS_UPDATE_APP_PRIVATE_KEY"} <= set(job["env"])
+    assert job["env"]["SKILLS_UPDATE_TOKEN"] == "${{ secrets.SKILLS_UPDATE_TOKEN }}"
+
+    steps = _caller_steps()
+    app = next(s for s in steps if "create-github-app-token" in s.get("uses", ""))
+    assert "env.SKILLS_UPDATE_APP_ID != ''" in app["if"]
+    assert "env.SKILLS_UPDATE_APP_PRIVATE_KEY != ''" in app["if"]
+    assert app["with"]["app-id"] == "${{ secrets.SKILLS_UPDATE_APP_ID }}"
+    assert app["with"]["private-key"] == "${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}"
+
+    pick = _caller_step("token")
+    assert steps.index(app) < steps.index(pick)
+    assert pick["env"]["APP_TOKEN"] == f"${{{{ steps.{app['id']}.outputs.token }}}}"
+    assert pick["env"]["GITHUB_TOKEN"] == "${{ github.token }}"
+
+    final = steps[-1]
+    assert final["uses"] == "./.github/actions/skills-update"
+    assert final["with"]["token"] == "${{ steps.token.outputs.value }}"
+    assert final["with"]["dispatch-ci"] == "${{ steps.token.outputs.dispatch }}"
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("env", "value", "dispatch"),
+    [
+        ({"APP_TOKEN": "app-tok", "SKILLS_UPDATE_TOKEN": "pat"}, "app-tok", "false"),
+        ({"APP_TOKEN": "", "SKILLS_UPDATE_TOKEN": "pat"}, "pat", "false"),
+        ({"APP_TOKEN": "", "SKILLS_UPDATE_TOKEN": ""}, "ghs-default", "true"),
+        ({}, "ghs-default", "true"),
+    ],
+)
+def test_token_step_picks_app_then_pat_then_github_token(
+    tmp_path: Path, env: dict[str, str], value: str, dispatch: str
+) -> None:
+    out = tmp_path / "github_output"
+    out.write_text("")
+    result = subprocess.run(  # nosec B603 B607 -- the workflow's own step script
+        ["bash", "-euo", "pipefail", "-c", _caller_step("token")["run"]],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={
+            "PATH": os.environ["PATH"],
+            "GITHUB_OUTPUT": str(out),
+            "GITHUB_TOKEN": "ghs-default",
+            **env,
+        },
+    )
+    written = dict(ln.split("=", 1) for ln in out.read_text().splitlines())
+    assert written == {"value": value, "dispatch": dispatch}
+    # Only ::add-mask:: lines may carry the token to the log.
+    shown = [ln for ln in result.stdout.splitlines() if value in ln]
+    assert all(ln.startswith("::add-mask::") for ln in shown)
+    assert value not in result.stderr
+
+
+def test_ci_accepts_workflow_dispatch() -> None:
+    on = _workflow("ci.yml")["on"]
+    assert "workflow_dispatch" in on
+    assert {"push", "pull_request", "merge_group"} <= set(on)
+
+
+def test_update_workflow_survives_init_and_points_at_release(
+    template_tree: Path, tmp_path: Path
+) -> None:
+    from test_initialize import (  # type: ignore[import-not-found]
+        _REF,
+        _SOURCE,
+        _FakeGit,
+        _make_source,
+        _released,
+        _write_lock,
+    )
+
+    source = _make_source(tmp_path, {"run-tests": "x\n"})
+    _write_lock(template_tree, _released(source, "run-tests"))
+    initialize(template_tree, "python", "acme-svc", "svc", runner=_FakeGit(source))
+
+    path = template_tree / ".github" / "workflows" / "skills-update.yml"
+    assert f"uses: {_SOURCE}/.github/actions/skills-update@{_REF}\n" in path.read_text()
+    assert "./.github/actions" not in path.read_text()
+    assert set(_workflow_at(path)["on"]) == {"schedule", "workflow_dispatch"}
+    assert not (template_tree / ".github" / "actions" / "skills-update").exists()
