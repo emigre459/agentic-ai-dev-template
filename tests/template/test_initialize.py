@@ -686,3 +686,43 @@ def test_init_pins_with_the_python_hash_when_node_is_missing(
 
     skill = template_tree / ".agents" / "skills" / "run-tests" / "SKILL.md"
     assert skill.read_text() == "released\n"
+
+
+def test_init_removes_unreleased_skills_when_pinned(
+    template_tree: Path, tmp_path: Path
+) -> None:
+    source = _make_source(tmp_path, {"run-tests": "released\n"})
+    _write_lock(template_tree, _released(source, "run-tests"))
+    skills = template_tree / ".agents" / "skills"
+    # Skills on main that the release does not have (e.g. added after the tag).
+    assert (skills / "pr-check").is_dir()
+
+    initialize(template_tree, "python", "acme-svc", "svc", runner=_FakeGit(source))
+
+    assert sorted(p.name for p in skills.iterdir() if p.is_dir()) == ["run-tests"]
+
+
+def test_init_keeps_unlocked_skills_when_not_pinned(template_tree: Path) -> None:
+    skill = template_tree / ".agents" / "skills" / "run-tests"
+    _write_lock(template_tree, {"run-tests": (_python_skill_hash(skill), None)})
+
+    initialize(template_tree, "python", "acme-svc", "svc", runner=_no_commands)
+
+    assert (template_tree / ".agents" / "skills" / "pr-check").is_dir()
+
+
+def test_init_fails_when_a_local_action_reference_survives(
+    template_tree: Path, tmp_path: Path
+) -> None:
+    source = _make_source(tmp_path, {"run-tests": "x\n"})
+    _write_lock(template_tree, _released(source, "run-tests"))
+    workflow = template_tree / ".github" / "workflows" / "skills.yml"
+    # A quoted `uses:` is not rewritten; deleting the local copy would break CI.
+    workflow.write_text(
+        'jobs:\n  drift:\n    steps:\n      - uses: "./.github/actions/skills-drift"\n'
+    )
+
+    with pytest.raises(RuntimeError, match=r"skills\.yml.*\./\.github/actions/skills-"):
+        initialize(template_tree, "python", "acme-svc", "svc", runner=_FakeGit(source))
+
+    assert (template_tree / ".github" / "actions" / "skills-drift").is_dir()

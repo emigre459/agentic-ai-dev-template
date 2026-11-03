@@ -669,14 +669,28 @@ def _fetch_pinned_skills(
     return verified
 
 
-def _install_pinned_skills(root: Path, verified: dict[str, Path]) -> None:
-    """Replace ``.agents/skills/<name>`` in ``root`` with each verified folder."""
+def _install_pinned_skills(
+    root: Path, verified: dict[str, Path], locked: frozenset[str] | None
+) -> None:
+    """Replace ``.agents/skills/<name>`` in ``root`` with each verified folder.
+
+    When the lock is pinned, ``locked`` holds its skill names, and every other
+    skill folder is deleted: those are skills added on main after the release,
+    which would otherwise ship in the new repo untracked by the lock (no drift
+    check, no update PR). ``None`` (before the first release) removes nothing.
+    """
     for name, extracted in verified.items():
         dest = root / _SKILLS_DIR / name
         if dest.is_dir():
             shutil.rmtree(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(extracted), str(dest))
+    if locked is None:
+        return
+    skills_dir = root / _SKILLS_DIR
+    for folder in sorted(skills_dir.iterdir()) if skills_dir.is_dir() else []:
+        if folder.is_dir() and not folder.is_symlink() and folder.name not in locked:
+            shutil.rmtree(folder)
 
 
 def _point_actions_at_release(root: Path, ref: str | None) -> None:
@@ -687,6 +701,13 @@ def _point_actions_at_release(root: Path, ref: str | None) -> None:
     and any ``- `` prefix kept), then deletes ``.github/actions/skills-*``. Does
     nothing when ``ref`` is None (before the first release the local copies are
     the only ones that exist).
+
+    Raises
+    ------
+    RuntimeError
+        If a ``./.github/actions/skills-`` reference survives the rewrite (say, a
+        quoted ``uses:``). Raised before anything is written or deleted, since
+        CI would break once the local copies are gone.
     """
     if ref is None:
         return
@@ -694,11 +715,26 @@ def _point_actions_at_release(root: Path, ref: str | None) -> None:
         r"^([ \t]*(?:-[ \t]+)?uses:[ \t]*)\./\.github/actions/(skills-[A-Za-z0-9_-]+)",
         flags=re.MULTILINE,
     )
+    rewritten: dict[Path, str] = {}
     for workflow in sorted((root / ".github" / "workflows").glob("*.yml")):
-        text = workflow.read_text(encoding="utf-8")
         text = pattern.sub(
-            lambda m: f"{m[1]}{_TEMPLATE_SOURCE}/.github/actions/{m[2]}@{ref}", text
+            lambda m: f"{m[1]}{_TEMPLATE_SOURCE}/.github/actions/{m[2]}@{ref}",
+            workflow.read_text(encoding="utf-8"),
         )
+        rewritten[workflow] = text
+    leftovers = [
+        path.relative_to(root).as_posix()
+        for path, text in rewritten.items()
+        if "./.github/actions/skills-" in text
+    ]
+    if leftovers:
+        raise RuntimeError(
+            f"{', '.join(leftovers)} still reference ./.github/actions/skills-* "
+            "after pointing workflows at the release (a quoted or unusual `uses:`?); "
+            "write it as a plain `uses: ./.github/actions/skills-<name>` line and "
+            "re-run, since the local action copies are about to be deleted."
+        )
+    for workflow, text in rewritten.items():
         workflow.write_text(text, encoding="utf-8")
     for action in sorted((root / ".github" / "actions").glob("skills-*")):
         if action.is_dir():
@@ -734,6 +770,8 @@ def initialize(
     # trees live in a scratch dir until they are swapped in below.
     lock = _read_skills_lock(root)
     ref = _lock_ref(lock)  # validates before anything is fetched
+    # A pinned lock is the whole skill set: skills it does not list are unreleased.
+    locked = None if ref is None or lock is None else frozenset(lock["skills"])
     with tempfile.TemporaryDirectory(prefix="init-skills-") as scratch:
         verified = _fetch_pinned_skills(root, lock, Path(scratch), runner)
         _collapse_template(
@@ -745,6 +783,7 @@ def initialize(
             repo,
             runner,
             verified,
+            locked,
             ref,
         )
 
@@ -758,6 +797,7 @@ def _collapse_template(
     repo: str | None,
     runner: Callable[..., object],
     verified_skills: dict[str, Path],
+    locked_skills: frozenset[str] | None,
     ref: str | None,
 ) -> None:
     """Promote ``stack``, rewrite generated files, install skills, self-destruct.
@@ -815,11 +855,13 @@ def _collapse_template(
     _substitute_manifest_name(root, project_name)
 
     # 4b. Start on the template's pinned skills release (layer L1 of the consumer
-    # kit): swap in the already-verified tagged skill folders, then point workflows
-    # at the released composite actions. Both are no-ops before the first release
-    # (no `ref`). They come before settings and self-destruct so the machinery is
-    # still present if a later step fails.
-    _install_pinned_skills(root, verified_skills)
+    # kit): swap in the already-verified tagged skill folders, delete the skills the
+    # pinned lock does not list (unreleased ones added on main after the tag, which
+    # would otherwise ship untracked), then point workflows at the released
+    # composite actions. All are no-ops before the first release (no `ref`). They
+    # come before settings and self-destruct so the machinery is still present if
+    # a later step fails.
+    _install_pinned_skills(root, verified_skills, locked_skills)
     _point_actions_at_release(root, ref)
 
     # 5. Apply repo settings BEFORE self-destruct, so that if the apply step fails

@@ -252,6 +252,79 @@ def test_write_with_tag(tmp_path: Path) -> None:
     assert skills["beta"]["computedHash"] == tagged_beta
 
 
+def test_write_with_tag_lists_the_skills_at_the_tag(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    _git(repo, "tag", "v0.1.0")
+    # After the release, main gains a skill and loses one; neither is the tag's.
+    gamma = repo / ".agents/skills/gamma"
+    gamma.mkdir()
+    (gamma / "SKILL.md").write_text("# gamma\n")
+    shutil.rmtree(repo / ".agents/skills/beta")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "after the release")
+
+    result = _node("write", "--root", repo, "--tag", "v0.1.0")
+
+    assert result.returncode == 0, result.stderr
+    assert list(_read_lock(repo)["skills"]) == ["alpha", "beta"]
+
+
+def test_write_with_a_tag_that_has_no_skills_is_a_usage_error(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("no skills yet\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    _git(repo, "tag", "v0.1.0")
+    result = _node("write", "--root", repo, "--tag", "v0.1.0")
+    assert result.returncode == 2
+    assert "v0.1.0" in result.stderr
+    assert not (repo / "skills-lock.json").exists()
+
+
+def test_write_without_tag_refuses_to_unpin_a_pinned_lock(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    _git(repo, "tag", "v0.1.0")
+    assert _node("write", "--root", repo, "--tag", "v0.1.0").returncode == 0
+    pinned = (repo / "skills-lock.json").read_text()
+
+    result = _node("write", "--root", repo)
+
+    assert result.returncode == 2
+    assert "--tag" in result.stderr
+    assert "delete" in result.stderr
+    assert (repo / "skills-lock.json").read_text() == pinned
+
+
+def test_write_without_tag_refuses_a_conflicted_pinned_lock(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    conflicted = '<<<<<<< ours\n{"skills": {"alpha": {"ref": "v0.1.0"}}}\n=======\n'
+    (repo / "skills-lock.json").write_text(conflicted)
+    result = _node("write", "--root", repo)
+    assert result.returncode == 2
+    assert (repo / "skills-lock.json").read_text() == conflicted
+
+
+def test_write_without_tag_regenerates_an_unpinned_lock(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    assert _node("write", "--root", repo).returncode == 0
+    (repo / ".agents/skills/alpha/SKILL.md").write_text("# alpha, edited\n")
+    assert _node("write", "--root", repo).returncode == 0
+    assert _read_lock(repo)["skills"]["alpha"]["computedHash"] == _hash_of(
+        repo / ".agents/skills/alpha"
+    )
+
+
+def test_write_without_tag_regenerates_a_conflicted_unpinned_lock(
+    tmp_path: Path,
+) -> None:
+    repo = _make_template(tmp_path / "repo")
+    (repo / "skills-lock.json").write_text("<<<<<<< ours\n{}\n=======\n{}\n>>>>>>>\n")
+    assert _node("write", "--root", repo).returncode == 0
+    assert list(_read_lock(repo)["skills"]) == ["alpha", "beta"]
+
+
 def test_write_with_unknown_tag_is_a_usage_error(tmp_path: Path) -> None:
     repo = _make_template(tmp_path / "repo")
     result = _node("write", "--root", repo, "--tag", "v9.9.9")
@@ -349,7 +422,8 @@ def test_template_check_flags_a_stale_tag_hash(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "DRIFT alpha" in result.stdout
     assert "DRIFT beta" not in result.stdout
-    assert "make skills_lock" in result.stdout
+    # A pinned lock is re-pinned with TAG; a bare `make skills_lock` would un-pin it.
+    assert "make skills_lock TAG=v0.1.0" in result.stdout
 
 
 def test_template_check_without_ref_compares_the_working_tree(tmp_path: Path) -> None:
@@ -360,6 +434,8 @@ def test_template_check_without_ref_compares_the_working_tree(tmp_path: Path) ->
     result = _node("check", "--root", repo, "--template")
     assert result.returncode == 1
     assert "DRIFT beta" in result.stdout
+    assert "make skills_lock" in result.stdout
+    assert "TAG=" not in result.stdout
 
 
 def test_template_check_needs_the_tag_locally(tmp_path: Path) -> None:
@@ -373,14 +449,55 @@ def test_template_check_needs_the_tag_locally(tmp_path: Path) -> None:
     assert "fetch" in result.stderr
 
 
+def _expected_lock_names(repo: Path, lock: dict) -> list[str]:
+    """Skill names a current lock must hold.
+
+    A pinned lock (entries with a ``ref``) lists the skills present at that tag
+    (folders under ``.agents/skills/`` holding a ``SKILL.md``); skills added on
+    main since are unreleased and stay out of it. An unpinned lock lists the
+    working tree's skills.
+    """
+    refs = {entry["ref"] for entry in lock["skills"].values() if "ref" in entry}
+    if not refs:
+        return sorted(
+            path.parent.name for path in (repo / ".agents/skills").glob("*/SKILL.md")
+        )
+    assert len(refs) == 1, f"lock entries disagree on ref: {sorted(refs)}"
+    listing = subprocess.run(  # nosec B603 B607
+        ["git", "ls-tree", "-r", "--name-only", f"refs/tags/{refs.pop()}"]
+        + ["--", ".agents/skills/"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    return sorted(
+        parts[2]
+        for parts in (line.split("/") for line in listing)
+        if len(parts) == 4 and parts[3] == "SKILL.md"
+    )
+
+
+def test_expected_lock_names_follow_the_tag_when_pinned(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    _git(repo, "tag", "v0.1.0")
+    gamma = repo / ".agents/skills/gamma"
+    gamma.mkdir()
+    (gamma / "SKILL.md").write_text("# gamma\n")
+    pinned = {"skills": {"alpha": {"ref": "v0.1.0"}}}
+    assert _expected_lock_names(repo, pinned) == ["alpha", "beta"]
+    assert _expected_lock_names(repo, {"skills": {"alpha": {}}}) == [
+        "alpha",
+        "beta",
+        "gamma",
+    ]
+
+
 def test_shipped_lock_is_current() -> None:
     result = _node("check", "--root", _REPO, "--template")
     assert result.returncode == 0, result.stdout + result.stderr
     lock = json.loads((_REPO / "skills-lock.json").read_text())
-    on_disk = sorted(
-        path.parent.name for path in (_REPO / ".agents/skills").glob("*/SKILL.md")
-    )
-    assert list(lock["skills"]) == on_disk
+    assert list(lock["skills"]) == _expected_lock_names(_REPO, lock)
     for name, entry in lock["skills"].items():
         assert entry["source"] == "emigre459/agentic-ai-dev-template"
         assert entry["skillPath"] == f".agents/skills/{name}/SKILL.md"
