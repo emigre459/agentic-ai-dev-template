@@ -254,9 +254,9 @@ repository secret, or neither:
 
 | Secret | Effect |
 |--------|--------|
-| `SKILLS_UPDATE_APP_ID` + `SKILLS_UPDATE_APP_PRIVATE_KEY` | A GitHub App you install on the repo (contents, pull requests and actions: write). Its pushes trigger the PR's CI normally. Set both, or the App is ignored with a warning. |
+| `SKILLS_UPDATE_APP_ID` + `SKILLS_UPDATE_APP_PRIVATE_KEY` | A GitHub App you install on the repo (contents, pull requests and actions: write). Its pushes trigger the PR's CI normally. Set both: with only one of them set, the nightly run fails. |
 | `SKILLS_UPDATE_TOKEN` | A fine-grained personal access token with contents and pull requests: write. Its pushes trigger the PR's CI normally. |
-| neither | The workflow's `GITHUB_TOKEN`. Its pushes do not trigger CI, so the workflow dispatches `ci.yml` on the branch instead. Turn on Settings, Actions, General, "Allow GitHub Actions to create and approve pull requests", or the PR cannot be opened. |
+| neither | The workflow's `GITHUB_TOKEN`. Its pushes do not trigger CI, so the workflow dispatches `ci.yml` on the branch instead, and the PR body says which `pull_request`-only checks (such as `review-gate`) did not run. Turn on Settings, Actions, General, "Allow GitHub Actions to create and approve pull requests", or the PR cannot be opened. |
 
 On public repositories, GitHub disables scheduled workflows after 60 days without
 repository activity (private repositories are not affected). If the nightly PR stops
@@ -322,7 +322,10 @@ first remove the untracked files (`git clean -n .agents/skills` lists them).
 
 Releases are drafted for you and published by hand. On every push to `main`,
 `release-drafter` (`.github/workflows/release-drafter.yml`) updates one draft GitHub
-Release from the merged PRs, so there is no changelog file to maintain.
+Release from the merged PRs, so there is no changelog file to maintain. Changing a
+merged PR's label is not a push: re-draft by hand with
+`gh workflow run release-drafter.yml --ref main` (or Actions, `release drafter`, Run
+workflow).
 
 **The version** comes from a label on each merged PR, and the largest bump wins:
 
@@ -337,10 +340,13 @@ suggests a bump when it reads the card and applies the label once the PR exists.
 
 **Publishing** is the `release` skill's job. It finds the draft, shows its version and
 PR list, writes a summary of at most one paragraph, asks you to approve both, and only
-then runs the `release.yml` workflow (Actions, `release`, Run workflow, with a required
-`summary` input). That workflow runs only from `main`: it publishes the draft with the
-summary on top and creates the tag. You can run it by hand without the skill, with the
-same inputs.
+then runs the `release.yml` workflow (Actions, `release`, Run workflow, with required
+`summary` and `version` inputs). That workflow runs only from `main`. It first checks
+that release-drafter still resolves the `version` you approved (for example `v0.2.0`),
+and fails without publishing if not, say because a label changed since. Then it
+publishes the draft with the summary on top and creates the tag. You can run it by hand
+without the skill, with the same inputs. Keep `$` out of the summary: release-drafter
+substitutes `$VARIABLES` in it.
 
 The skill never publishes without your explicit OK for that release, and never merges
 anything.
@@ -354,8 +360,17 @@ cannot exist before the release does.
 **In your own repo**, the same flow works once it has the release pieces:
 `.github/release-drafter.yml`, the `release-drafter.yml` and `release.yml` workflows,
 and the three labels. A repo made from the template already has them; an existing
-repo copies them from the template at the tag it installed. There is no re-pin step,
-which only the template has.
+repo copies the files from the template at the tag it installed, and creates the labels
+from the template's `.github/repo-settings/labels.json` at that tag (`--force` also
+updates labels that already exist):
+
+```bash
+gh api -H "Accept: application/vnd.github.raw" "repos/emigre459/agentic-ai-dev-template/contents/.github/repo-settings/labels.json?ref=vX.Y.Z" > labels.json
+jq -c '.[]' labels.json | while read -r l; do gh label create "$(jq -r .name <<<"$l")" --color "$(jq -r .color <<<"$l")" --description "$(jq -r .description <<<"$l")" --force; done
+rm labels.json
+```
+
+There is no re-pin step, which only the template has.
 
 ## Prerequisites
 

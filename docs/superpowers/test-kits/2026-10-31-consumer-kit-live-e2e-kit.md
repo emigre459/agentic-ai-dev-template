@@ -84,7 +84,7 @@ make tooling_deps
 uv run pytest tests/template/test_skills_lock.py tests/template/test_initialize.py tests/template/test_skills_update.py tests/template/test_apply_repo_settings.py tests/template/test_release_workflows.py tests/template/test_skill_extension_points.py -q
 ```
 
-**Expect:** every test passes, none skipped. (When this kit was written: `261 passed`.)
+**Expect:** every test passes, none skipped. (When this kit was written: `287 passed`.)
 
 **If not:** a failing file tells you the layer. `test_skills_lock.py` and
 `test_initialize.py` are L1, `test_skills_update.py` is L2, `test_apply_repo_settings.py`
@@ -119,7 +119,9 @@ node .github/actions/skills-drift/skills-lock.mjs check --root . --template; ech
 ```
 
 **Expect:** the first `check` prints `DRIFT upgrade-deps: ...` and `exit=1`, then a line
-about running `make skills_lock`. The pytest run reports `1 failed`
+about running `make skills_lock`. (Once the lock is pinned after the first release, that
+line says `make skills_lock TAG=<ref>` instead, and a bare `make skills_lock` refuses to
+run, because it would un-pin the lock.) The pytest run reports `1 failed`
 (`test_shipped_lock_is_current`). After the `git checkout`, `git status --short` prints
 nothing and the second `check` prints nothing and `exit=0`.
 
@@ -353,6 +355,9 @@ gh pr diff skills-update --name-only
 - a body with a `## Bumped` section listing `gh-stack` (github/gh-stack) from `v0.2.0`
   to the newest release, with a release-notes link, and a closing line that the PR never
   merges itself;
+- a `## CI on this PR` section saying `ci.yml` was dispatched with `workflow_dispatch`,
+  that `pull_request`-only checks (such as `review-gate`) did not run, and that
+  `SKILLS_UPDATE_TOKEN` or the App secrets give the PR its full CI;
 - the diff names `skills-lock.json` and files under `.agents/skills/gh-stack/`, and
   nothing else;
 - the run's log shows a warning that the `dependencies` label could not be added (the
@@ -408,13 +413,53 @@ before (no second dispatch, because nothing was pushed).
 `.github/actions/skills-update/update-pr.sh`. A second `workflow_dispatch` run means the "already
 holds this update" test failed and it force-pushed again.
 
+### 4g. Optional: the token path runs the PR's own CI
+
+Skip this if you don't want to make a token. With `SKILLS_UPDATE_TOKEN` set, the push
+comes from that token, so GitHub runs the PR's `pull_request` CI itself and the action
+dispatches nothing. Create a fine-grained personal access token on github.com
+(Settings, Developer settings) for `skills-kit-scratch` only, with Contents and Pull
+requests: Read and write. Then store it, and close the PR and delete its branch so the
+next run has to push:
+
+```bash
+cd "$SCRATCH"
+gh secret set SKILLS_UPDATE_TOKEN --repo "$ME/skills-kit-scratch"
+gh pr close skills-update --delete-branch
+T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh workflow run skills-update.yml
+```
+
+`gh secret set` prompts for the token; paste it. Wait a few seconds, then watch the run
+created after `T0` and check which CI ran on the new PR:
+
+```bash
+RUN=$(gh run list --workflow skills-update.yml --json databaseId,createdAt --jq "[.[] | select(.createdAt > \"$T0\")][0].databaseId // empty")
+echo "run=$RUN"
+gh run watch "$RUN" --exit-status
+gh pr view skills-update --json number,body --jq '.body' | grep -c '## CI on this PR'
+gh run list --workflow ci.yml --branch skills-update --json event,createdAt --jq "[.[] | select(.createdAt > \"$T0\") | .event]"
+```
+
+If `run=` is empty, the run hasn't started: wait and repeat the `RUN=` line.
+
+**Expect:** the run is green and a new PR is open. `grep -c` prints `0`: no
+`## CI on this PR` note on the token path. The event list is `["pull_request"]`, with no
+`"workflow_dispatch"`, and the run's log says
+`DISPATCH_CI is not 'true'; not dispatching ci.yml.`
+
+**If not:** a `workflow_dispatch` entry, or the `## CI on this PR` note, means the
+workflow did not pick the token: look at the "Choose the token" step in
+`.github/workflows/skills-update.yml`. An empty event list after a minute means the push
+did not trigger CI: check the token can write Contents on this repo.
+
 Leave the PR unmerged. Section 5 reuses this repo.
 
 ## 5. A test release (reviewer-run)
 
 This checks the L3 release flow in the same scratch repo: the labels, a draft release
-that follows the PR label, the `main`-only guard, and a published release with your
-summary above the PR list.
+that follows the PR label, the `main`-only guard, the approved-version guard, and a
+published release with your summary above the PR list.
 
 ### 5a. Add the release pieces and the labels
 
@@ -491,7 +536,7 @@ at all means the `release drafter` run failed: open it with `gh run view --log-f
 
 ```bash
 git push origin main:refs/heads/scratch-branch
-echo '{"summary": "This must not publish."}' | gh workflow run release.yml --ref scratch-branch --json
+echo '{"summary": "This must not publish.", "version": "v0.1.0"}' | gh workflow run release.yml --ref scratch-branch --json
 ```
 
 Wait a few seconds for the run to appear, then look at it and its jobs:
@@ -512,17 +557,52 @@ code.)
 **If not:** a published release, or a `success` run, means the `if: github.ref ==
 'refs/heads/main'` guard in `.github/workflows/release.yml` is missing or wrong.
 
-### 5d. Publish from main with a summary
+### 5d. A wrong version fails without publishing
+
+`release.yml` publishes only the version you approved. Ask it for one release-drafter
+would not publish:
 
 ```bash
-echo '{"summary": "Adds the first scratch feature, to check the release flow."}' | gh workflow run release.yml --ref main --json
+T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo '{"summary": "This must not publish.", "version": "v9.9.9"}' | gh workflow run release.yml --ref main --json
 ```
 
-Wait a few seconds, then watch the run:
+Wait a few seconds, then watch the run created after `T0`:
 
 ```bash
-gh run list --workflow release.yml --branch main --json databaseId,status,createdAt
-gh run watch "$(gh run list --workflow release.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
+RUN=$(gh run list --workflow release.yml --branch main --json databaseId,createdAt --jq "[.[] | select(.createdAt > \"$T0\")][0].databaseId // empty")
+echo "run=$RUN"
+gh run watch "$RUN" --exit-status; echo "exit=$?"
+gh run view "$RUN" --log-failed | grep 'would publish'
+gh release list
+git ls-remote --tags origin
+```
+
+If `run=` is empty, wait and repeat the `RUN=` line.
+
+**Expect:** `exit=1`. The failed step is "Check the version matches the approved one",
+and its log says `release-drafter would publish v0.1.0, but the approved version is
+v9.9.9. Nothing was published`. The release list still shows only the draft `v0.1.0`,
+and `git ls-remote --tags` prints nothing.
+
+**If not:** a published release, or a green run, means the check before the publish step
+in `.github/workflows/release.yml` is missing or compares the wrong output. A failure in
+the first step instead (the dry run) means release-drafter rejected `dry-run`: read its
+log.
+
+### 5e. Publish from main with a summary
+
+```bash
+T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo '{"summary": "Adds the first scratch feature, to check the release flow.", "version": "v0.1.0"}' | gh workflow run release.yml --ref main --json
+```
+
+Wait a few seconds, then watch the run created after `T0` (5d's failed run is older):
+
+```bash
+RUN=$(gh run list --workflow release.yml --branch main --json databaseId,createdAt --jq "[.[] | select(.createdAt > \"$T0\")][0].databaseId // empty")
+echo "run=$RUN"
+gh run watch "$RUN" --exit-status
 gh release view v0.1.0 --json tagName,isDraft,body --jq '[.tagName, .isDraft] | @tsv'
 gh release view v0.1.0 --json body --jq .body
 git ls-remote --tags origin v0.1.0
@@ -543,7 +623,7 @@ git ls-remote --tags origin v0.1.0
 - A second draft instead of a published release means `publish: true` didn't take; look
   at the `release-drafter` step in `release.yml`.
 
-### 5e. Clean up
+### 5f. Clean up
 
 ```bash
 cd "$HOME"
@@ -552,7 +632,8 @@ rm -rf "$SCRATCH" /tmp/kit-parity /tmp/kit-bump
 ```
 
 `gh repo delete` needs the `delete_repo` scope: run `gh auth refresh -s delete_repo`
-first, or delete the repo in its Settings page on github.com.
+first, or delete the repo in its Settings page on github.com. If you made a token in
+4g, delete it too (github.com, Settings, Developer settings).
 
 ## 6. Reviewing the stack
 
@@ -606,21 +687,25 @@ Judgment calls worth a second opinion:
 - **The template's drift check verifies the lock against tags,** not the working tree
   (once entries have a `ref`), because `main` is allowed to be ahead of the lock.
 - **Secrets are scoped to the steps that need them,** never put in job or workflow `env`,
-  because the update action runs the unpinned `npx skills@latest`.
+  because the update action runs the unpinned `npx skills@latest`. Inside the action, the
+  chosen token reaches only the push-credential and PR steps; the `npx` steps run with
+  the job's own `github.token`.
 - **Labels are matched case-insensitively and renamed to lowercase** by
   `make apply_repo_settings_bootstrap`: a repo's existing `Minor` is renamed `minor`
   (GitHub rejects a second `minor` beside it), because release-drafter's label match is
   exact.
-- **`release.yml` publishes only from `main`** (check 5c).
+- **`release.yml` publishes only from `main`** (check 5c), **and only the version you
+  approved** (check 5d): a release-drafter dry run resolves it first.
 - **The update PR never adds or drops skills.** New upstream skills are listed under
   "Available, not installed"; skills that vanished upstream are kept and flagged under
   "Removed upstream (kept)".
 - **`CHANGELOG.md` is deleted** in favor of GitHub Releases, rather than kept as a
   second record to maintain.
 
-Not covered here: `make init` swapping the skill folders for a tag. It needs a real
-release to exist, so only its tests cover it (`test_initialize.py`) until the first
-release and re-pin PR.
+Not covered here: `make init` with a real `ref`, swapping the skill folders for a tag
+and removing skills the pinned lock doesn't list. It can only be exercised after the
+first release and its re-pin PR, so until then only its tests cover it
+(`test_initialize.py`).
 
 ## 7. Results
 
@@ -632,7 +717,8 @@ release and re-pin PR.
 | 4a | The local bump dry run names `gh-stack` and the new release; the drift check still passes | |
 | 4 | The update workflow opens one PR bumping `gh-stack`, with CI dispatched on the branch | |
 | 4f | A second run reuses the PR and doesn't push | |
-| 5 | A `minor` PR yields a `v0.1.0` draft; a branch run is skipped; a main run publishes with the summary above the PR list | |
+| 4g | (Optional) With `SKILLS_UPDATE_TOKEN`, the PR's own `pull_request` CI runs and nothing is dispatched | |
+| 5 | A `minor` PR yields a `v0.1.0` draft; a branch run is skipped; a wrong `version` fails without publishing; a main run publishes with the summary above the PR list | |
 | 6 | Each layer's diff reads well in its own PR; the judgment calls hold up | |
 
 Leave findings as review comments on the PR for the layer that owns the code, ideally on

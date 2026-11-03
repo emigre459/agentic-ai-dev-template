@@ -350,3 +350,82 @@ def test_readme_states_the_adoption_and_schedule_caveats() -> None:
     assert "`workflow_dispatch:` trigger" in readme
     assert "`ci-workflow:`" in readme
     assert "`merge_group`" in readme
+
+
+# --- the approved version, the re-draft, and the existing-repo labels ----------
+
+
+def test_release_skill_redrafts_after_relabeling() -> None:
+    text = _skill_text("release")
+    step2 = text.split("## Step 2")[1].split("## Step 3")[0]
+    # A label change is not a push: the skill re-runs the drafter itself, waits
+    # for that new run, then reads the draft again.
+    assert "gh workflow run release-drafter.yml --ref main" in step2
+    assert "--workflow release-drafter.yml" in step2
+    assert "createdAt" in step2
+    assert "gh run watch" in step2
+    assert "read the draft again" in step2
+
+
+def test_release_skill_sends_the_approved_version() -> None:
+    text = _skill_text("release")
+    step5 = text.split("## Step 5")[1].split("## Step 6")[0]
+    assert '{"summary": "' in step5 and '"version": "' in step5
+    assert "exact version the user approved" in step5
+    # release-drafter substitutes $VARIABLES in the header, so the published text
+    # is not guaranteed byte-for-byte: the skill avoids `$` instead of promising it.
+    assert "exactly what the user approved" not in text
+    assert "$RESOLVED_VERSION" in text
+    assert "no `$`" in text.split("## Step 3")[1].split("## Step 4")[0]
+
+
+def test_readme_release_mentions_version_input_and_redraft() -> None:
+    readme = " ".join(_readme().split())
+    release = readme[readme.index("## Cutting a release") :]
+    release = release[: release.index("## Prerequisites")]
+    assert "`version`" in release
+    assert "without publishing" in release
+    assert "gh workflow run release-drafter.yml --ref main" in release
+
+
+def test_readme_gives_the_label_one_liner_for_existing_repos() -> None:
+    readme = _readme()
+    release = readme[readme.index("## Cutting a release") :]
+    release = release[: release.index("## Prerequisites")]
+    (line,) = [ln for ln in release.splitlines() if "gh label create" in ln]
+    assert "labels.json" in release
+    assert "jq -c '.[]'" in line and "while read -r" in line
+    assert "--force" in line
+
+
+def test_readme_says_a_half_configured_app_fails_the_run() -> None:
+    readme = " ".join(_readme().split())
+    assert "ignored with a warning" not in readme
+    assert "only one of them set, the nightly run fails" in readme
+
+
+_KIT = _REPO / "docs/superpowers/test-kits/2026-10-31-consumer-kit-live-e2e-kit.md"
+
+
+def test_runbook_release_dispatches_pass_the_version() -> None:
+    kit = _KIT.read_text()
+    section5 = kit[kit.index("## 5. A test release") : kit.index("## 6.")]
+    dispatches = [
+        ln for ln in section5.splitlines() if "gh workflow run release.yml" in ln
+    ]
+    assert len(dispatches) >= 3  # branch guard, wrong version, publish
+    for line in dispatches:
+        assert '"version": "' in line, line
+    assert "v9.9.9" in section5  # the wrong-version check
+    assert "Check the version matches the approved one" in section5
+
+
+def test_runbook_has_the_optional_pat_path_and_init_caveat() -> None:
+    kit = _KIT.read_text()
+    section4 = kit[kit.index("## 4. The nightly") : kit.index("## 5. A test release")]
+    assert "SKILLS_UPDATE_TOKEN" in section4
+    assert "gh secret set SKILLS_UPDATE_TOKEN" in section4
+    assert '"pull_request"' in section4
+    assert "## CI on this PR" in section4
+    assert "with a real `ref`" in kit
+    assert "make skills_lock TAG=" in kit
