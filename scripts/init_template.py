@@ -9,15 +9,18 @@ initialization machinery. Repository settings are reconciled separately.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import keyword
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # Type-only: this file runs as a plain script, where `scripts.` isn't importable.
@@ -50,6 +53,9 @@ _MANIFEST_PLACEHOLDER = "template-placeholder-project-name"
 # (both stacks coexist, duplicate ids are invalid YAML); init strips the kept
 # stack's prefix and requires the resulting contexts as status checks.
 _CI_JOBS = ("lint", "tests", "security")
+# Stack-independent CI checks: the job sits outside every STACK marker block, so
+# it keeps its name across init and is required alongside _CI_JOBS.
+_SHARED_CI_CHECKS = ("skills drift",)
 # The GitHub Actions app — pinning integration_id means only Actions-reported
 # check runs satisfy the required contexts.
 _GITHUB_ACTIONS_INTEGRATION_ID = 15368
@@ -282,7 +288,7 @@ def _set_required_status_checks(root: Path) -> None:
     rules = ruleset.setdefault("rules", [])
     checks = [
         {"context": job, "integration_id": _GITHUB_ACTIONS_INTEGRATION_ID}
-        for job in _CI_JOBS
+        for job in (*_CI_JOBS, *_SHARED_CI_CHECKS)
     ]
     for rule in rules:
         if rule.get("type") == "required_status_checks":
@@ -360,6 +366,381 @@ def _rename_python_package(root: Path, project_name: str) -> None:
         )
 
 
+# --- Skills pinned to the template's latest release (#49, layer L1) -------------
+
+_TEMPLATE_SOURCE = "emigre459/agentic-ai-dev-template"
+_LOCK_FILE = "skills-lock.json"
+_HASH_SCRIPT = Path(".github") / "actions" / "skills-drift" / "skills-lock.mjs"
+_SKILLS_DIR = Path(".agents") / "skills"
+
+# ICU root collation order of the printable ASCII punctuation, the one
+# `String.prototype.localeCompare` uses: whitespace, then these, then digits,
+# then letters (see `_locale_sort_key`).
+_PUNCTUATION_ORDER = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$"
+_DIGITS_ORDER = "0123456789"
+
+
+def _locale_sort_key(name: str) -> tuple[list[int], list[int]]:
+    """Sort key emulating ``String.prototype.localeCompare`` (ICU root collation).
+
+    The ``skills`` CLI orders the files it hashes with ``localeCompare``; the hash
+    only matches if this port orders them the same way. Only the ordering rules
+    that occur in a skill folder's relative POSIX paths are emulated:
+
+    - primary: whitespace, then punctuation and symbols (in ``_PUNCTUATION_ORDER``
+      order, so ``_`` < ``-`` < ``.`` < ``/``), then digits, then letters compared
+      case-insensitively; a shorter string that is a prefix sorts first;
+    - tertiary, only on a full primary tie: lowercase before uppercase, decided
+      at the first differing letter.
+
+    Accented and other non-ASCII characters are not collated like ICU does (they
+    sort after ASCII letters by code point). That is outside this port's scope:
+    it only ever hashes this repo's own skills, and a wrong order surfaces as a
+    hash mismatch, never as silently accepted content. The node-vs-port test over
+    the real skills is the guard.
+
+    Parameters
+    ----------
+    name
+        Relative POSIX path of a file inside a skill folder.
+
+    Returns
+    -------
+    tuple[list[int], list[int]]
+        ``(primary weights, tertiary weights)``; compare as a tuple.
+    """
+    primary: list[int] = []
+    tertiary: list[int] = []
+    for char in name:
+        lower = char.lower()
+        if char in _PUNCTUATION_ORDER:
+            primary.append(_PUNCTUATION_ORDER.index(char))
+        elif char in _DIGITS_ORDER:
+            primary.append(len(_PUNCTUATION_ORDER) + _DIGITS_ORDER.index(char))
+        elif "a" <= lower <= "z":
+            primary.append(
+                len(_PUNCTUATION_ORDER) + len(_DIGITS_ORDER) + ord(lower) - ord("a")
+            )
+        else:
+            primary.append(1000 + ord(char))
+        tertiary.append(1 if char != lower else 0)
+    return primary, tertiary
+
+
+def _skill_files(skill_dir: Path) -> list[Path]:
+    """List the regular files under ``skill_dir`` the way the skills CLI does.
+
+    Skips ``.git`` and ``node_modules`` directories and never follows symlinks
+    (a symlink, to a file or a directory, is not a regular file and is ignored).
+    """
+    found: list[Path] = []
+    for entry in skill_dir.iterdir():
+        if entry.is_symlink():
+            continue
+        if entry.is_dir():
+            if entry.name not in (".git", "node_modules"):
+                found.extend(_skill_files(entry))
+        elif entry.is_file():
+            found.append(entry)
+    return found
+
+
+def _ordered_skill_files(skill_dir: Path) -> list[Path]:
+    """Return the skill folder's hashed files in the CLI's ``localeCompare`` order."""
+    return sorted(
+        _skill_files(skill_dir),
+        key=lambda path: _locale_sort_key(path.relative_to(skill_dir).as_posix()),
+    )
+
+
+def _python_skill_hash(skill_dir: Path) -> str:
+    """SHA-256 of a skill folder, identical to the ``skills`` CLI's ``computedHash``.
+
+    A stdlib port of ``computeSkillFolderHash`` for machines without ``node``: the
+    digest of every regular file, in ``localeCompare`` order of its POSIX relative
+    path, each contributing its path then its bytes. Tested against the CLI's own
+    output (``tests/template/fixtures/skills_lock/golden.json``).
+    """
+    digest = hashlib.sha256()
+    for path in _ordered_skill_files(skill_dir):
+        digest.update(path.relative_to(skill_dir).as_posix().encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _skill_hash(root: Path, skill_dir: Path, runner: Callable[..., Any]) -> str:
+    """Hash ``skill_dir`` with the shipped node script, or the Python port without node."""
+    script = root / _HASH_SCRIPT
+    if shutil.which("node") is None or not script.is_file():
+        return _python_skill_hash(skill_dir)
+    result = runner(
+        ["node", str(script), "hash", str(skill_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return str(result.stdout).strip()
+
+
+def _read_skills_lock(root: Path) -> dict[str, Any] | None:
+    """Return the parsed ``skills-lock.json`` under ``root``, or None when absent."""
+    path = root / _LOCK_FILE
+    if not path.is_file():
+        return None
+    lock: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return lock
+
+
+_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_REF_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+_SOURCE_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _check_ref(ref: str) -> str:
+    """Return ``ref`` if it is a release tag (``vX.Y.Z``); raise RuntimeError if not."""
+    if not isinstance(ref, str) or not _REF_RE.fullmatch(ref):
+        raise RuntimeError(
+            f"{_LOCK_FILE} has ref {ref!r}, which is not a release tag like v1.2.3"
+        )
+    return ref
+
+
+def _lock_ref(lock: dict[str, Any] | None) -> str | None:
+    """Return the release ref every template entry of ``lock`` is pinned to.
+
+    Raises
+    ------
+    RuntimeError
+        If the entries are pinned to different refs (or only some have one), or
+        the ref is not a ``vX.Y.Z`` tag.
+    """
+    if lock is None:
+        return None
+    refs = {entry.get("ref") for entry in lock.get("skills", {}).values()}
+    if len(refs) > 1:
+        raise RuntimeError(
+            f"{_LOCK_FILE} entries disagree on `ref` ({sorted(map(str, refs))}); "
+            "every template skill must be pinned to the same release."
+        )
+    ref = next(iter(refs), None)
+    return None if ref is None else _check_ref(ref)
+
+
+def _pinned_skills(lock: dict[str, Any]) -> dict[tuple[str, str], list[str]]:
+    """Group the lock's ``ref``-bearing skill names by ``(source, ref)``, validated.
+
+    Raises
+    ------
+    RuntimeError
+        If a pinned entry's name, source or ref is not a plain, safe value (they
+        become a path and a URL, so a hostile lock must not reach either).
+    """
+    pinned: dict[tuple[str, str], list[str]] = {}
+    for name, entry in lock.get("skills", {}).items():
+        if not entry.get("ref"):
+            continue
+        source = entry.get("source")
+        if not _NAME_RE.fullmatch(name) or name in (".", ".."):
+            raise RuntimeError(f"{_LOCK_FILE} has an invalid skill name: {name!r}")
+        if not isinstance(source, str) or not _SOURCE_RE.fullmatch(source):
+            raise RuntimeError(f"{_LOCK_FILE}: skill {name!r} has invalid source")
+        pinned.setdefault((source, _check_ref(entry["ref"])), []).append(name)
+    return pinned
+
+
+def _git_error(source: str, ref: str, exc: Exception) -> RuntimeError:
+    """Build the error for a failed git step while fetching ``source`` at ``ref``."""
+    if isinstance(exc, FileNotFoundError):
+        return RuntimeError(
+            f"`make init` needs git on PATH to fetch {source} at {ref} "
+            "(the skills ship pinned to that release), and git is not installed."
+        )
+    detail = str(getattr(exc, "stderr", "") or exc).strip()
+    return RuntimeError(
+        f"`make init` needs network access to github.com to fetch {source} at "
+        f"{ref} (the skills ship pinned to that release), and git could not: "
+        f"{detail}"
+    )
+
+
+def _extract_skill(
+    source: str,
+    ref: str,
+    name: str,
+    repo: Path,
+    scratch: Path,
+    runner: Callable[..., Any],
+) -> Path:
+    """Extract ``.agents/skills/<name>`` from ``repo``'s ``FETCH_HEAD`` into ``scratch``.
+
+    The tar is unpacked with the ``data`` extraction filter. Returns the extracted
+    skill folder.
+    """
+    tar_path = scratch / f"{name}.tar"
+    skill_path = (_SKILLS_DIR / name).as_posix()
+    try:
+        runner(
+            ["git", "-C", str(repo), "archive", "--format=tar", "-o", str(tar_path)]
+            + ["FETCH_HEAD", skill_path],
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        raise _git_error(source, ref, exc) from exc
+    out = scratch / f"{name}-extracted"
+    out.mkdir()
+    with tarfile.open(tar_path) as tar:
+        tar.extractall(out, filter="data")
+    extracted = out / skill_path
+    if not extracted.is_dir():
+        raise RuntimeError(
+            f"{source}@{ref} has no {skill_path} folder for skill {name!r}"
+        )
+    return extracted
+
+
+def _fetch_pinned_skills(
+    root: Path,
+    lock: dict[str, Any] | None,
+    scratch: Path,
+    runner: Callable[..., Any],
+) -> dict[str, Path]:
+    """Fetch, extract and hash-verify every ``ref``-pinned skill; touch nothing in ``root``.
+
+    For each lock entry that has a ``ref``: fetch that tag from the entry's
+    ``source`` into a throwaway git repository under ``scratch`` (never ``root``'s
+    own ``.git``, which a shallow fetch could truncate), extract
+    ``.agents/skills/<name>`` from it, and require its hash to equal
+    ``computedHash``. Entries without a ``ref`` (before the first release) and a
+    missing lock file yield nothing. ``root`` is only read (for the hash script),
+    so a failure here leaves the tree exactly as it was and ``make init`` can be
+    retried.
+
+    Parameters
+    ----------
+    root
+        Repository root being initialized.
+    lock
+        Parsed ``skills-lock.json``, or None.
+    scratch
+        Existing directory for the fetched repo and extracted trees; the returned
+        folders live in it, so it must outlive their use.
+    runner
+        Subprocess-compatible command runner, by default ``subprocess.run``.
+
+    Returns
+    -------
+    dict[str, Path]
+        Verified extracted skill folder per skill name.
+
+    Raises
+    ------
+    RuntimeError
+        If git is missing or cannot fetch the release (no network), a skill is
+        missing from it, or a skill's hash differs from the lock's.
+    """
+    if lock is None:
+        return {}
+    pinned = _pinned_skills(lock)
+    if not pinned:
+        return {}
+    repo = scratch / "src"
+    verified: dict[str, Path] = {}
+    for (source, ref), names in pinned.items():
+        try:
+            runner(["git", "init", "-q", str(repo)], check=True)
+            runner(
+                ["git", "-C", str(repo), "fetch", "--depth", "1"]
+                + [f"https://github.com/{source}.git", "tag", ref],
+                check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            raise _git_error(source, ref, exc) from exc
+        for name in names:
+            extracted = _extract_skill(source, ref, name, repo, scratch, runner)
+            expected = lock["skills"][name]["computedHash"]
+            actual = _skill_hash(root, extracted, runner)
+            if actual != expected:
+                raise RuntimeError(
+                    f"skill {name!r} at {source}@{ref} hashes to {actual}, but "
+                    f"{_LOCK_FILE} has {expected}; refusing to initialize "
+                    "from a release that does not match the lock."
+                )
+            verified[name] = extracted
+    return verified
+
+
+def _install_pinned_skills(
+    root: Path, verified: dict[str, Path], locked: frozenset[str] | None
+) -> None:
+    """Replace ``.agents/skills/<name>`` in ``root`` with each verified folder.
+
+    When the lock is pinned, ``locked`` holds its skill names, and every other
+    skill folder is deleted: those are skills added on main after the release,
+    which would otherwise ship in the new repo untracked by the lock (no drift
+    check, no update PR). ``None`` (before the first release) removes nothing.
+    """
+    for name, extracted in verified.items():
+        dest = root / _SKILLS_DIR / name
+        if dest.is_dir():
+            shutil.rmtree(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(extracted), str(dest))
+    if locked is None:
+        return
+    skills_dir = root / _SKILLS_DIR
+    for folder in sorted(skills_dir.iterdir()) if skills_dir.is_dir() else []:
+        if folder.is_dir() and not folder.is_symlink() and folder.name not in locked:
+            shutil.rmtree(folder)
+
+
+def _point_actions_at_release(root: Path, ref: str | None) -> None:
+    """Make workflows use the released composite actions instead of local copies.
+
+    Rewrites ``uses: ./.github/actions/skills-<x>`` in ``.github/workflows/*.yml``
+    to ``uses: <template source>/.github/actions/skills-<x>@<ref>`` (indentation
+    and any ``- `` prefix kept), then deletes ``.github/actions/skills-*``. Does
+    nothing when ``ref`` is None (before the first release the local copies are
+    the only ones that exist).
+
+    Raises
+    ------
+    RuntimeError
+        If a ``./.github/actions/skills-`` reference survives the rewrite (say, a
+        quoted ``uses:``). Raised before anything is written or deleted, since
+        CI would break once the local copies are gone.
+    """
+    if ref is None:
+        return
+    pattern = re.compile(
+        r"^([ \t]*(?:-[ \t]+)?uses:[ \t]*)\./\.github/actions/(skills-[A-Za-z0-9_-]+)",
+        flags=re.MULTILINE,
+    )
+    rewritten: dict[Path, str] = {}
+    for workflow in sorted((root / ".github" / "workflows").glob("*.yml")):
+        text = pattern.sub(
+            lambda m: f"{m[1]}{_TEMPLATE_SOURCE}/.github/actions/{m[2]}@{ref}",
+            workflow.read_text(encoding="utf-8"),
+        )
+        rewritten[workflow] = text
+    leftovers = [
+        path.relative_to(root).as_posix()
+        for path, text in rewritten.items()
+        if "./.github/actions/skills-" in text
+    ]
+    if leftovers:
+        raise RuntimeError(
+            f"{', '.join(leftovers)} still reference ./.github/actions/skills-* "
+            "after pointing workflows at the release (a quoted or unusual `uses:`?); "
+            "write it as a plain `uses: ./.github/actions/skills-<name>` line and "
+            "re-run, since the local action copies are about to be deleted."
+        )
+    for workflow, text in rewritten.items():
+        workflow.write_text(text, encoding="utf-8")
+    for action in sorted((root / ".github" / "actions").glob("skills-*")):
+        if action.is_dir():
+            shutil.rmtree(action)
+
+
 def initialize(
     root: Path | str,
     stack: str,
@@ -383,6 +764,47 @@ def initialize(
     if stack == "python":
         python_package_name(project_name)
 
+    # 1b. Fetch and verify the pinned skills release BEFORE any mutation. Offline,
+    # a hash mismatch or a missing git then fails here with the tree untouched
+    # (stacks/ still present), so `make init` can simply be retried. The verified
+    # trees live in a scratch dir until they are swapped in below.
+    lock = _read_skills_lock(root)
+    ref = _lock_ref(lock)  # validates before anything is fetched
+    # A pinned lock is the whole skill set: skills it does not list are unreleased.
+    locked = None if ref is None or lock is None else frozenset(lock["skills"])
+    with tempfile.TemporaryDirectory(prefix="init-skills-") as scratch:
+        verified = _fetch_pinned_skills(root, lock, Path(scratch), runner)
+        _collapse_template(
+            root,
+            stack,
+            project_name,
+            description,
+            apply_settings,
+            repo,
+            runner,
+            verified,
+            locked,
+            ref,
+        )
+
+
+def _collapse_template(
+    root: Path,
+    stack: str,
+    project_name: str,
+    description: str,
+    apply_settings: bool,
+    repo: str | None,
+    runner: Callable[..., object],
+    verified_skills: dict[str, Path],
+    locked_skills: frozenset[str] | None,
+    ref: str | None,
+) -> None:
+    """Promote ``stack``, rewrite generated files, install skills, self-destruct.
+
+    The mutating half of :func:`initialize`; everything that can fail for lack of
+    network or git has already happened by the time this runs.
+    """
     # 2. Promote chosen stack to root, then 3. prune.
     _promote(root, stack)
     shutil.rmtree(root / "stacks")
@@ -431,6 +853,16 @@ def initialize(
                 text = fill_placeholders(text, project_name, description)
             p.write_text(text, encoding="utf-8")
     _substitute_manifest_name(root, project_name)
+
+    # 4b. Start on the template's pinned skills release (layer L1 of the consumer
+    # kit): swap in the already-verified tagged skill folders, delete the skills the
+    # pinned lock does not list (unreleased ones added on main after the tag, which
+    # would otherwise ship untracked), then point workflows at the released
+    # composite actions. All are no-ops before the first release (no `ref`). They
+    # come before settings and self-destruct so the machinery is still present if
+    # a later step fails.
+    _install_pinned_skills(root, verified_skills, locked_skills)
+    _point_actions_at_release(root, ref)
 
     # 5. Apply repo settings BEFORE self-destruct, so that if the apply step fails
     # or is declined the init machinery is still present and the operator has

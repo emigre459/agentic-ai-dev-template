@@ -93,5 +93,5 @@ def test_after_init_the_queue_and_its_checks_still_line_up(
     initialize(template_tree, stack, "acme-app", "app", apply_settings=False)
     assert _has_merge_queue(template_tree)
     required = required_contexts(template_tree)
-    assert required == {"lint", "tests", "security"}
+    assert required == {"lint", "tests", "security", "skills drift"}
     assert not required - merge_group_contexts(template_tree)
