@@ -1,10 +1,21 @@
-import subprocess
+import json
+import shutil
+import subprocess  # nosec B404 -- fixed argv, in-repo script, no shell
+import tarfile
+from collections.abc import Sequence
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import pytest
 
-from scripts.init_template import ensure_clean_worktree, initialize, main
+from scripts.init_template import (
+    _locale_sort_key,
+    _ordered_skill_files,
+    _python_skill_hash,
+    ensure_clean_worktree,
+    initialize,
+    main,
+)
 
 
 def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
@@ -277,3 +288,293 @@ def test_initialize_refuses_when_already_initialized(template_tree: Path) -> Non
     initialize(template_tree, "python", "acme", "svc", apply_settings=False)
     with pytest.raises(RuntimeError):
         initialize(template_tree, "python", "acme", "svc", apply_settings=False)
+
+
+# --- init starts on the pinned skills release (#49, layer L1) ------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "skills_lock"
+_HASH_SCRIPT = _REPO_ROOT / ".github" / "actions" / "skills-drift" / "skills-lock.mjs"
+_SOURCE = "emigre459/agentic-ai-dev-template"
+_REF = "v1.2.0"
+_NEEDS_NODE = pytest.mark.skipif(
+    shutil.which("node") is None, reason="node is not on PATH"
+)
+
+
+class _FakeGit:
+    """Runner standing in for ``subprocess.run``: serves git from a local tree.
+
+    ``fetch`` succeeds (or raises when ``fail_fetch``); ``archive`` tars the
+    requested ``.agents/skills/<name>`` folders out of ``source``. Anything that
+    is not git (the node hash) is passed through to the real ``subprocess.run``.
+    """
+
+    def __init__(self, source: Path, *, fail_fetch: bool = False) -> None:
+        self.source = source
+        self.fail_fetch = fail_fetch
+        self.git_calls: list[list[str]] = []
+
+    def __call__(
+        self, cmd: Sequence[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        if cmd[0] != "git":
+            return subprocess.run(cmd, **kwargs)  # noqa: PLW1510  # nosec B603
+        self.git_calls.append(list(cmd))
+        verb = cmd[3]  # ["git", "-C", <root>, <verb>, ...]
+        if verb == "fetch":
+            if self.fail_fetch:
+                raise subprocess.CalledProcessError(128, list(cmd))
+        elif verb == "archive":
+            out = Path(cmd[cmd.index("-o") + 1])
+            with tarfile.open(out, "w") as tar:
+                for path in cmd[cmd.index("FETCH_HEAD") + 1 :]:
+                    tar.add(self.source / path, arcname=path)
+        else:
+            raise AssertionError(f"unexpected git command: {cmd}")
+        return subprocess.CompletedProcess(list(cmd), 0, "", "")
+
+
+def _no_commands(cmd: Sequence[str], **kwargs: Any) -> NoReturn:
+    """Runner that fails the test if init shells out at all."""
+    raise AssertionError(f"unexpected command: {cmd}")
+
+
+def _make_source(tmp_path: Path, skills: dict[str, str]) -> Path:
+    """Build a release-shaped tree: ``.agents/skills/<name>/SKILL.md`` per skill."""
+    source = tmp_path / "release-source"
+    for name, body in skills.items():
+        folder = source / ".agents" / "skills" / name
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text(body)
+        (folder / "notes.md").write_text(f"notes for {name}\n")
+    return source
+
+
+def _write_lock(root: Path, entries: dict[str, tuple[str, str | None]]) -> None:
+    """Write a skills-lock.json from ``{name: (computedHash, ref-or-None)}``."""
+    skills: dict[str, dict[str, str]] = {}
+    for name, (digest, ref) in entries.items():
+        entry = {"source": _SOURCE, "sourceType": "github"}
+        if ref is not None:
+            entry["ref"] = ref
+        entry["skillPath"] = f".agents/skills/{name}/SKILL.md"
+        entry["computedHash"] = digest
+        skills[name] = entry
+    (root / "skills-lock.json").write_text(
+        json.dumps({"version": 1, "skills": skills}, indent=2) + "\n"
+    )
+
+
+def _released(source: Path, *names: str) -> dict[str, tuple[str, str | None]]:
+    """Lock entries pinning ``names`` to ``_REF`` with the source's real hashes."""
+    return {
+        name: (_python_skill_hash(source / ".agents" / "skills" / name), _REF)
+        for name in names
+    }
+
+
+def test_init_swaps_skills_to_pinned_tag(template_tree: Path, tmp_path: Path) -> None:
+    source = _make_source(
+        tmp_path, {"run-tests": "released run-tests\n", "pr-check": "released pr\n"}
+    )
+    _write_lock(template_tree, _released(source, "run-tests", "pr-check"))
+    stale = template_tree / ".agents" / "skills" / "run-tests" / "stale.md"
+    stale.write_text("not in the release\n")
+    fake = _FakeGit(source)
+
+    initialize(template_tree, "python", "acme-svc", "svc", runner=fake)
+
+    skills = template_tree / ".agents" / "skills"
+    assert (skills / "run-tests" / "SKILL.md").read_text() == "released run-tests\n"
+    assert (skills / "pr-check" / "SKILL.md").read_text() == "released pr\n"
+    assert not stale.exists()
+    root = str(template_tree)
+    assert fake.git_calls[0] == [
+        "git",
+        "-C",
+        root,
+        "fetch",
+        "--depth",
+        "1",
+        f"https://github.com/{_SOURCE}.git",
+        "tag",
+        _REF,
+    ]
+    archives = [c for c in fake.git_calls if c[3] == "archive"]
+    assert len(archives) == 2
+    assert all(c[:4] == ["git", "-C", root, "archive"] for c in archives)
+    assert all("--format=tar" in c and "FETCH_HEAD" in c for c in archives)
+
+
+def test_init_fails_on_hash_mismatch_before_deleting_anything(
+    template_tree: Path, tmp_path: Path
+) -> None:
+    source = _make_source(tmp_path, {"run-tests": "good\n", "pr-check": "good\n"})
+    entries = _released(source, "run-tests", "pr-check")
+    # The lock expects bytes the "release" does not contain, for the second skill.
+    entries["pr-check"] = ("0" * 64, _REF)
+    _write_lock(template_tree, entries)
+    original = template_tree / ".agents" / "skills" / "run-tests" / "SKILL.md"
+    before = original.read_text()
+
+    with pytest.raises(RuntimeError, match="pr-check"):
+        initialize(template_tree, "python", "acme-svc", "svc", runner=_FakeGit(source))
+
+    assert (template_tree / "scripts" / "init_template.py").exists()
+    # Nothing was replaced, not even the skill that did verify.
+    assert original.read_text() == before
+
+
+def test_init_fails_loudly_when_fetch_fails(
+    template_tree: Path, tmp_path: Path
+) -> None:
+    source = _make_source(tmp_path, {"run-tests": "x\n"})
+    _write_lock(template_tree, _released(source, "run-tests"))
+
+    with pytest.raises(RuntimeError, match="network access") as excinfo:
+        initialize(
+            template_tree,
+            "python",
+            "acme-svc",
+            "svc",
+            runner=_FakeGit(source, fail_fetch=True),
+        )
+
+    assert _SOURCE in str(excinfo.value) and _REF in str(excinfo.value)
+    assert (template_tree / "scripts" / "init_template.py").exists()
+
+
+def test_init_without_ref_keeps_tree_and_local_actions(template_tree: Path) -> None:
+    workflow = template_tree / ".github" / "workflows" / "skills.yml"
+    workflow.write_text(
+        "jobs:\n  drift:\n    steps:\n      - uses: ./.github/actions/skills-drift\n"
+    )
+    assert '"ref"' not in (template_tree / "skills-lock.json").read_text()
+    skill = template_tree / ".agents" / "skills" / "run-tests"
+    hash_before = _python_skill_hash(skill)
+
+    initialize(template_tree, "python", "acme-svc", "svc", runner=_no_commands)
+
+    assert "uses: ./.github/actions/skills-drift" in workflow.read_text()
+    assert (template_tree / ".github" / "actions" / "skills-drift").is_dir()
+    assert _python_skill_hash(skill) == hash_before
+
+
+def test_init_without_lock_file_is_a_no_op(template_tree: Path) -> None:
+    (template_tree / "skills-lock.json").unlink()
+
+    initialize(template_tree, "python", "acme-svc", "svc", runner=_no_commands)
+
+    assert (template_tree / ".github" / "actions" / "skills-drift").is_dir()
+
+
+def test_init_points_actions_at_release(template_tree: Path, tmp_path: Path) -> None:
+    source = _make_source(tmp_path, {"run-tests": "x\n"})
+    _write_lock(template_tree, _released(source, "run-tests"))
+    workflow = template_tree / ".github" / "workflows" / "skills.yml"
+    workflow.write_text(
+        "jobs:\n  drift:\n    steps:\n"
+        "      - uses: ./.github/actions/skills-drift\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - name: other\n"
+        "        uses: ./.github/actions/skills-other\n"
+    )
+
+    initialize(template_tree, "python", "acme-svc", "svc", runner=_FakeGit(source))
+
+    remote = f"{_SOURCE}/.github/actions"
+    assert workflow.read_text() == (
+        "jobs:\n  drift:\n    steps:\n"
+        f"      - uses: {remote}/skills-drift@{_REF}\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - name: other\n"
+        f"        uses: {remote}/skills-other@{_REF}\n"
+    )
+    assert not (template_tree / ".github" / "actions" / "skills-drift").exists()
+
+
+def test_init_rejects_a_lock_with_disagreeing_refs(
+    template_tree: Path, tmp_path: Path
+) -> None:
+    source = _make_source(tmp_path, {"run-tests": "x\n", "pr-check": "y\n"})
+    entries = _released(source, "run-tests", "pr-check")
+    entries["pr-check"] = (entries["pr-check"][0], "v1.1.0")
+    _write_lock(template_tree, entries)
+
+    with pytest.raises(RuntimeError, match="ref"):
+        initialize(template_tree, "python", "acme-svc", "svc", runner=_FakeGit(source))
+
+    assert (template_tree / "scripts" / "init_template.py").exists()
+
+
+def test_python_hash_port_matches_golden() -> None:
+    golden = json.loads((_FIXTURES / "golden.json").read_text())["demo-skill"]
+
+    assert _python_skill_hash(_FIXTURES / "demo-skill") == golden
+
+
+def _node_sorted(names: list[str]) -> list[str]:
+    """Sort ``names`` with node's ``localeCompare``, as the skills CLI does."""
+    script = (
+        "const n = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+        "n.sort((a, b) => a.localeCompare(b));"
+        "console.log(JSON.stringify(n));"
+    )
+    result = subprocess.run(  # nosec B603 B607
+        ["node", "-e", script],
+        input=json.dumps(names),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    sorted_names: list[str] = json.loads(result.stdout)
+    return sorted_names
+
+
+@_NEEDS_NODE
+@pytest.mark.parametrize(
+    "skill_dir",
+    sorted(p for p in (_REPO_ROOT / ".agents" / "skills").iterdir() if p.is_dir()),
+    ids=lambda p: p.name,
+)
+def test_python_hash_port_matches_node_for_every_real_skill(skill_dir: Path) -> None:
+    """Guard on the port's ``localeCompare`` emulation, over the real skills."""
+    paths = [
+        p.relative_to(skill_dir).as_posix() for p in _ordered_skill_files(skill_dir)
+    ]
+    assert paths == _node_sorted(paths)
+    node = subprocess.run(  # nosec B603 B607
+        ["node", str(_HASH_SCRIPT), "hash", str(skill_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert _python_skill_hash(skill_dir) == node.stdout.strip()
+
+
+@_NEEDS_NODE
+def test_python_sort_key_matches_localecompare_on_tricky_names() -> None:
+    names = [
+        "SKILL.md", "skill.md", "Skill.md", "a.md", "A.md", "a b.md", "a_b.md",
+        "a-b.md", "a1.md", "A1.md", "ab.md", "aB.md", "_private.md", ".hidden",
+        "1.txt", "10.txt", "2.txt", "sub/b.txt", "sub/A.txt", "sub.md", "sub-x/a",
+        "sub_x/a", "scripts/render.py", "scripts/Render.py", "scripts/__init__.py",
+        "references/stacked-prs.md", "references/parallel-fixes.md", "Zeta.md",
+        "zeta.md", "(x).md", "x+y.md", "x&y.md", "x,y.md", "x~y.md", "x@y.md",
+    ]  # fmt: skip
+    assert sorted(names, key=_locale_sort_key) == _node_sorted(names)
+
+
+def test_init_pins_with_the_python_hash_when_node_is_missing(
+    template_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _make_source(tmp_path, {"run-tests": "released\n"})
+    _write_lock(template_tree, _released(source, "run-tests"))
+    monkeypatch.setattr("scripts.init_template.shutil.which", lambda _: None)
+    fake = _FakeGit(source)
+
+    initialize(template_tree, "python", "acme-svc", "svc", runner=fake)
+
+    skill = template_tree / ".agents" / "skills" / "run-tests" / "SKILL.md"
+    assert skill.read_text() == "released\n"
