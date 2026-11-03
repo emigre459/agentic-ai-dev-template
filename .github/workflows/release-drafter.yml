@@ -1,0 +1,25 @@
+name: release drafter
+
+# Keeps one rolling draft GitHub Release up to date from merged PRs. It only
+# drafts: publishing is by hand through release.yml. Push-to-main only, so no
+# pull_request or merge_group trigger and no required status.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+# Two quick merges must not race to update the same draft.
+concurrency:
+  group: release-drafter
+  cancel-in-progress: false
+
+jobs:
+  update-draft:
+    name: update release draft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: release-drafter/release-drafter@v7

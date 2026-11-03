@@ -1,0 +1,47 @@
+name: release
+
+# Cuts a release by hand: Actions -> release -> Run workflow, with a one-paragraph
+# summary. It publishes the draft that release-drafter keeps up to date (creating
+# the tag), with the summary as the release's header.
+
+on:
+  workflow_dispatch:
+    inputs:
+      summary:
+        description: At most one paragraph describing the release
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: release-drafter/release-drafter@v7
+        id: drafter
+        with:
+          publish: true
+          header: ${{ inputs.summary }}
+      # The summary is free text: it reaches the shell only through env, never
+      # by interpolation into the script.
+      - name: Report the release
+        env:
+          TAG_NAME: ${{ steps.drafter.outputs.tag_name }}
+          HTML_URL: ${{ steps.drafter.outputs.html_url }}
+          SUMMARY: ${{ inputs.summary }}
+        run: |
+          {
+            echo "## Released ${TAG_NAME}"
+            echo
+            echo "${HTML_URL}"
+            echo
+            echo "${SUMMARY}"
+          } >> "$GITHUB_STEP_SUMMARY"
