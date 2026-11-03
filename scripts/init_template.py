@@ -53,6 +53,9 @@ _MANIFEST_PLACEHOLDER = "template-placeholder-project-name"
 # (both stacks coexist, duplicate ids are invalid YAML); init strips the kept
 # stack's prefix and requires the resulting contexts as status checks.
 _CI_JOBS = ("lint", "tests", "security")
+# Stack-independent CI checks: the job sits outside every STACK marker block, so
+# it keeps its name across init and is required alongside _CI_JOBS.
+_SHARED_CI_CHECKS = ("skills drift",)
 # The GitHub Actions app — pinning integration_id means only Actions-reported
 # check runs satisfy the required contexts.
 _GITHUB_ACTIONS_INTEGRATION_ID = 15368
@@ -285,7 +288,7 @@ def _set_required_status_checks(root: Path) -> None:
     rules = ruleset.setdefault("rules", [])
     checks = [
         {"context": job, "integration_id": _GITHUB_ACTIONS_INTEGRATION_ID}
-        for job in _CI_JOBS
+        for job in (*_CI_JOBS, *_SHARED_CI_CHECKS)
     ]
     for rule in rules:
         if rule.get("type") == "required_status_checks":
