@@ -726,10 +726,34 @@ def test_plan_never_deletes_extra_labels() -> None:
     assert _label_plan(current_labels=[_MINOR, *extras], desired_labels=[_MINOR]) == []
 
 
-def test_plan_matches_label_names_exactly() -> None:
-    """`Minor` is a different label from `minor`; the bump label is still missing."""
+def test_plan_renames_a_case_variant_label_instead_of_creating_it() -> None:
+    """GitHub names are case-insensitive: POSTing `minor` beside `Minor` is a 422."""
+    live = {**_MINOR, "color": "ffffff", "name": "Minor"}
+    assert _label_plan([live], [_MINOR]) == [("label", "PATCH", "Minor")]
+
+
+def test_plan_renames_a_case_variant_even_when_color_and_description_match() -> None:
     live = {**_MINOR, "name": "Minor"}
-    assert _label_plan([live], [_MINOR]) == [("label", "POST", "minor")]
+    assert _label_plan([live], [_MINOR]) == [("label", "PATCH", "Minor")]
+
+
+def test_apply_renames_a_case_variant_via_the_live_name() -> None:
+    live = [{**label, "name": label["name"].capitalize()} for label in _DESIRED_LABELS]
+    gh = _FakeGh(_repo("Organization", "public"), labels=live)
+    main(["--repo", "acme/repo", "--yes"], runner=gh)
+    assert [(m, e, p.get("new_name")) for m, e, p in gh.label_writes] == [
+        ("PATCH", "repos/acme/repo/labels/Patch", "patch"),
+        ("PATCH", "repos/acme/repo/labels/Minor", "minor"),
+        ("PATCH", "repos/acme/repo/labels/Major", "major"),
+    ]
+    assert not any(m == "POST" for m, _, _ in gh.label_writes)
+
+
+def test_a_same_case_update_does_not_rename() -> None:
+    stale = [{**label, "color": "ffffff"} for label in _DESIRED_LABELS]
+    gh = _FakeGh(_repo("Organization", "public"), labels=stale)
+    main(["--repo", "acme/repo", "--yes"], runner=gh)
+    assert all("new_name" not in payload for _, _, payload in gh.label_writes)
 
 
 def test_current_labels_follows_pagination() -> None:
