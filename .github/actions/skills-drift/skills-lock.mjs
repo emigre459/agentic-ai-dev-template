@@ -21,13 +21,16 @@
 // verified against that tag's copy of the skill folder (the tag must be
 // fetched), one without against the working tree. `write` regenerates the
 // template's lock from the folders under .agents/skills/ that hold a SKILL.md;
-// with --tag each entry gets `ref` and the hash of the folder as tagged.
+// with --tag each entry gets `ref` and the hash of the folder as tagged. In
+// template mode the working-tree hash covers only files git does not ignore
+// (so local bytecode or .DS_Store never reach the lock); plain `check` and
+// `hash` hash every file on disk, exactly as the skills CLI does.
 //
 // Standard library only, so the action needs no `npm install`.
 
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -67,10 +70,8 @@ async function collectFiles(baseDir, currentDir, results) {
   );
 }
 
-/** SHA-256 hex digest of a skill folder, identical to the skills CLI's. */
-export async function computeSkillFolderHash(skillDir) {
-  const files = [];
-  await collectFiles(skillDir, skillDir, files);
+/** SHA-256 hex digest of {relativePath, content} files, as the skills CLI computes it. */
+function digestFiles(files) {
   files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
   const hash = createHash('sha256');
   for (const file of files) {
@@ -78,6 +79,48 @@ export async function computeSkillFolderHash(skillDir) {
     hash.update(file.content);
   }
   return hash.digest('hex');
+}
+
+/** SHA-256 hex digest of a skill folder, identical to the skills CLI's. */
+export async function computeSkillFolderHash(skillDir) {
+  const files = [];
+  await collectFiles(skillDir, skillDir, files);
+  return digestFiles(files);
+}
+
+/**
+ * Same digest, over only the files git does not ignore (tracked, or untracked
+ * and not gitignored) under `.agents/skills/<name>` in the repo at `root`, so
+ * local bytecode, `.DS_Store` and the like never reach the template's lock.
+ * Null when the folder has no such files. Template mode only: consumers keep
+ * the exact CLI hash.
+ */
+async function hashSkillInWorkingTree(root, name) {
+  const skillPath = `${TEMPLATE_SKILLS_DIR}/${name}`;
+  let listing;
+  try {
+    ({ stdout: listing } = await run(
+      'git',
+      ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', skillPath],
+      { cwd: root, maxBuffer: 64 * 1024 * 1024 },
+    ));
+  } catch (error) {
+    throw new UsageError(`cannot list files of ${skillPath} with git in ${root}: ${error.message}`);
+  }
+  const files = [];
+  for (const path of listing.split('\0').filter((entry) => entry !== '')) {
+    const relativePath = path.slice(skillPath.length + 1);
+    // Mirror the plain walk: skip `.git`/`node_modules` directories, and anything
+    // that is not a regular file (a tracked file deleted from disk, a symlink).
+    if (relativePath.split('/').slice(0, -1).some((part) => part === '.git' || part === 'node_modules')) continue;
+    const info = await lstat(join(root, path)).catch((error) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (info === null || !info.isFile()) continue;
+    files.push({ relativePath, content: await readFile(join(root, path)) });
+  }
+  return files.length === 0 ? null : digestFiles(files);
 }
 
 /** Read and validate skills-lock.json under `root`; throw UsageError if unusable. */
@@ -191,6 +234,17 @@ async function check(root, { template }) {
       }
       continue;
     }
+    if (template) {
+      const actual = await hashSkillInWorkingTree(root, name);
+      if (actual === null) {
+        problems.push(`MISSING ${name}: no files in ${TEMPLATE_SKILLS_DIR}/${name}`);
+      } else if (actual !== entry.computedHash) {
+        problems.push(
+          `DRIFT ${name}: ${TEMPLATE_SKILLS_DIR}/${name} hashes to ${actual}, skills-lock.json has ${entry.computedHash}`,
+        );
+      }
+      continue;
+    }
     const dir = await findSkillDir(root, name);
     if (dir === null) {
       problems.push(`MISSING ${name}: no folder at ${SKILL_DIRS.map((d) => `${d}/${name}`).join(' or ')}`);
@@ -255,10 +309,12 @@ async function write(root, { tag }) {
   for (const name of names) {
     const computedHash =
       tag === null
-        ? await computeSkillFolderHash(join(root, TEMPLATE_SKILLS_DIR, name))
+        ? await hashSkillInWorkingTree(root, name)
         : await hashSkillAtTag(root, tag, name);
     if (computedHash === null) {
-      throw new UsageError(`${TEMPLATE_SKILLS_DIR}/${name} does not exist at tag ${tag}`);
+      throw new UsageError(
+        `${TEMPLATE_SKILLS_DIR}/${name} has no files${tag === null ? '' : ` at tag ${tag}`}`,
+      );
     }
     skills[name] = {
       source: TEMPLATE_SOURCE,
