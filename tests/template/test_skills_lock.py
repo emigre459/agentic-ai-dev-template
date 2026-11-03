@@ -171,3 +171,186 @@ def test_action_yml_wires_root_and_template_mode() -> None:
     assert 'node "$GITHUB_ACTION_PATH/skills-lock.mjs" check' in script
     assert "scripts/init_template.py" in script
     assert "--template" in script
+
+
+# --- template mode: `write` and `check --template` -------------------------------
+
+
+def _git(repo: Path, *args: str) -> None:
+    """Run git in ``repo`` (fixed argv, no shell), failing the test on error."""
+    subprocess.run(  # nosec B603 B607
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _make_template(root: Path) -> Path:
+    """Build a git repo with two skills and one non-skill directory."""
+    for name in ("beta", "alpha"):
+        skill = root / ".agents" / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"# {name}\n")
+        (skill / "extra.md").write_text(f"{name} extra\n")
+    # A directory without SKILL.md is not a skill.
+    (root / ".agents" / "skills" / "not-a-skill").mkdir()
+    (root / ".agents" / "skills" / "not-a-skill" / "notes.txt").write_text("x\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+    return root
+
+
+def _read_lock(root: Path) -> dict:
+    return json.loads((root / "skills-lock.json").read_text())
+
+
+def _hash_of(path: Path) -> str:
+    return _node("hash", path).stdout.strip()
+
+
+def test_write_without_tag(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    result = _node("write", "--root", repo)
+    assert result.returncode == 0, result.stderr
+    text = (repo / "skills-lock.json").read_text()
+    assert text.endswith("}\n")
+    assert text.startswith('{\n  "version": 1,\n  "skills": {\n    "alpha": {')
+    lock = json.loads(text)
+    assert lock["version"] == 1
+    assert list(lock["skills"]) == ["alpha", "beta"]
+    for name, entry in lock["skills"].items():
+        assert list(entry) == ["source", "sourceType", "skillPath", "computedHash"]
+        assert entry["source"] == "emigre459/agentic-ai-dev-template"
+        assert entry["sourceType"] == "github"
+        assert entry["skillPath"] == f".agents/skills/{name}/SKILL.md"
+        assert entry["computedHash"] == _hash_of(repo / ".agents/skills" / name)
+
+
+def test_write_with_tag(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    tagged_alpha = _hash_of(repo / ".agents/skills/alpha")
+    tagged_beta = _hash_of(repo / ".agents/skills/beta")
+    _git(repo, "tag", "v0.1.0")
+    (repo / ".agents/skills/alpha/SKILL.md").write_text("# alpha, edited\n")
+    result = _node("write", "--root", repo, "--tag", "v0.1.0")
+    assert result.returncode == 0, result.stderr
+    skills = _read_lock(repo)["skills"]
+    assert list(skills["alpha"]) == [
+        "source",
+        "ref",
+        "sourceType",
+        "skillPath",
+        "computedHash",
+    ]
+    assert skills["alpha"]["ref"] == skills["beta"]["ref"] == "v0.1.0"
+    assert skills["alpha"]["computedHash"] == tagged_alpha
+    assert skills["alpha"]["computedHash"] != _hash_of(repo / ".agents/skills/alpha")
+    assert skills["beta"]["computedHash"] == tagged_beta
+
+
+def test_write_with_unknown_tag_is_a_usage_error(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    result = _node("write", "--root", repo, "--tag", "v9.9.9")
+    assert result.returncode == 2
+    assert "v9.9.9" in result.stderr
+    assert not (repo / "skills-lock.json").exists()
+
+
+def test_write_cleans_up_temp_dirs(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    _git(repo, "tag", "v0.1.0")
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    result = subprocess.run(  # nosec B603 B607
+        ["node", str(_SCRIPT), "write", "--root", str(repo), "--tag", "v0.1.0"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "TMPDIR": str(tmp)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert list(tmp.iterdir()) == []
+
+
+def test_template_check_ignores_unreleased_edits(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    _git(repo, "tag", "v0.1.0")
+    (repo / ".agents/skills/alpha/SKILL.md").write_text("# alpha, edited\n")
+    assert _node("write", "--root", repo, "--tag", "v0.1.0").returncode == 0
+    template = _node("check", "--root", repo, "--template")
+    assert template.returncode == 0, template.stdout + template.stderr
+    plain = _node("check", "--root", repo)
+    assert plain.returncode == 1
+    assert "DRIFT alpha" in plain.stdout
+
+
+def test_template_check_flags_a_stale_tag_hash(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    _git(repo, "tag", "v0.1.0")
+    assert _node("write", "--root", repo, "--tag", "v0.1.0").returncode == 0
+    (repo / ".agents/skills/alpha/extra.md").write_text("changed after the lock\n")
+    _git(repo, "commit", "-q", "-am", "edit")
+    _git(repo, "tag", "-f", "v0.1.0")
+    result = _node("check", "--root", repo, "--template")
+    assert result.returncode == 1
+    assert "DRIFT alpha" in result.stdout
+    assert "DRIFT beta" not in result.stdout
+    assert "make skills_lock" in result.stdout
+
+
+def test_template_check_without_ref_compares_the_working_tree(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    assert _node("write", "--root", repo).returncode == 0
+    assert _node("check", "--root", repo, "--template").returncode == 0
+    (repo / ".agents/skills/beta/SKILL.md").write_text("# beta, edited\n")
+    result = _node("check", "--root", repo, "--template")
+    assert result.returncode == 1
+    assert "DRIFT beta" in result.stdout
+
+
+def test_template_check_needs_the_tag_locally(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    _git(repo, "tag", "v0.1.0")
+    assert _node("write", "--root", repo, "--tag", "v0.1.0").returncode == 0
+    _git(repo, "tag", "-d", "v0.1.0")
+    result = _node("check", "--root", repo, "--template")
+    assert result.returncode == 2
+    assert "v0.1.0" in result.stderr
+    assert "fetch" in result.stderr
+
+
+def test_shipped_lock_is_current() -> None:
+    result = _node("check", "--root", _REPO, "--template")
+    assert result.returncode == 0, result.stdout + result.stderr
+    lock = json.loads((_REPO / "skills-lock.json").read_text())
+    on_disk = sorted(
+        path.parent.name for path in (_REPO / ".agents/skills").glob("*/SKILL.md")
+    )
+    assert list(lock["skills"]) == on_disk
+    for name, entry in lock["skills"].items():
+        assert entry["source"] == "emigre459/agentic-ai-dev-template"
+        assert entry["skillPath"] == f".agents/skills/{name}/SKILL.md"
+
+
+def test_make_skills_lock_target_forwards_tag() -> None:
+    tagged = subprocess.run(  # nosec B603 B607
+        ["make", "-n", "skills_lock", "TAG=v1.2.3"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tagged.returncode == 0, tagged.stderr
+    assert "skills-lock.mjs write --root . --tag v1.2.3" in tagged.stdout
+    plain = subprocess.run(  # nosec B603 B607
+        ["make", "-n", "skills_lock"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert plain.returncode == 0, plain.stderr
+    assert "--tag" not in plain.stdout

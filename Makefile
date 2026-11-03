@@ -35,6 +35,10 @@ machinery_lint: ## Lint the template machinery (black --check + ruff + mypy)
 machinery_tests: ## Test the template machinery
 	@uv run pytest tests/template -v --tb=short
 
+.PHONY: skills_lock
+skills_lock: ## Regenerate skills-lock.json for the template's skills (TAG=vX.Y.Z records a release)
+	@node .github/actions/skills-drift/skills-lock.mjs write --root .$(if $(TAG), --tag $(TAG))
+
 .PHONY: deps
 deps: tooling_deps ## Install tooling + both stacks' dependencies
 	@$(MAKE) -C stacks/python deps
