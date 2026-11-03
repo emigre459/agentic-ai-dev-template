@@ -1,0 +1,22 @@
+name: Skills drift check
+description: >-
+  Fail when a vendored agent skill no longer matches its computedHash in
+  skills-lock.json (the hash the skills CLI writes).
+inputs:
+  root:
+    description: Repository root that holds skills-lock.json and the skill folders.
+    required: false
+    default: "."
+runs:
+  using: composite
+  steps:
+    - name: Check skills against skills-lock.json
+      shell: bash
+      env:
+        SKILLS_ROOT: ${{ inputs.root }}
+      run: |
+        args=(--root "$SKILLS_ROOT")
+        if [ -f "$SKILLS_ROOT/scripts/init_template.py" ]; then
+          args+=(--template)
+        fi
+        node "$GITHUB_ACTION_PATH/skills-lock.mjs" check "${args[@]}"
