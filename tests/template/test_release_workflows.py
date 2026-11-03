@@ -233,3 +233,17 @@ def test_version_check_fails_without_publishing_on_a_mismatch(
     assert result.returncode == 1
     assert "::error::" in result.stdout
     assert approved in result.stdout
+
+
+def _skill_text(name: str) -> str:
+    return (_REPO / ".agents" / "skills" / name / "SKILL.md").read_text()
+
+
+def test_build_from_issue_mentions_release_check() -> None:
+    text = _skill_text("build-from-issue")
+    assert "gh release list" in text
+    assert "--add-label" in text
+    for bump in ("patch", "minor", "major"):
+        assert bump in text
+    # With no published release the first one is suggested; the user can correct it.
+    assert "v0.1.0" in text
