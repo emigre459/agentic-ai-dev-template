@@ -260,3 +260,70 @@ def test_release_skill_gates_publish_on_user_ok() -> None:
     assert "never" in text.lower()
     assert "gh run watch" in text
     assert "gh release view" in text
+
+
+def _readme() -> str:
+    return (_REPO / "README.md").read_text()
+
+
+def test_readme_covers_install_pin_update_telemetry_release() -> None:
+    readme = _readme()
+    for needle in (
+        "DISABLE_TELEMETRY=1",
+        "#v",
+        "SKILLS_UPDATE_TOKEN",
+        "SKILLS_UPDATE_APP_ID",
+        "skills drift",
+        "release.yml",
+        "skills-update",
+        "release-pin-v",
+        "60 days",
+        "__pycache__",
+    ):
+        assert needle in readme, f"README does not mention {needle!r}"
+    for heading in (
+        "## Installing the skills",
+        "## Staying up to date",
+        "## The drift check",
+        "## Cutting a release",
+    ):
+        assert heading in readme, f"README lacks {heading!r}"
+
+
+def test_readme_release_sections_follow_customizing_and_keep_it() -> None:
+    readme = _readme()
+    customizing = readme.index("## Customizing the skills in your repo")
+    assert readme.index(
+        "### `.agents/skill-config/<skill>.md`: notes for one skill"
+    ) > (customizing)
+    order = [
+        readme.index(h)
+        for h in (
+            "## Installing the skills",
+            "## Staying up to date",
+            "## The drift check",
+            "## Cutting a release",
+            "## Prerequisites",
+        )
+    ]
+    assert customizing < order[0]
+    assert order == sorted(order)
+
+
+def test_readme_new_code_blocks_are_plain_ascii() -> None:
+    readme = _readme()
+    new = readme[
+        readme.index("## Installing the skills") : readme.index("## Prerequisites")
+    ]
+    blocks = re.findall(r"```[^\n]*\n(.*?)```", new, flags=re.DOTALL)
+    assert blocks, "expected code blocks in the new sections"
+    for block in blocks:
+        assert block.isascii(), f"non-ASCII code block: {block[:60]!r}"
+
+
+def test_agents_md_mentions_release_skill_and_labels() -> None:
+    text = (_REPO / "AGENTS.md").read_text()
+    assert "release" in text.split("## Skills")[1].split("## Hooks")[0]
+    skills = text.split("## Skills")[1].split("## Hooks")[0]
+    assert "`minor`" in skills
+    assert "`major`" in skills

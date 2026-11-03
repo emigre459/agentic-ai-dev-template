@@ -217,6 +217,135 @@ conventions are fair game:
 A line like `Merge the PR yourself once CI is green.` would be skipped and reported:
 merging without your one-off OK is a hard stop.
 
+## Installing the skills
+
+A repo created from this template already has the skills: `make init` installs the
+template's latest release and records it in `skills-lock.json`. To add them to any
+other repo, install a release by its tag with the [skills CLI](https://github.com/vercel-labs/skills):
+
+```bash
+npx skills add emigre459/agentic-ai-dev-template#vX.Y.Z
+```
+
+- **Pin a tag, not a branch.** `#vX.Y.Z` records that tag as the skill's `ref` in
+  `skills-lock.json`, so the install is reproducible and the update PR (below) moves
+  it forward one release at a time. Without a `#` suffix the skills track the
+  default branch tip, which can change under you.
+- **Opt out of telemetry** with `DISABLE_TELEMETRY=1`, for example
+  `DISABLE_TELEMETRY=1 npx skills add ...`. The nightly workflow below sets it for you.
+- Commit `.agents/skills/` and `skills-lock.json` together. Edits inside a skill
+  folder are not kept: see "Customizing the skills in your repo".
+
+## Staying up to date
+
+The `skills update` workflow (`.github/workflows/skills-update.yml`) runs nightly and
+can be started by hand from the Actions tab. It opens, or refreshes, one pull request
+titled "Update agent skills" from the `skills-update` branch, labeled `dependencies`:
+
+- Skills pinned to a tag move to the newest stable release of their source (not a
+  draft, not a pre-release, tagged `vX.Y.Z`). Skills with no tag follow their branch.
+- The branch is rebuilt on the latest `main` each run. With nothing to update, an
+  open update PR is closed.
+- It never merges itself. Review the diff and merge it like any other PR.
+
+Which identity opens the PR decides whether its CI runs. Set one of these as a
+repository secret, or neither:
+
+| Secret | Effect |
+|--------|--------|
+| `SKILLS_UPDATE_APP_ID` + `SKILLS_UPDATE_APP_PRIVATE_KEY` | A GitHub App you install on the repo (contents, pull requests and actions: write). Its pushes trigger the PR's CI normally. Set both, or the App is ignored with a warning. |
+| `SKILLS_UPDATE_TOKEN` | A fine-grained personal access token with contents and pull requests: write. Its pushes trigger the PR's CI normally. |
+| neither | The workflow's `GITHUB_TOKEN`. Its pushes do not trigger CI, so the workflow dispatches `ci.yml` on the branch instead. Turn on Settings, Actions, General, "Allow GitHub Actions to create and approve pull requests", or the PR cannot be opened. |
+
+GitHub disables scheduled workflows after 60 days without repository activity. If the
+nightly PR stops appearing, open the Actions tab, pick "skills update" and re-enable it.
+A repo that merges its update PRs regularly never reaches that point.
+
+### Adopting the kit in an existing repo
+
+Besides the install above, an existing repo needs two small caller workflows, which
+call the template's released actions by tag. Use the same `vX.Y.Z` as the install.
+
+The first is the nightly update. Copy `.github/workflows/skills-update.yml` from the
+template at that tag and change its one `uses: ./.github/actions/skills-update` line to
+`uses: emigre459/agentic-ai-dev-template/.github/actions/skills-update@vX.Y.Z`.
+
+The second is the drift check, a job in your CI workflow. Name it `skills drift`, so
+it can be a required check:
+
+```yaml
+  skills-drift:
+    name: skills drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - uses: emigre459/agentic-ai-dev-template/.github/actions/skills-drift@vX.Y.Z
+```
+
+Then add `skills drift` to the required checks of your `main` ruleset (repos made
+from the template get this from `make finalize_repo_settings`).
+
+## The drift check
+
+`skills drift` fails a pull request when a vendored skill no longer matches the hash
+recorded for it (`computedHash`) in `skills-lock.json`: an edited, added or deleted
+file inside a skill folder, or a skill folder that is missing. It is the guard behind
+"treat skill folders as read-only". When it fails:
+
+- To keep repo-specific behavior, undo the edit and put it in
+  `.agents/skill-config/<skill>.md`. A fix to the skill itself goes upstream as a PR.
+- When the skills CLI or the update PR changed the skills, the lock file changes in
+  the same commit. A skill folder that changed with no lock change is an edit, so
+  the check fails.
+
+Run on your machine, the check can report drift that CI does not. It hashes every
+file on disk, so untracked files inside a vendored skill, such as a `__pycache__`
+folder from running one of its scripts or a `.DS_Store`, change the hash. CI runs it
+on a clean checkout, which is the result that counts. To reproduce a failure locally,
+first remove the untracked files (`git clean -n .agents/skills` lists them).
+
+## Cutting a release
+
+Releases are drafted for you and published by hand. On every push to `main`,
+`release-drafter` (`.github/workflows/release-drafter.yml`) updates one draft GitHub
+Release from the merged PRs, so there is no changelog file to maintain.
+
+**The version** comes from a label on each merged PR, and the largest bump wins:
+
+| Label | Bump | Use for |
+|-------|------|---------|
+| `major` | X in vX.Y.Z | a breaking change |
+| `minor` | Y | new functionality |
+| `patch`, or no label | Z | everything else |
+
+`make apply_repo_settings_bootstrap` creates the three labels. `build-from-issue`
+suggests a bump when it reads the card and applies the label once the PR exists.
+
+**Publishing** is the `release` skill's job. It finds the draft, shows its version and
+PR list, writes a summary of at most one paragraph, asks you to approve both, and only
+then runs the `release.yml` workflow (Actions, `release`, Run workflow, with a required
+`summary` input). That workflow runs only from `main`: it publishes the draft with the
+summary on top and creates the tag. You can run it by hand without the skill, with the
+same inputs.
+
+The skill never publishes without your explicit OK for that release, and never merges
+anything.
+
+**In this template**, a release also has a follow-up: the `release` skill offers to
+open a PR on a `release-pin-vX.Y.Z` branch that runs `make skills_lock TAG=vX.Y.Z`,
+recording the tag and hashes in `skills-lock.json`. Repos made from the template start
+from that tag. Merge it like any other PR; it is a separate step because the tag
+cannot exist before the release does.
+
+**In your own repo**, the same flow works once it has the release pieces:
+`.github/release-drafter.yml`, the `release-drafter.yml` and `release.yml` workflows,
+and the three labels. A repo made from the template already has them; an existing
+repo copies them from the template at the tag it installed. There is no re-pin step,
+which only the template has.
+
 ## Prerequisites
 
 | To… | You need |
