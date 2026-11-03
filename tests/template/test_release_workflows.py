@@ -233,3 +233,199 @@ def test_version_check_fails_without_publishing_on_a_mismatch(
     assert result.returncode == 1
     assert "::error::" in result.stdout
     assert approved in result.stdout
+
+
+def _skill_text(name: str) -> str:
+    return (_REPO / ".agents" / "skills" / name / "SKILL.md").read_text()
+
+
+def test_build_from_issue_mentions_release_check() -> None:
+    text = _skill_text("build-from-issue")
+    assert "gh release list" in text
+    assert "--add-label" in text
+    for bump in ("patch", "minor", "major"):
+        assert bump in text
+    # With no published release the first one is suggested; the user can correct it.
+    assert "v0.1.0" in text
+
+
+def test_release_skill_gates_publish_on_user_ok() -> None:
+    text = _skill_text("release")
+    assert "AskUserQuestion" in text
+    assert "release.yml" in text
+    assert "make skills_lock TAG=" in text
+    assert "at most one paragraph" in text
+    assert "release-pin-v" in text
+    # The skill never merges and never publishes without the user's OK.
+    assert "never publish without the user's explicit OK for that release" in text
+    assert "never merges anything" in text
+    # The summary travels as JSON on stdin through a single-quoted heredoc, never
+    # inside double quotes where the shell would expand it.
+    assert "--json <<'JSON'" in text
+    assert 'summary="' not in text
+    # The new run is found by creation time; Step 6 verifies the published tag.
+    assert "--event workflow_dispatch --json databaseId,createdAt" in text
+    assert "gh release list --exclude-drafts --limit 1 --json tagName" in text
+    assert "gh run watch" in text
+    assert "gh release view" in text
+
+
+def _readme() -> str:
+    return (_REPO / "README.md").read_text()
+
+
+def test_readme_covers_install_pin_update_telemetry_release() -> None:
+    readme = _readme()
+    for needle in (
+        "DISABLE_TELEMETRY=1",
+        "#v",
+        "SKILLS_UPDATE_TOKEN",
+        "SKILLS_UPDATE_APP_ID",
+        "skills drift",
+        "release.yml",
+        "skills-update",
+        "release-pin-v",
+        "60 days",
+        "__pycache__",
+    ):
+        assert needle in readme, f"README does not mention {needle!r}"
+    for heading in (
+        "## Installing the skills",
+        "## Staying up to date",
+        "## The drift check",
+        "## Cutting a release",
+    ):
+        assert heading in readme, f"README lacks {heading!r}"
+
+
+def test_readme_release_sections_follow_customizing_and_keep_it() -> None:
+    readme = _readme()
+    customizing = readme.index("## Customizing the skills in your repo")
+    assert readme.index(
+        "### `.agents/skill-config/<skill>.md`: notes for one skill"
+    ) > (customizing)
+    order = [
+        readme.index(h)
+        for h in (
+            "## Installing the skills",
+            "## Staying up to date",
+            "## The drift check",
+            "## Cutting a release",
+            "## Prerequisites",
+        )
+    ]
+    assert customizing < order[0]
+    assert order == sorted(order)
+
+
+def test_readme_new_code_blocks_are_plain_ascii() -> None:
+    readme = _readme()
+    new = readme[
+        readme.index("## Installing the skills") : readme.index("## Prerequisites")
+    ]
+    blocks = re.findall(r"```[^\n]*\n(.*?)```", new, flags=re.DOTALL)
+    assert blocks, "expected code blocks in the new sections"
+    for block in blocks:
+        assert block.isascii(), f"non-ASCII code block: {block[:60]!r}"
+
+
+def test_agents_md_mentions_release_skill_and_labels() -> None:
+    text = (_REPO / "AGENTS.md").read_text()
+    skills = text.split("## Skills")[1].split("## Hooks")[0]
+    assert "`release` skill" in skills
+    assert "`minor`" in skills
+    assert "`major`" in skills
+
+
+def test_build_from_issue_has_no_no_release_bump_option() -> None:
+    text = _skill_text("build-from-issue")
+    assert "no release" not in text
+    assert "still counts as a patch" in text
+
+
+def test_readme_states_the_adoption_and_schedule_caveats() -> None:
+    readme = " ".join(_readme().split())
+    assert "On public repositories, GitHub disables scheduled workflows" in readme
+    assert "not necessarily the newest release" in readme
+    assert "`workflow_dispatch:` trigger" in readme
+    assert "`ci-workflow:`" in readme
+    assert "`merge_group`" in readme
+
+
+# --- the approved version, the re-draft, and the existing-repo labels ----------
+
+
+def test_release_skill_redrafts_after_relabeling() -> None:
+    text = _skill_text("release")
+    step2 = text.split("## Step 2")[1].split("## Step 3")[0]
+    # A label change is not a push: the skill re-runs the drafter itself, waits
+    # for that new run, then reads the draft again.
+    assert "gh workflow run release-drafter.yml --ref main" in step2
+    assert "--workflow release-drafter.yml" in step2
+    assert "createdAt" in step2
+    assert "gh run watch" in step2
+    assert "read the draft again" in step2
+
+
+def test_release_skill_sends_the_approved_version() -> None:
+    text = _skill_text("release")
+    step5 = text.split("## Step 5")[1].split("## Step 6")[0]
+    assert '{"summary": "' in step5 and '"version": "' in step5
+    assert "exact version the user approved" in step5
+    # release-drafter substitutes $VARIABLES in the header, so the published text
+    # is not guaranteed byte-for-byte: the skill avoids `$` instead of promising it.
+    assert "exactly what the user approved" not in text
+    assert "$RESOLVED_VERSION" in text
+    assert "no `$`" in text.split("## Step 3")[1].split("## Step 4")[0]
+
+
+def test_readme_release_mentions_version_input_and_redraft() -> None:
+    readme = " ".join(_readme().split())
+    release = readme[readme.index("## Cutting a release") :]
+    release = release[: release.index("## Prerequisites")]
+    assert "`version`" in release
+    assert "without publishing" in release
+    assert "gh workflow run release-drafter.yml --ref main" in release
+
+
+def test_readme_gives_the_label_one_liner_for_existing_repos() -> None:
+    readme = _readme()
+    release = readme[readme.index("## Cutting a release") :]
+    release = release[: release.index("## Prerequisites")]
+    (line,) = [ln for ln in release.splitlines() if "gh label create" in ln]
+    assert "labels.json" in release
+    assert "jq -c '.[]'" in line and "while read -r" in line
+    assert "--force" in line
+
+
+def test_readme_says_a_half_configured_app_fails_the_run() -> None:
+    readme = " ".join(_readme().split())
+    assert "ignored with a warning" not in readme
+    assert "only one of them set, the nightly run fails" in readme
+
+
+_KIT = _REPO / "docs/superpowers/test-kits/2026-10-31-consumer-kit-live-e2e-kit.md"
+
+
+def test_runbook_release_dispatches_pass_the_version() -> None:
+    kit = _KIT.read_text()
+    section5 = kit[kit.index("## 5. A test release") : kit.index("## 6.")]
+    dispatches = [
+        ln for ln in section5.splitlines() if "gh workflow run release.yml" in ln
+    ]
+    assert len(dispatches) >= 3  # branch guard, wrong version, publish
+    for line in dispatches:
+        assert '"version": "' in line, line
+    assert "v9.9.9" in section5  # the wrong-version check
+    assert "Check the version matches the approved one" in section5
+
+
+def test_runbook_has_the_optional_pat_path_and_init_caveat() -> None:
+    kit = _KIT.read_text()
+    section4 = kit[kit.index("## 4. The nightly") : kit.index("## 5. A test release")]
+    assert "SKILLS_UPDATE_TOKEN" in section4
+    assert "gh secret set SKILLS_UPDATE_TOKEN" in section4
+    assert '"pull_request"' in section4
+    assert "## CI on this PR" in section4
+    assert "with a real `ref`" in kit
+    assert "make skills_lock TAG=" in kit

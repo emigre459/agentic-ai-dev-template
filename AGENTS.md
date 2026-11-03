@@ -77,6 +77,9 @@ read-only (updates replace their folders): customize one through
 `.github/pr-reviewer.json`, never by editing `.agents/skills/` — see
 `.agents/rules/shared/sync-core-dev-skills-upstream.md` and the README's
 "Customizing the skills in your repo".
+The `release` skill publishes the release that release-drafter drafts from merged
+PRs, only on the user's explicit OK; label a PR `minor` or `major` to pick the
+bump (no label means patch).
 
 ## Hooks
 

@@ -229,8 +229,10 @@ re-installing a tag would wipe unreleased work. Each run:
    2. draft **at most one paragraph** on what the release delivers;
    3. show the version and the paragraph, and get the user's explicit OK. Publishing is
       outward-facing, and consumer repos pick it up that night. To change the version,
-      relabel PRs and let the draft re-resolve;
-   4. run `release.yml` with the summary;
+      relabel PRs, re-run `release-drafter.yml` on `main` by hand (a label change is not
+      a push), wait for that run, and read the draft again;
+   4. run `release.yml` with the summary and the approved `version`; the workflow fails
+      without publishing if release-drafter would publish another version;
    5. verify that the tag and the published release exist, and report the links.
 
    It never publishes without the user's OK for that release.
@@ -244,8 +246,10 @@ re-installing a tag would wipe unreleased work. Each run:
 5. **A human-reviewer runbook** (as in #48), for Iris:
    `docs/superpowers/test-kits/2026-10-31-consumer-kit-live-e2e-kit.md`. It covers:
    - the drift check failing on a local edit;
-   - a nightly update PR in a scratch repo, without a token;
-   - cutting a test release in a scratch repo.
+   - a nightly update PR in a scratch repo, without a token (and, optionally, with
+     `SKILLS_UPDATE_TOKEN`, where the PR's own `pull_request` CI runs);
+   - cutting a test release in a scratch repo, including a wrong `version` that fails
+     without publishing.
 
    It must never use `git pull` on a stack branch (`references/stacked-prs.md`).
 

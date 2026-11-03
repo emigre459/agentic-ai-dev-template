@@ -49,7 +49,7 @@ Then prove the lint actually guards something. Delete one skill's preflight line
 re-run:
 
 ```bash
-sed -i.bak '/Repo config first/d' .agents/skills/upgrade-deps/SKILL.md
+sed -i.bak '/^\*\*Repo config first/d' .agents/skills/upgrade-deps/SKILL.md
 uv run pytest tests/template/test_skill_extension_points.py -q
 mv .agents/skills/upgrade-deps/SKILL.md.bak .agents/skills/upgrade-deps/SKILL.md
 git status --short
