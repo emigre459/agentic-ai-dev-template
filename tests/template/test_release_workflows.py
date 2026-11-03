@@ -39,12 +39,26 @@ def test_release_drafter_defaults_to_patch_with_label_overrides() -> None:
     config = yaml.safe_load((_GITHUB / "release-drafter.yml").read_text())
     assert config["name-template"] == "v$RESOLVED_VERSION"
     assert config["tag-template"] == "v$RESOLVED_VERSION"
-    assert config["template"] == "$CHANGES"
+    # The publish workflow's `header` is glued to the template with no separator,
+    # so the template itself must open with a blank line.
+    assert config["template"].startswith("\n\n")
+    assert "$CHANGES" in config["template"]
     resolver = config["version-resolver"]
     assert resolver["major"] == {"labels": ["major"]}
     assert resolver["minor"] == {"labels": ["minor"]}
     assert resolver["patch"] == {"labels": ["patch"]}
     assert resolver["default"] == "patch"
+
+
+def test_summary_header_leaves_first_change_on_its_own_line() -> None:
+    """release-drafter renders header + template + footer with no separator."""
+    config = yaml.safe_load((_GITHUB / "release-drafter.yml").read_text())
+    summary = "A one-paragraph summary."  # no trailing newline, like the input
+    body = summary + config["template"].replace("$CHANGES", "* Fix foo (#12)")
+    lines = body.split("\n")
+    assert lines[0] == summary
+    assert lines[1] == ""
+    assert lines[2] == "* Fix foo (#12)"
 
 
 def test_drafter_runs_only_on_push_to_main() -> None:
@@ -65,14 +79,19 @@ def test_release_requires_summary_and_publishes() -> None:
     assert "one paragraph" in summary["description"]
     assert workflow["permissions"] == {"contents": "write", "pull-requests": "read"}
 
+    # Publishing tags the release target: only ever from main, never from a
+    # branch run that would pin consumers to unmerged code.
+    (job,) = workflow["jobs"].values()
+    assert job["if"] == "github.ref == 'refs/heads/main'"
+
     step = _drafter_step(workflow)
+    assert step["with"]["commitish"] == "main"
     assert step["with"]["publish"] is True
     assert step["with"]["header"] == "${{ inputs.summary }}"
     assert step["id"]
 
     # The release is reported in the job summary, and the free-text summary input
     # is never interpolated into a shell script (script injection).
-    (job,) = workflow["jobs"].values()
     runs = [s for s in job["steps"] if "run" in s]
     assert runs, "expected a run step that writes the job summary"
     report = "\n".join(s["run"] for s in runs)
