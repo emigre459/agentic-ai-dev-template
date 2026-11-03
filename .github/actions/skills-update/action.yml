@@ -1,0 +1,86 @@
+name: Skills update PR
+description: >-
+  Update every agent skill installed with the skills CLI and open (or refresh) one
+  "Update agent skills" PR: tag-pinned skills move to their source's newest stable
+  release, branch-tracking skills to the branch tip. The branch is rebuilt on the
+  latest base each run; with no drift an open update PR is closed. The caller checks
+  the repo out (full history) and sets up Node 22; the PR never merges itself.
+inputs:
+  token:
+    description: >-
+      Token for gh and git pushes (GITHUB_TOKEN, a GitHub App token or a PAT). It
+      needs contents: write and pull-requests: write, plus actions: write when
+      dispatch-ci is "true".
+    required: true
+  dispatch-ci:
+    description: >-
+      "true" to dispatch the CI workflow on the update branch after a push or a new
+      PR. Needed with GITHUB_TOKEN, whose pushes do not trigger pull_request CI
+      normally; leave "false" with a GitHub App token or PAT.
+    required: false
+    default: "false"
+  branch:
+    description: Branch the update is committed on, rebuilt from base every run.
+    required: false
+    default: skills-update
+  base:
+    description: Branch the update PR targets.
+    required: false
+    default: main
+  ci-workflow:
+    description: Workflow file dispatched on the branch when dispatch-ci is "true".
+    required: false
+    default: ci.yml
+  labels:
+    description: Space-separated labels added to the PR (best-effort).
+    required: false
+    default: dependencies
+runs:
+  using: composite
+  steps:
+    # Copy the helper OUTSIDE the work tree first: the checkout below replaces the
+    # work tree with the base branch's content, and the helper must not vanish with it.
+    - name: Stage the PR helper outside the work tree
+      shell: bash
+      run: cp "$GITHUB_ACTION_PATH/update-pr.sh" "$RUNNER_TEMP/skills_update_pr.sh"
+
+    - name: Rebuild the update branch on the latest base
+      shell: bash
+      env:
+        BRANCH: ${{ inputs.branch }}
+        BASE: ${{ inputs.base }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git fetch origin "$BASE"
+        git fetch origin "$BRANCH" || echo "No existing $BRANCH on origin"
+        git checkout -B "$BRANCH" "origin/$BASE"
+
+    - name: Bump tag-pinned skills to their newest releases
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+        DISABLE_TELEMETRY: "1"
+      run: |
+        summary="$(node "$GITHUB_ACTION_PATH/bump-pins.mjs" --root .)"
+        echo "SKILLS_UPDATE_SUMMARY=$summary" >> "$GITHUB_ENV"
+
+    - name: Update branch-tracking skills
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        DISABLE_TELEMETRY: "1"
+      run: npx -y skills@latest update -p -y
+
+    - name: Open or refresh the update PR
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GH_CMD: gh
+        BRANCH: ${{ inputs.branch }}
+        BASE: ${{ inputs.base }}
+        DISPATCH_CI: ${{ inputs.dispatch-ci }}
+        CI_WORKFLOW: ${{ inputs.ci-workflow }}
+        PR_LABELS: ${{ inputs.labels }}
+      run: bash "$RUNNER_TEMP/skills_update_pr.sh"
