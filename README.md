@@ -240,8 +240,9 @@ npx skills add emigre459/agentic-ai-dev-template#vX.Y.Z
 ## Staying up to date
 
 The `skills update` workflow (`.github/workflows/skills-update.yml`) runs nightly,
-after any merge to `main` that changes `skills-lock.json` or a skill folder, and by
-hand from the Actions tab. It opens, or refreshes, one pull request
+after any merge to `main` that changes `skills-lock.json` (every update to a vendored
+skill rewrites it; edits to your own skills don't trigger a run), and by hand from
+the Actions tab. It opens, or refreshes, one pull request
 titled "Update agent skills" from the `skills-update` branch, labeled `dependencies`:
 
 - Skills pinned to a tag move to the newest stable release of their source (not a
