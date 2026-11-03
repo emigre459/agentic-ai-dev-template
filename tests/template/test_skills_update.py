@@ -1034,11 +1034,9 @@ def test_update_workflow_reruns_when_main_changes_the_skills() -> None:
     """
     push = _workflow("skills-update.yml")["on"]["push"]
     assert push["branches"] == ["main"]
-    assert set(push["paths"]) == {
-        "skills-lock.json",
-        ".agents/skills/**",
-        ".claude/skills/**",
-    }
+    # Only the lock: every vendored-skill update rewrites it, while a consumer's
+    # own in-repo skills share `.agents/skills/` and must not wake this job.
+    assert push["paths"] == ["skills-lock.json"]
 
 
 def test_update_workflow_skips_template() -> None:
