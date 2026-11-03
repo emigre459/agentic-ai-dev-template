@@ -257,7 +257,15 @@ def test_release_skill_gates_publish_on_user_ok() -> None:
     assert "at most one paragraph" in text
     assert "release-pin-v" in text
     # The skill never merges and never publishes without the user's OK.
-    assert "never" in text.lower()
+    assert "never publish without the user's explicit OK for that release" in text
+    assert "never merges anything" in text
+    # The summary travels as JSON on stdin through a single-quoted heredoc, never
+    # inside double quotes where the shell would expand it.
+    assert "--json <<'JSON'" in text
+    assert 'summary="' not in text
+    # The new run is found by creation time; Step 6 verifies the published tag.
+    assert "--event workflow_dispatch --json databaseId,createdAt" in text
+    assert "gh release list --exclude-drafts --limit 1 --json tagName" in text
     assert "gh run watch" in text
     assert "gh release view" in text
 
@@ -323,7 +331,22 @@ def test_readme_new_code_blocks_are_plain_ascii() -> None:
 
 def test_agents_md_mentions_release_skill_and_labels() -> None:
     text = (_REPO / "AGENTS.md").read_text()
-    assert "release" in text.split("## Skills")[1].split("## Hooks")[0]
     skills = text.split("## Skills")[1].split("## Hooks")[0]
+    assert "`release` skill" in skills
     assert "`minor`" in skills
     assert "`major`" in skills
+
+
+def test_build_from_issue_has_no_no_release_bump_option() -> None:
+    text = _skill_text("build-from-issue")
+    assert "no release" not in text
+    assert "still counts as a patch" in text
+
+
+def test_readme_states_the_adoption_and_schedule_caveats() -> None:
+    readme = " ".join(_readme().split())
+    assert "On public repositories, GitHub disables scheduled workflows" in readme
+    assert "not necessarily the newest release" in readme
+    assert "`workflow_dispatch:` trigger" in readme
+    assert "`ci-workflow:`" in readme
+    assert "`merge_group`" in readme
