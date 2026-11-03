@@ -21,10 +21,10 @@ alongside it are "Installing the skills", "Staying up to date", "The drift check
 
 | Layer | Branch | PR | Owns |
 |-------|--------|----|------|
-| L1 | `49-consumer-kit` | `<L1-PR>` | `skills-lock.json`, the drift action and `skills-lock.mjs`, `make init` pinning, the required `skills drift` check |
-| L2 | `49-l2-update-pr` | `<L2-PR>` | the nightly update: `skills-update.yml`, the `skills-update` action, `bump-pins.mjs`, `update-pr.sh` |
-| L3 | `49-l3-releases` | `<L3-PR>` | `release-drafter.yml` and its workflow, `release.yml`, the `patch`/`minor`/`major` labels, `CHANGELOG.md` deleted |
-| L4 | `49-l4-release-agent` | `<L4-PR>` | the `release` skill, `build-from-issue` bump suggestions, README, `AGENTS.md`, this runbook |
+| L1 | `49-consumer-kit` | `59` | `skills-lock.json`, the drift action and `skills-lock.mjs`, `make init` pinning, the required `skills drift` check |
+| L2 | `49-l2-update-pr` | `60` | the nightly update: `skills-update.yml`, the `skills-update` action, `bump-pins.mjs`, `update-pr.sh` |
+| L3 | `49-l3-releases` | `61` | `release-drafter.yml` and its workflow, `release.yml`, the `patch`/`minor`/`major` labels, `CHANGELOG.md` deleted |
+| L4 | `49-l4-release-agent` | `62` | the `release` skill, `build-from-issue` bump suggestions, README, `AGENTS.md`, this runbook |
 
 Sections 4 and 5 are marked **reviewer-run**: they create a GitHub repository and run
 workflows in it, which only you should do. The agent that wrote this kit ran sections 0
@@ -59,7 +59,7 @@ Check out the top layer (it contains every layer's change). Use a fresh clone:
 ```bash
 gh repo clone emigre459/agentic-ai-dev-template consumer-kit-review
 cd consumer-kit-review
-gh pr checkout <L4-PR>
+gh pr checkout 62
 REVIEW_DIR=$PWD   # later sections come back here
 git branch --show-current
 ```
@@ -67,11 +67,11 @@ git branch --show-current
 **Expect:** the last line prints `49-l4-release-agent`.
 
 **If not:** `gh pr checkout` fails with "no pull requests found" when you are not in the
-clone, or `<L4-PR>` was not replaced with a number.
+clone, or `62` was not replaced with a number.
 
 The stack branches are force-pushed whenever the author restacks them, so never update
 a layer branch from the remote with a plain pull. To refresh after the author pushes,
-re-run `gh pr checkout <L4-PR> --force`, which resets the local branch to the PR head.
+re-run `gh pr checkout 62 --force`, which resets the local branch to the PR head.
 
 ## 1. Automated checks
 
@@ -642,7 +642,7 @@ first, or delete the repo in its Settings page on github.com. If you made a toke
   below it. Read the layer owning the code, using the table at the top.
 - **Comments go on the layer that owns the code,** even when you saw the problem while
   running the top layer. The author fixes it there and restacks.
-- **Don't merge from a lower layer.** The stack lands from the top PR (`<L4-PR>`), which
+- **Don't merge from a lower layer.** The stack lands from the top PR (`62`), which
   brings the layers below it. Each layer must be green on its own before that.
 - To see one layer's diff locally, compare it with the branch below it:
 
