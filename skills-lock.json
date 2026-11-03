@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "skills": {
+    "build-from-issue": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/build-from-issue/SKILL.md",
+      "computedHash": "c1fe6df12b4aa530b4b71ad748fe26b33c82812bd09815502386a406b65ac4b6"
+    },
+    "clean-up-kanban": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/clean-up-kanban/SKILL.md",
+      "computedHash": "d62aef7cbdd2b4d8abe1722692aacfaecec1ecdfb79da2656ee8046d9ca5f1e1"
+    },
+    "explain-diff": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/explain-diff/SKILL.md",
+      "computedHash": "f0d613f4b6de78c23679f866cf4807163203a26f5cc3c1616d29734a16a555fe"
+    },
+    "explain-diff-merge-review": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/explain-diff-merge-review/SKILL.md",
+      "computedHash": "a95d19d178029d3e28a3d55a607b06bb116df3b7dc643ad1b42888f8ae9eb64e"
+    },
+    "plan-issues": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/plan-issues/SKILL.md",
+      "computedHash": "c83b33ef993da5e90fd05046f801524c22b2104724859522fbee3f3d6a9d351c"
+    },
+    "pr-check": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/pr-check/SKILL.md",
+      "computedHash": "c9c87fdc7474a5d67282a377f480225b6adc8eb534d12eedc2f36892454f294c"
+    },
+    "resolve-pr-concerns": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/resolve-pr-concerns/SKILL.md",
+      "computedHash": "0b91eaca1921c50cd6762d1b7ded0708feea7ca71ef11f14ee9a9353fe8d8147"
+    },
+    "review-skill": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/review-skill/SKILL.md",
+      "computedHash": "996d54cb4e6e235abca78d3aaedaeaa858e6a057801d6fd628ca8272927d4b8b"
+    },
+    "run-tests": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/run-tests/SKILL.md",
+      "computedHash": "b54d9c7888aab0b0d073c60fdffbc7a3fc2a2bf0c794dba87975e58d1f658991"
+    },
+    "upgrade-deps": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/upgrade-deps/SKILL.md",
+      "computedHash": "b6ecb367d073ac6cefb9934e4e1054ce7b2722df8844ae97bb46c88e6fe2b766"
+    }
+  }
+}
