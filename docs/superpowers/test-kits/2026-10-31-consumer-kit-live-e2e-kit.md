@@ -43,6 +43,10 @@ gh auth status
 
 **Expect:** `node` prints `v22` or higher; `gh auth status` says you are logged in.
 
+Sections 4 and 5 push `.github/workflows/` files. If your git remotes use HTTPS, the
+token needs the `workflow` scope or the push is rejected: run
+`gh auth refresh -s workflow` now. (SSH remotes don't need it.)
+
 Optional: the `gh stack` extension gives you `gh stack view` and `gh stack checkout`.
 You don't need it to review.
 
@@ -70,6 +74,9 @@ a layer branch from the remote with a plain pull. To refresh after the author pu
 re-run `gh pr checkout <L4-PR> --force`, which resets the local branch to the PR head.
 
 ## 1. Automated checks
+
+Use one terminal for the whole kit. If you open a new one, set `DISABLE_TELEMETRY`,
+`REVIEW_DIR`, `ME` and `SCRATCH` again (section 0, 4b).
 
 ```bash
 cd "$REVIEW_DIR"
@@ -355,12 +362,14 @@ Check the pin moved on the branch, and that CI was dispatched on it:
 
 ```bash
 gh api -H "Accept: application/vnd.github.raw" "repos/$ME/skills-kit-scratch/contents/skills-lock.json?ref=skills-update" | jq -c '.skills["gh-stack"] | {ref, computedHash}'
-gh run list --workflow ci.yml --branch skills-update --json event,status,conclusion
+gh run list --workflow ci.yml --branch skills-update --json event,status,conclusion,createdAt --jq '[.[] | select(.event == "workflow_dispatch")]'
 ```
 
-**Expect:** the `ref` is the newest release, and `ci.yml` has one run on `skills-update`
-with `"event":"workflow_dispatch"`, which finishes `success` (the `skills drift` job is
-green on the bumped folder). The PR page shows that check.
+**Expect:** the `ref` is the newest release, and the list holds exactly one
+`workflow_dispatch` run, which finishes `success` (the `skills drift` job is green on
+the bumped folder). The PR page shows that check. The filter matters: a `pull_request`
+run from a `GITHUB_TOKEN` push may also exist, parked in `action_required`. Ignore it;
+it is why the action dispatches CI.
 
 **If not:**
 - No PR, and the log says "GitHub Actions is not permitted to create or approve pull
@@ -376,21 +385,27 @@ green on the bumped folder). The PR page shows that check.
 
 ```bash
 gh workflow run skills-update.yml
-gh run watch "$(gh run list --workflow skills-update.yml --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
-gh pr list --head skills-update --json number
-gh run list --workflow ci.yml --branch skills-update --json event
+gh run list --workflow skills-update.yml --limit 2 --json databaseId,createdAt,status,conclusion
 ```
 
-Wait a few seconds after the first command so `gh run list` shows the new run, not the
-old one: its `createdAt` should be later than the first run's.
+Wait a few seconds after the dispatch until the first entry is a new run: its
+`createdAt` must be later than the earlier run's, and the earlier run is the one with a
+`conclusion`. Then watch it and check the results:
+
+```bash
+gh run watch "$(gh run list --workflow skills-update.yml --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
+gh pr list --head skills-update --json number
+gh run list --workflow ci.yml --branch skills-update --json event,createdAt --jq '[.[] | select(.event == "workflow_dispatch")]'
+```
 
 **Expect:** still exactly one PR, with the same number as before. The run's log says
 `origin/skills-update already holds this update; not pushing.` and
 `Branch and PR are unchanged; the existing checks remain valid.` There is still exactly
-one `ci.yml` run on the branch (no second dispatch, because nothing was pushed).
+one `workflow_dispatch` run of `ci.yml` on the branch, with the same `createdAt` as
+before (no second dispatch, because nothing was pushed).
 
 **If not:** two PRs means the PR lookup by branch name failed; look at `find_pr` in
-`.github/actions/skills-update/update-pr.sh`. A second `ci.yml` run means the "already
+`.github/actions/skills-update/update-pr.sh`. A second `workflow_dispatch` run means the "already
 holds this update" test failed and it force-pushed again.
 
 Leave the PR unmerged. Section 5 reuses this repo.
@@ -443,22 +458,32 @@ git reset --hard origin/main
 
 (The scratch repo isn't a stack, so a hard reset of its `main` is fine here.)
 
-Wait for the `release drafter` run, then read the draft:
+Wait for the `release drafter` run for the merge commit. The latest run in the list may
+still be the earlier one from 5a, so pick the run whose `headSha` is the merge commit:
 
 ```bash
-gh run watch "$(gh run list --workflow release-drafter.yml --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
-gh release list
-gh release view --json tagName,isDraft,body --jq '[.tagName, .isDraft, .body] | @tsv'
+SHA=$(git rev-parse origin/main)
+RUN=$(gh run list --workflow release-drafter.yml --json databaseId,headSha --jq ".[] | select(.headSha == \"$SHA\") | .databaseId" | head -1)
+echo "run=$RUN"
 ```
 
-**Expect:** a draft release named `v0.1.0` (a `minor` PR on a repo with no releases),
-`isDraft` true, and a body listing `Add a feature` with its PR number. An earlier draft
-from the first push (such as `v0.0.1`) may have existed; the draft should now have moved
-to `v0.1.0`. `gh release view` with no tag may not show drafts: if it errors, use
-`gh release view v0.1.0 ...` or the repo's Releases page.
+If `run=` is empty, the run hasn't started: wait a few seconds and repeat both lines.
+Then watch it and read the draft. (`gh release view` with no tag shows the latest
+*published* release, never a draft, so use the releases list.)
+
+```bash
+gh run watch "$RUN" --exit-status
+gh api "repos/$ME/skills-kit-scratch/releases" --jq '.[0] | [.tag_name, .draft]'
+gh api "repos/$ME/skills-kit-scratch/releases" --jq '.[0].body'
+```
+
+**Expect:** the first line prints `["v0.1.0",true]` (a draft named `v0.1.0`: a `minor`
+PR on a repo with no releases), and the body lists `Add a feature` with its PR number.
+An earlier draft from the first push (such as `v0.0.1`) may have existed; the draft
+should now have moved to `v0.1.0`.
 
 **If not:** a `v0.0.1` draft after the minor PR means the label was not read: check
-`gh pr view 1 --json labels` shows `minor`, and that the label name is exactly lowercase
+`gh pr view scratch-feature --json labels` shows `minor`, and that the label name is exactly lowercase
 (the config's `version-resolver` matches the names `major`, `minor`, `patch`). No draft
 at all means the `release drafter` run failed: open it with `gh run view --log-failed`.
 
@@ -469,16 +494,20 @@ git push origin main:refs/heads/scratch-branch
 echo '{"summary": "This must not publish."}' | gh workflow run release.yml --ref scratch-branch --json
 ```
 
-Wait for the run, then look at it:
+Wait a few seconds for the run to appear, then look at it and its jobs:
 
 ```bash
-gh run list --workflow release.yml --limit 1 --json status,conclusion,headBranch
+gh run list --workflow release.yml --branch scratch-branch --json databaseId,status,conclusion
+gh run view "$(gh run list --workflow release.yml --branch scratch-branch --limit 1 --json databaseId --jq '.[0].databaseId')" --json jobs --jq '.jobs[] | [.name, .status, .conclusion]'
 gh release list
 ```
 
-**Expect:** the run on `scratch-branch` ends `"conclusion":"skipped"`, and the release
-list still shows only the draft `v0.1.0`; no `v0.1.0` tag. (A tag created from a branch
-would pin consumers to unmerged code.)
+**Expect:** the run on `scratch-branch` is not a `success`: either the run's conclusion
+is `skipped`, or the job list shows `publish release` with conclusion `skipped` (the
+exact run-level value for a skipped-by-`if:` job is the less certain part, so judge by
+the job). The release list still shows only the draft `v0.1.0`, no published release
+and no `v0.1.0` tag. (A tag created from a branch would pin consumers to unmerged
+code.)
 
 **If not:** a published release, or a `success` run, means the `if: github.ref ==
 'refs/heads/main'` guard in `.github/workflows/release.yml` is missing or wrong.
@@ -492,7 +521,8 @@ echo '{"summary": "Adds the first scratch feature, to check the release flow."}'
 Wait a few seconds, then watch the run:
 
 ```bash
-gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
+gh run list --workflow release.yml --branch main --json databaseId,status,createdAt
+gh run watch "$(gh run list --workflow release.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
 gh release view v0.1.0 --json tagName,isDraft,body --jq '[.tagName, .isDraft] | @tsv'
 gh release view v0.1.0 --json body --jq .body
 git ls-remote --tags origin v0.1.0
@@ -538,7 +568,7 @@ first, or delete the repo in its Settings page on github.com.
 ```bash
 cd "$REVIEW_DIR"
 git fetch origin 49-consumer-kit 49-l2-update-pr 49-l3-releases 49-l4-release-agent
-git diff --stat origin/main origin/49-consumer-kit
+git diff --stat origin/main...origin/49-consumer-kit
 git diff --stat origin/49-consumer-kit origin/49-l2-update-pr
 git diff --stat origin/49-l2-update-pr origin/49-l3-releases
 git diff --stat origin/49-l3-releases origin/49-l4-release-agent
