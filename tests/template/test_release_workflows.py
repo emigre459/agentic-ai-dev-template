@@ -247,3 +247,16 @@ def test_build_from_issue_mentions_release_check() -> None:
         assert bump in text
     # With no published release the first one is suggested; the user can correct it.
     assert "v0.1.0" in text
+
+
+def test_release_skill_gates_publish_on_user_ok() -> None:
+    text = _skill_text("release")
+    assert "AskUserQuestion" in text
+    assert "release.yml" in text
+    assert "make skills_lock TAG=" in text
+    assert "at most one paragraph" in text
+    assert "release-pin-v" in text
+    # The skill never merges and never publishes without the user's OK.
+    assert "never" in text.lower()
+    assert "gh run watch" in text
+    assert "gh release view" in text
