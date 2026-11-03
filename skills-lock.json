@@ -41,7 +41,7 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/release/SKILL.md",
-      "computedHash": "37e32fb225227b284e0b8d19a05fb597a22f6271d4c8d5eba773c897a92b5767"
+      "computedHash": "a9d8be0ea59aa8131795c69574d3868e82f01aafbb2925ca1737ad0ca66aead9"
     },
     "resolve-pr-concerns": {
       "source": "emigre459/agentic-ai-dev-template",

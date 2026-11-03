@@ -22,11 +22,20 @@ gh api repos/{owner}/{repo}/releases --jq '[.[]|select(.draft)][0]'
 
 ## Step 2: Show what would ship
 
-Show the draft's version (`tag_name`) and the merged-PR list in its body. If the version is not the one the user wants, do not publish. Relabel the PRs that should change the bump (`gh pr edit <n> --add-label minor`, or `major`; drop a label with `--remove-label`), wait for the `release drafter` workflow to re-draft on `main`, and read the draft again.
+Show the draft's version (`tag_name`) and the merged-PR list in its body. If the version is not the one the user wants, do not publish. Relabel the PRs that should change the bump (`gh pr edit <n> --add-label minor`, or `major`; drop a label with `--remove-label`). A label change is not a push, so nothing re-drafts on its own: record the time, re-run the drafter on `main`, and wait for that new run:
+
+```bash
+date -u +%Y-%m-%dT%H:%M:%SZ
+gh workflow run release-drafter.yml --ref main
+gh run list --workflow release-drafter.yml --event workflow_dispatch --json databaseId,createdAt
+gh run watch <run-id> --exit-status
+```
+
+Take the run whose `createdAt` is after the recorded time (list again after a few seconds if none is yet), not an older run. Once it succeeds, go back to Step 1 and read the draft again.
 
 ## Step 3: Draft the summary
 
-Write **at most one paragraph** on what the release delivers, for a reader who will not read the PR list: the outcome, not the file changes. It becomes the opening of the release notes, above the PR list. Do not restate every PR.
+Write **at most one paragraph** on what the release delivers, for a reader who will not read the PR list: the outcome, not the file changes. It becomes the opening of the release notes, above the PR list. Do not restate every PR. Use no `$` in it: release-drafter substitutes `$VARIABLES` such as `$RESOLVED_VERSION` in the header, so a `$word` could be replaced in the published text.
 
 ## Step 4: Get the user's explicit OK
 
@@ -34,22 +43,22 @@ Use `AskUserQuestion` to show the version and the paragraph exactly as they will
 
 ## Step 5: Publish
 
-Record the time just before dispatching, then send the summary as JSON on stdin. A single-quoted heredoc keeps the shell from running backticks or expanding `$` in the paragraph, so the published text is exactly what the user approved:
+Record the time just before dispatching, then send the summary and the version as JSON on stdin. `version` is the exact version the user approved in Step 4 (for example `v0.2.0`), never one re-read afterwards. A single-quoted heredoc keeps the shell from running backticks or expanding `$` in the paragraph, so it reaches the workflow as approved:
 
 ```bash
 date -u +%Y-%m-%dT%H:%M:%SZ
 gh workflow run release.yml --ref main --json <<'JSON'
-{"summary": "<paragraph, JSON-escaped: \" for a quote, \n for a line break>"}
+{"summary": "<paragraph, JSON-escaped: \" for a quote, \n for a line break>", "version": "<approved vX.Y.Z>"}
 JSON
 gh run list --workflow release.yml --event workflow_dispatch --json databaseId,createdAt
 gh run watch <run-id> --exit-status
 ```
 
-Take the run whose `createdAt` is after the recorded time: a run from before the dispatch (or from someone else) can sit in the list. If none is that recent yet, list again after a few seconds. The workflow does nothing unless it runs on `main`. If the run fails, report the failure and stop: do not retry the publish unasked.
+Take the run whose `createdAt` is after the recorded time: a run from before the dispatch (or from someone else) can sit in the list. If none is that recent yet, list again after a few seconds. The workflow does nothing unless it runs on `main`, and it fails without publishing when release-drafter would publish a version other than `version` (a label changed since Step 2). If the run fails, report the failure and stop: do not retry the publish unasked. After a version mismatch, go back to Step 1, and get a fresh OK before publishing.
 
 ## Step 6: Verify and report
 
-Read the tag that was actually published; do not assume Step 1's version, since the drafter may have re-resolved it before the run:
+Read the tag that was actually published; do not assume it, even though the workflow refuses to publish another version:
 
 ```bash
 gh release list --exclude-drafts --limit 1 --json tagName
@@ -71,6 +80,7 @@ Offer it to the user with `AskUserQuestion`; do it only on their OK, never autom
 ## Red flags
 
 - Publishing, or calling the workflow, before the user's explicit OK on the version and the paragraph.
+- Sending a `version` other than the one the user approved, or reading the draft after relabeling without first re-running the drafter.
 - Publishing from a branch other than `main`, or hand-editing the release to change its version.
 - A summary of more than one paragraph, or one that lists every PR.
 - Merging the re-pin PR, or opening it without the user's OK.
