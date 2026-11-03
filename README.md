@@ -239,14 +239,17 @@ npx skills add emigre459/agentic-ai-dev-template#vX.Y.Z
 
 ## Staying up to date
 
-The `skills update` workflow (`.github/workflows/skills-update.yml`) runs nightly and
-can be started by hand from the Actions tab. It opens, or refreshes, one pull request
+The `skills update` workflow (`.github/workflows/skills-update.yml`) runs nightly,
+after any merge to `main` that changes `skills-lock.json` or a skill folder, and by
+hand from the Actions tab. It opens, or refreshes, one pull request
 titled "Update agent skills" from the `skills-update` branch, labeled `dependencies`:
 
 - Skills pinned to a tag move to the newest stable release of their source (not a
   draft, not a pre-release, tagged `vX.Y.Z`). Skills with no tag follow their branch.
 - The branch is rebuilt on the latest `main` each run. With nothing to update, an
-  open update PR is closed.
+  open update PR is closed, so one made stale by another merge closes within minutes,
+  the way a superseded Dependabot PR does. When another merge covers only some of
+  the updates, the PR shrinks to the rest.
 - It never merges itself. Review the diff and merge it like any other PR.
 
 Which identity opens the PR decides whether its CI runs. Set one of these as a
