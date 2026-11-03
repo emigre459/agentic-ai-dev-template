@@ -70,9 +70,12 @@ build_body() {
 body="$(build_body)" || exit 1
 
 # --- Find the open update PR ("pr list", not "pr view": it fails in Actions) --
+# --head matches the branch NAME only, so a PR from a fork's same-named branch
+# would match too; keep only PRs from this repository.
 find_pr() {
   "$GH_CMD" pr list --head "$BRANCH" --base "$BASE" --state open \
-    --json number --jq '.[0].number // ""'
+    --json number,isCrossRepository \
+    --jq '[.[] | select(.isCrossRepository | not)][0].number // ""'
 }
 
 # --- 1. Commit the drift -----------------------------------------------------
