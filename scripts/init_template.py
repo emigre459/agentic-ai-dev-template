@@ -488,13 +488,28 @@ def _read_skills_lock(root: Path) -> dict[str, Any] | None:
     return lock
 
 
+_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_REF_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+_SOURCE_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _check_ref(ref: str) -> str:
+    """Return ``ref`` if it is a release tag (``vX.Y.Z``); raise RuntimeError if not."""
+    if not isinstance(ref, str) or not _REF_RE.fullmatch(ref):
+        raise RuntimeError(
+            f"{_LOCK_FILE} has ref {ref!r}, which is not a release tag like v1.2.3"
+        )
+    return ref
+
+
 def _lock_ref(lock: dict[str, Any] | None) -> str | None:
     """Return the release ref every template entry of ``lock`` is pinned to.
 
     Raises
     ------
     RuntimeError
-        If the entries are pinned to different refs (or only some have one).
+        If the entries are pinned to different refs (or only some have one), or
+        the ref is not a ``vX.Y.Z`` tag.
     """
     if lock is None:
         return None
@@ -504,32 +519,70 @@ def _lock_ref(lock: dict[str, Any] | None) -> str | None:
             f"{_LOCK_FILE} entries disagree on `ref` ({sorted(map(str, refs))}); "
             "every template skill must be pinned to the same release."
         )
-    return next(iter(refs), None)
+    ref = next(iter(refs), None)
+    return None if ref is None else _check_ref(ref)
 
 
-def _extract_skill_at_ref(
-    root: Path,
+def _pinned_skills(lock: dict[str, Any]) -> dict[tuple[str, str], list[str]]:
+    """Group the lock's ``ref``-bearing skill names by ``(source, ref)``, validated.
+
+    Raises
+    ------
+    RuntimeError
+        If a pinned entry's name, source or ref is not a plain, safe value (they
+        become a path and a URL, so a hostile lock must not reach either).
+    """
+    pinned: dict[tuple[str, str], list[str]] = {}
+    for name, entry in lock.get("skills", {}).items():
+        if not entry.get("ref"):
+            continue
+        source = entry.get("source")
+        if not _NAME_RE.fullmatch(name) or name in (".", ".."):
+            raise RuntimeError(f"{_LOCK_FILE} has an invalid skill name: {name!r}")
+        if not isinstance(source, str) or not _SOURCE_RE.fullmatch(source):
+            raise RuntimeError(f"{_LOCK_FILE}: skill {name!r} has invalid source")
+        pinned.setdefault((source, _check_ref(entry["ref"])), []).append(name)
+    return pinned
+
+
+def _git_error(source: str, ref: str, exc: Exception) -> RuntimeError:
+    """Build the error for a failed git step while fetching ``source`` at ``ref``."""
+    if isinstance(exc, FileNotFoundError):
+        return RuntimeError(
+            f"`make init` needs git on PATH to fetch {source} at {ref} "
+            "(the skills ship pinned to that release), and git is not installed."
+        )
+    detail = str(getattr(exc, "stderr", "") or exc).strip()
+    return RuntimeError(
+        f"`make init` needs network access to github.com to fetch {source} at "
+        f"{ref} (the skills ship pinned to that release), and git could not: "
+        f"{detail}"
+    )
+
+
+def _extract_skill(
     source: str,
     ref: str,
     name: str,
+    repo: Path,
     scratch: Path,
     runner: Callable[..., Any],
 ) -> Path:
-    """Extract ``.agents/skills/<name>`` as tagged at ``ref`` into ``scratch``.
+    """Extract ``.agents/skills/<name>`` from ``repo``'s ``FETCH_HEAD`` into ``scratch``.
 
-    ``git fetch`` and ``git archive`` run through ``runner``; the tar is unpacked
-    with the ``data`` extraction filter. Returns the extracted skill folder.
+    The tar is unpacked with the ``data`` extraction filter. Returns the extracted
+    skill folder.
     """
     tar_path = scratch / f"{name}.tar"
     skill_path = (_SKILLS_DIR / name).as_posix()
     try:
         runner(
-            ["git", "-C", str(root), "archive", "--format=tar", "-o", str(tar_path)]
+            ["git", "-C", str(repo), "archive", "--format=tar", "-o", str(tar_path)]
             + ["FETCH_HEAD", skill_path],
             check=True,
         )
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        raise _network_error(source, ref, exc) from exc
+        raise _git_error(source, ref, exc) from exc
     out = scratch / f"{name}-extracted"
     out.mkdir()
     with tarfile.open(tar_path) as tar:
@@ -542,86 +595,85 @@ def _extract_skill_at_ref(
     return extracted
 
 
-def _network_error(source: str, ref: str, exc: Exception) -> RuntimeError:
-    """Build the error for a failed fetch/archive of ``source`` at ``ref``."""
-    detail = str(getattr(exc, "stderr", "") or exc).strip()
-    return RuntimeError(
-        f"`make init` needs network access to github.com to fetch {source} at "
-        f"{ref} (the skills ship pinned to that release), and git could not: "
-        f"{detail}"
-    )
-
-
-def _pin_skills_to_release(
+def _fetch_pinned_skills(
     root: Path,
+    lock: dict[str, Any] | None,
+    scratch: Path,
     runner: Callable[..., Any],
-    lock: dict[str, Any] | None = None,
-) -> None:
-    """Replace the vendored skills with the lock's tagged release, hash-verified.
+) -> dict[str, Path]:
+    """Fetch, extract and hash-verify every ``ref``-pinned skill; touch nothing in ``root``.
 
-    For every lock entry that has a ``ref``: fetch that tag from the entry's
-    ``source``, extract ``.agents/skills/<name>`` from it, and require its hash to
-    equal ``computedHash``. Only once every skill verified are the folders
-    replaced, so a failure leaves the tree untouched. Entries without a ``ref``
-    (before the first release) and a missing lock file leave everything alone.
+    For each lock entry that has a ``ref``: fetch that tag from the entry's
+    ``source`` into a throwaway git repository under ``scratch`` (never ``root``'s
+    own ``.git``, which a shallow fetch could truncate), extract
+    ``.agents/skills/<name>`` from it, and require its hash to equal
+    ``computedHash``. Entries without a ``ref`` (before the first release) and a
+    missing lock file yield nothing. ``root`` is only read (for the hash script),
+    so a failure here leaves the tree exactly as it was and ``make init`` can be
+    retried.
 
     Parameters
     ----------
     root
-        Repository root being initialized (must be a git repository).
+        Repository root being initialized.
+    lock
+        Parsed ``skills-lock.json``, or None.
+    scratch
+        Existing directory for the fetched repo and extracted trees; the returned
+        folders live in it, so it must outlive their use.
     runner
         Subprocess-compatible command runner, by default ``subprocess.run``.
-    lock
-        Already-parsed lock; read from ``root`` when omitted.
+
+    Returns
+    -------
+    dict[str, Path]
+        Verified extracted skill folder per skill name.
 
     Raises
     ------
     RuntimeError
-        If git cannot fetch the release (no network), a skill is missing from it,
-        or a skill's hash differs from the lock's.
+        If git is missing or cannot fetch the release (no network), a skill is
+        missing from it, or a skill's hash differs from the lock's.
     """
     if lock is None:
-        lock = _read_skills_lock(root)
-    if lock is None:
-        return
-    pinned: dict[tuple[str, str], list[str]] = {}
-    for name, entry in lock.get("skills", {}).items():
-        if entry.get("ref"):
-            pinned.setdefault((entry["source"], entry["ref"]), []).append(name)
+        return {}
+    pinned = _pinned_skills(lock)
     if not pinned:
-        return
+        return {}
+    repo = scratch / "src"
+    verified: dict[str, Path] = {}
+    for (source, ref), names in pinned.items():
+        try:
+            runner(["git", "init", "-q", str(repo)], check=True)
+            runner(
+                ["git", "-C", str(repo), "fetch", "--depth", "1"]
+                + [f"https://github.com/{source}.git", "tag", ref],
+                check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            raise _git_error(source, ref, exc) from exc
+        for name in names:
+            extracted = _extract_skill(source, ref, name, repo, scratch, runner)
+            expected = lock["skills"][name]["computedHash"]
+            actual = _skill_hash(root, extracted, runner)
+            if actual != expected:
+                raise RuntimeError(
+                    f"skill {name!r} at {source}@{ref} hashes to {actual}, but "
+                    f"{_LOCK_FILE} has {expected}; refusing to initialize "
+                    "from a release that does not match the lock."
+                )
+            verified[name] = extracted
+    return verified
 
-    with tempfile.TemporaryDirectory(prefix="init-skills-") as tmp:
-        scratch = Path(tmp)
-        verified: dict[str, Path] = {}
-        for (source, ref), names in pinned.items():
-            try:
-                runner(
-                    ["git", "-C", str(root), "fetch", "--depth", "1"]
-                    + [f"https://github.com/{source}.git", "tag", ref],
-                    check=True,
-                )
-            except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-                raise _network_error(source, ref, exc) from exc
-            for name in names:
-                extracted = _extract_skill_at_ref(
-                    root, source, ref, name, scratch, runner
-                )
-                expected = lock["skills"][name]["computedHash"]
-                actual = _skill_hash(root, extracted, runner)
-                if actual != expected:
-                    raise RuntimeError(
-                        f"skill {name!r} at {source}@{ref} hashes to {actual}, but "
-                        f"{_LOCK_FILE} has {expected}; refusing to initialize "
-                        "from a release that does not match the lock."
-                    )
-                verified[name] = extracted
-        for name, extracted in verified.items():
-            dest = root / _SKILLS_DIR / name
-            if dest.is_dir():
-                shutil.rmtree(dest)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(extracted), str(dest))
+
+def _install_pinned_skills(root: Path, verified: dict[str, Path]) -> None:
+    """Replace ``.agents/skills/<name>`` in ``root`` with each verified folder."""
+    for name, extracted in verified.items():
+        dest = root / _SKILLS_DIR / name
+        if dest.is_dir():
+            shutil.rmtree(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(extracted), str(dest))
 
 
 def _point_actions_at_release(root: Path, ref: str | None) -> None:
@@ -673,6 +725,43 @@ def initialize(
     if stack == "python":
         python_package_name(project_name)
 
+    # 1b. Fetch and verify the pinned skills release BEFORE any mutation. Offline,
+    # a hash mismatch or a missing git then fails here with the tree untouched
+    # (stacks/ still present), so `make init` can simply be retried. The verified
+    # trees live in a scratch dir until they are swapped in below.
+    lock = _read_skills_lock(root)
+    ref = _lock_ref(lock)  # validates before anything is fetched
+    with tempfile.TemporaryDirectory(prefix="init-skills-") as scratch:
+        verified = _fetch_pinned_skills(root, lock, Path(scratch), runner)
+        _collapse_template(
+            root,
+            stack,
+            project_name,
+            description,
+            apply_settings,
+            repo,
+            runner,
+            verified,
+            ref,
+        )
+
+
+def _collapse_template(
+    root: Path,
+    stack: str,
+    project_name: str,
+    description: str,
+    apply_settings: bool,
+    repo: str | None,
+    runner: Callable[..., object],
+    verified_skills: dict[str, Path],
+    ref: str | None,
+) -> None:
+    """Promote ``stack``, rewrite generated files, install skills, self-destruct.
+
+    The mutating half of :func:`initialize`; everything that can fail for lack of
+    network or git has already happened by the time this runs.
+    """
     # 2. Promote chosen stack to root, then 3. prune.
     _promote(root, stack)
     shutil.rmtree(root / "stacks")
@@ -723,13 +812,11 @@ def initialize(
     _substitute_manifest_name(root, project_name)
 
     # 4b. Start on the template's pinned skills release (layer L1 of the consumer
-    # kit): swap in the tagged skill folders, then point workflows at the released
-    # composite actions. Both are no-ops before the first release (no `ref`). They
-    # come before settings and self-destruct so a failure (e.g. no network) leaves
-    # the machinery in place for a retry.
-    lock = _read_skills_lock(root)
-    ref = _lock_ref(lock)  # validates before anything is fetched
-    _pin_skills_to_release(root, runner, lock)
+    # kit): swap in the already-verified tagged skill folders, then point workflows
+    # at the released composite actions. Both are no-ops before the first release
+    # (no `ref`). They come before settings and self-destruct so the machinery is
+    # still present if a later step fails.
+    _install_pinned_skills(root, verified_skills)
     _point_actions_at_release(root, ref)
 
     # 5. Apply repo settings BEFORE self-destruct, so that if the apply step fails
