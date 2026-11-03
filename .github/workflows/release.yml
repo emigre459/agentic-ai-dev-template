@@ -23,11 +23,15 @@ concurrency:
 jobs:
   release:
     name: publish release
+    # Publishing creates the tag: only ever from main, never from a branch run
+    # that would pin consumers to unmerged code.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: release-drafter/release-drafter@v7
         id: drafter
         with:
+          commitish: main
           publish: true
           header: ${{ inputs.summary }}
       # The summary is free text: it reaches the shell only through env, never
@@ -43,5 +47,5 @@ jobs:
             echo
             echo "${HTML_URL}"
             echo
-            echo "${SUMMARY}"
+            printf '%s\n' "${SUMMARY}"
           } >> "$GITHUB_STEP_SUMMARY"

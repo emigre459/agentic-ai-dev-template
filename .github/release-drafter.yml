@@ -14,4 +14,6 @@ version-resolver:
   patch:
     labels: [patch]
   default: patch
-template: '$CHANGES'
+# release.yml passes the summary as `header`, which release-drafter prepends with
+# no separator: the leading blank line keeps the first change off the summary's line.
+template: "\n\n$CHANGES"
