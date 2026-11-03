@@ -93,7 +93,7 @@ comment rather than a code finding.
    a no-tracked-file-is-gitignored invariant); the reviewer is the SECONDARY signal for the
    fuzzier cases that gate can't express. Report:
    - **A new file at the repo root** that isn't one of the established root files
-     (build/config, README, CHANGELOG, lockfiles) — root clutter from scratch handoffs
+     (build/config, README, lockfiles) — root clutter from scratch handoffs
      / specs / runners is exactly what leaks.
    - **A file added to an "off" location for its kind** anywhere in the diff — a scratch
      spec or handoff inside a source package, a one-off script outside `scripts/`.

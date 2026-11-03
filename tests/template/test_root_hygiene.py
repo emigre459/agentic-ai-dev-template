@@ -28,7 +28,6 @@ ALLOWED_ROOT_FILES = frozenset(
         ".mcp.json",
         ".python-version",
         "AGENTS.md",
-        "CHANGELOG.md",
         "CLAUDE.md",
         "LICENSE",  # GitHub license detection requires it at the root
         "Makefile",

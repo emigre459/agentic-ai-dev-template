@@ -1,0 +1,30 @@
+name: release drafter
+
+# Keeps one rolling draft GitHub Release up to date from merged PRs. It only
+# drafts: publishing is by hand through release.yml. Runs on push to main, and by
+# hand (`gh workflow run release-drafter.yml --ref main`) to re-draft after a
+# merged PR's bump label changes, which is not a push. No pull_request or
+# merge_group trigger and no required status.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+# Two quick merges must not race to update the same draft.
+concurrency:
+  group: release-drafter
+  cancel-in-progress: false
+
+jobs:
+  update-draft:
+    name: update release draft
+    # A dispatch from another branch would draft from that branch: main only.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: release-drafter/release-drafter@v7

@@ -200,10 +200,13 @@ re-installing a tag would wipe unreleased work. Each run:
    - `tag-template: v$RESOLVED_VERSION`, `name-template: v$RESOLVED_VERSION`;
    - a body of `$CHANGES` (the merged-PR list).
 2. **`.github/workflows/release-drafter.yml`** runs on `push` to `main` (never
-   `merge_group`) and keeps the draft current.
-3. **`.github/workflows/release.yml`** runs on `workflow_dispatch` with a required
-   `summary` input. It runs release-drafter with `publish: true` and the summary as the
-   release `header`, which creates `vX.Y.Z` and the published release.
+   `merge_group`) and keeps the draft current. It also has `workflow_dispatch`
+   (main only), so a relabeled merged PR can be re-drafted by hand.
+3. **`.github/workflows/release.yml`** runs on `workflow_dispatch` with required
+   `summary` and `version` inputs. A release-drafter `dry-run` resolves the version
+   first, and the run fails without publishing unless it equals `version`. Then it
+   runs release-drafter with `publish: true` and the summary as the release
+   `header`, which creates `vX.Y.Z` and the published release.
 4. **Labels.** `minor` and `major` (and `patch`, for explicitness) are created in the
    repo-settings bootstrap phase, so new repos have them. The template repo gets them
    the same way.
