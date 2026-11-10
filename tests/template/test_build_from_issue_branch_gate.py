@@ -45,7 +45,9 @@ def test_gate_sits_between_step_1_and_step_1b() -> None:
 
 def test_workflow_diagram_routes_step_1_through_the_gate() -> None:
     diagram = _text().split("```dot", 1)[1].split("```", 1)[0]
-    node = re.search(r'^\s*"(1a\. Branch-name gate[^"]*)" \[shape=box\];', diagram, re.M)
+    node = re.search(
+        r'^\s*"(1a\. Branch-name gate[^"]*)" \[shape=box\];', diagram, re.MULTILINE
+    )
     assert node, "the diagram needs a '1a. Branch-name gate' node"
     name = node.group(1)
     assert f'"1. Fetch issue" -> "{name}"' in diagram
@@ -142,7 +144,9 @@ def test_readme_config_example_shows_a_branch_pattern() -> None:
     lines: list[str] = []
     in_fence = False
     # The section ends at the next H2 outside a code fence (its example holds one).
-    for line in readme.split("### `.agents/skill-config/<skill>.md`", 1)[1].splitlines():
+    for line in readme.split("### `.agents/skill-config/<skill>.md`", 1)[
+        1
+    ].splitlines():
         if line.startswith("```"):
             in_fence = not in_fence
         elif line.startswith("## ") and not in_fence:
