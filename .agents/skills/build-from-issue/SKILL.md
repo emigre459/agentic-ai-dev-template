@@ -30,6 +30,7 @@ digraph build_from_issue {
     "0. Propose next\n(no-target mode: ready set + in-flight + assignees)" [shape=box];
     "Target issue known?" [shape=diamond];
     "1. Fetch issue" [shape=box];
+    "1a. Branch-name gate\n(repo branch pattern; rename a fresh\nlauncher-named workspace in place)" [shape=box];
     "1b. Issue matches current branch?" [shape=diamond];
     "1c. Mismatch gate (AskUserQuestion):\nworktree off main + link, or this branch?" [shape=diamond];
     "1d. gh issue develop → linked branch\n+ superpowers:using-git-worktrees" [shape=box];
@@ -61,7 +62,7 @@ digraph build_from_issue {
     "Target issue known?" -> "1. Fetch issue" [label="yes"];
     "Target issue known?" -> "0. Propose next\n(no-target mode: ready set + in-flight + assignees)" [label="no"];
     "0. Propose next\n(no-target mode: ready set + in-flight + assignees)" -> "1. Fetch issue" [label="user picks"];
-    "1. Fetch issue" -> "1b. Issue matches current branch?";
+    "1. Fetch issue" -> "1a. Branch-name gate\n(repo branch pattern; rename a fresh\nlauncher-named workspace in place)" -> "1b. Issue matches current branch?";
     "1b. Issue matches current branch?" -> "1f. Parent-epic context + repo-staleness gate" [label="yes"];
     "1b. Issue matches current branch?" -> "1c. Mismatch gate (AskUserQuestion):\nworktree off main + link, or this branch?" [label="no"];
     "1c. Mismatch gate (AskUserQuestion):\nworktree off main + link, or this branch?" -> "1d. gh issue develop → linked branch\n+ superpowers:using-git-worktrees" [label="worktree"];
@@ -100,7 +101,7 @@ digraph build_from_issue {
 **Trigger:** invoked with NO issue number and none derivable from the branch (on `main`, or a non-conventional branch name). Instead of just asking for a number, compute a grounded recommendation. The logic lives in `clean-up-kanban` §7 — read it; this step is its session-start call site (Step 11b is the PR-created call site; keep them consistent).
 
 1. **Identify the invoking user**: `gh api user --jq .login`.
-2. **Gather** (per §7): open epics (Stage, epic-level blocked-by chain, body story order), each epic's ready set (GH-native blockers all closed), the in-flight map (open PRs → definite; active remote `{number}-*` branches / `gh issue develop --list` links → probable; stale branches → resume candidates; Project Status when populated), and assignees on both cards and epics.
+2. **Gather** (per §7): open epics (Stage, epic-level blocked-by chain, body story order), each epic's ready set (GH-native blockers all closed), the in-flight map (open PRs → definite; active remote branches matching the Step 1a branch pattern (by default `{number}-*`) / `gh issue develop --list` links → probable; stale branches → resume candidates; Project Status when populated), and assignees on both cards and epics.
 3. **Rank** per §7: assigned-to-invoker first → Stage → Priority → epic drain order → epic prose as tiebreaker. **Exclude** anything in-flight or assigned to another user, each exclusion grounded in its evidence ("#42: branch `42-…` pushed 2h ago by <teammate>").
 4. **Present via `AskUserQuestion`**: primary pick per unblocked epic track + the parallel-safe set (for spinning up concurrent sessions) + any resume candidates. The user picks; proceed to Step 1 with that number. **Picking a RESUME candidate** (started-and-stalled) means resuming its existing branch: Step 1d checks out the stale linked branch instead of creating a fresh one — never re-scaffold work that already has commits.
 5. If the user picks an EXCLUDED item anyway (it's their board), surface the exclusion's evidence IMMEDIATELY — at pick time, before any branch/context work — matched to WHY it was excluded:
@@ -109,7 +110,7 @@ digraph build_from_issue {
 
 ## Step 1: Fetch the Issue
 
-1. `git branch --show-current`. Call this the **current branch**; its leading number (e.g., `2-update-repo-...` → `2`) is the **branch-derived issue number** (absent on `main` or a non-conventional branch name).
+1. `git branch --show-current`. Call this the **current branch**; the issue number parsed from it per the **branch pattern** (Step 1a; by default its leading number, e.g. `2-update-repo-...` → `2`) is the **branch-derived issue number** (absent on `main` or a branch that doesn't match the pattern).
 2. Determine the **target issue number** — the issue you've actually been asked to build:
    - If the user named one explicitly (`/build-from-issue 6`, "build issue #6", an issue URL), that is the target, even when the branch carries a different number.
    - Otherwise the target is the branch-derived issue number.
@@ -125,6 +126,28 @@ digraph build_from_issue {
    Read the full body — particularly the `## Acceptance criteria` section (or whatever prose states "done"), which Step 7 will audit.
 5. If no target issue number can be determined (none given, none in the branch name), you should already have run **Step 0** (propose next) — if you somehow reached here without a target, go back and run it now rather than asking for a bare number.
 
+## Step 1a: Branch-Name Gate
+
+**The branch you commit on must match the repo's branch pattern.** This skill's own Step 0 in-flight map (`clean-up-kanban` §7) and any repo tooling that parses the issue number out of a branch name can't see a branch that doesn't match. Launchers name branches their own way (`issue-2840`, `<user>/<slug>`, `worktree-<name>` from `EnterWorktree`), so this gate catches those names before the first commit lands.
+
+1. **Resolve the pattern.** Read the `## Branch pattern` section of `.agents/skill-config/build-from-issue.md`; a branch-naming line in `AGENTS.md` wins over it (the precedence in the preflight above). With neither, the default is `{issue-number}-{kebab-case}` (e.g. `6-mcp-oauth-client-integration`; a stack layer, `6-l2-<layer-slug>`). `<N>-<kebab-title>` below stands for the resolved pattern filled in for the target issue `<N>`. Use it everywhere this skill names a branch: Step 1's number parse, Step 0's in-flight map, Step 1d's `--name` and resume lookup, the Step 1e path and stack layers (`references/stacked-prs.md`).
+2. **Fresh launcher workspace: rename in place.** If the current branch does not match the pattern and **all** of these hold, a launcher created this workspace for this task and nothing on it can be lost:
+   - it has no commits ahead of the base (`git rev-list --count origin/main..HEAD` is `0`);
+   - it has no upstream and no remote branch of that name (`git rev-parse --abbrev-ref @{upstream}` fails, `git ls-remote --heads origin <current-branch>` is empty);
+   - no PR has it as head (`gh pr list --head <current-branch> --state all` is empty).
+
+   Then skip the Step 1b mismatch gate (and its new-worktree offer: this workspace is already a fresh one off `main`). Rename the branch and link it, staying in this workspace:
+   ```bash
+   git branch -m <N>-<kebab-title>
+   gh issue develop <N> --repo <owner>/<repo> --base main --name <N>-<kebab-title>
+   git fetch origin <N>-<kebab-title> && git branch -u origin/<N>-<kebab-title>
+   git pull --ff-only    # the linked branch starts at the current main
+   gh issue develop --list <N> --repo <owner>/<repo>    # verify the link landed
+   ```
+   If the issue already has a linked branch (`gh issue develop --list <N>` is non-empty) or a remote branch matching the pattern for `<N>`, that is a resume (Step 1d's resume variant), not a fresh start: switch this workspace onto it (`git fetch origin <existing> && git switch <existing>`, safe because the launcher's branch holds no commits) instead of creating a second branch. If `git switch` refuses because another worktree has it checked out, the work is in flight there: stop and tell the user which worktree. Say in one line what you renamed or switched to; Step 1b then sees a match.
+3. **Any other non-matching branch** (it has commits, an upstream, a remote branch or a PR): don't rename silently. If it's local-only, `git branch -m <old> <new>` before the next commit and say so. If it's pushed or has a PR, its name is shared, so ask first with `AskUserQuestion`, recommending GitHub's rename API, which moves open PRs to the new name: `gh api -X POST repos/<owner>/<repo>/branches/<old>/rename -f new_name=<new>`, then locally `git branch -m <old> <new> && git fetch origin && git branch -u origin/<new>`. If the user declines, say the branch stays non-matching and that Step 0's in-flight map (and any tooling the config file names) won't see it.
+4. Branches the pattern never applies to (`main`, a detached HEAD) go straight to Step 1b, whose worktree path creates a matching branch.
+
 ## Step 1b: Branch / Issue Mismatch Gate
 
 **Trigger:** the target issue number from Step 1 does **not** match the current branch's branch-derived issue number (or the branch has none). This includes the common cases where the current branch is `main`, or carries a *different* issue's number (e.g., you're on `5-foo` but asked to build issue #6). When they match, skip straight to Step 1f.
@@ -137,12 +160,12 @@ This gate exists because a mismatch is genuinely ambiguous and only the user can
 
 - State the mismatch plainly: "You asked me to build issue #N (`<title>`), but we're on branch `<current-branch>`."
 - Options (put the recommended one first):
-  1. **"Create a worktree off main for #N (Recommended)"** — describe that it branches from `main`, names the branch per the repo convention, links it to the issue card, and leaves the current branch untouched.
+  1. **"Create a worktree off main for #N (Recommended)"** — describe that it branches from `main`, names the branch per the Step 1a pattern, links it to the issue card, and leaves the current branch untouched.
   2. **"Work on the current branch `<current-branch>`"** — proceed in place, no worktree.
 
 ### 1d. Worktree path (user chose option 1)
 
-**Resume variant (Step 0 resume candidates, or any issue with an existing linked branch):** do NOT create a new branch. Find the existing one (`gh issue develop --list <N>` or the remote `{N}-*` branch), materialize a worktree ON that branch (`superpowers:using-git-worktrees` with the existing branch — checkout, not create), pull its latest remote state, and skip to **1d step 4 below** (continue the skill inside the worktree — Steps 1f/1g/2/3 still run; only the branch-creation steps 1-3 are skipped). Creating a second branch for an issue that already has one duplicates work by construction; only do so when the user explicitly wants a parallel fresh start.
+**Resume variant (Step 0 resume candidates, or any issue with an existing linked branch):** do NOT create a new branch. Find the existing one (`gh issue develop --list <N>` or the remote branch matching the Step 1a pattern, by default `{N}-*`), materialize a worktree ON that branch (`superpowers:using-git-worktrees` with the existing branch — checkout, not create), pull its latest remote state, and skip to **1d step 4 below** (continue the skill inside the worktree — Steps 1f/1g/2/3 still run; only the branch-creation steps 1-3 are skipped). Creating a second branch for an issue that already has one duplicates work by construction; only do so when the user explicitly wants a parallel fresh start.
 
 **Fresh-start path (no existing branch):**
 
@@ -151,7 +174,7 @@ This gate exists because a mismatch is genuinely ambiguous and only the user can
    gh issue develop <N> --repo <owner>/<repo> --base main \
      --name <N>-<kebab-title>        # e.g. 6-mcp-oauth-client-integration
    ```
-   Derive `<kebab-title>` from the issue title, matching the repo's `{issue-number}-{kebab-case-description}` branch convention.
+   Derive `<kebab-title>` from the issue title; the full name follows the branch pattern resolved in Step 1a (default `{issue-number}-{kebab-case}`).
 2. **Materialize the worktree** on that branch — **invoke `superpowers:using-git-worktrees`**, pointing it at the just-created `<N>-<kebab-title>` branch (don't hand-roll `git worktree add`; let the skill own placement + native tooling). The new branch already tracks `main` as its base for `gh pr create`.
 3. **Verify the link landed** (don't assume — see the GH-native-linking discipline this repo follows):
    ```bash
@@ -162,7 +185,7 @@ This gate exists because a mismatch is genuinely ambiguous and only the user can
 
 ### 1e. Current-branch path (user chose option 2)
 
-The user declined the worktree, so **work proceeds on the current branch**. Before continuing, **state the branch name explicitly** — e.g., "Understood — we'll build issue #N on the current branch `<current-branch>` (no worktree)." Naming it makes the deliberate choice auditable and guards against silently building on the wrong branch. Then proceed to Step 1f.
+The user declined the worktree, so **work proceeds on the current branch**. Before continuing, **state the branch name explicitly** — e.g., "Understood — we'll build issue #N on the current branch `<current-branch>` (no worktree)." Naming it makes the deliberate choice auditable and guards against silently building on the wrong branch. If the current branch doesn't match the branch pattern, Step 1a item 3 applies before the next commit. Then proceed to Step 1f.
 
 ## Step 1f: Parent-Epic Context + Repo-Staleness Gate
 
@@ -422,6 +445,7 @@ For individual reviewer comments — particularly any that seem unclear, technic
 - Building a target issue whose number doesn't match the current branch **without running the Step 1b mismatch gate** — silently coding on `main` or on an unrelated issue's branch is exactly what the gate prevents.
 - Creating a worktree in Step 1d without linking the branch to the issue card (`gh issue develop`), or without verifying the link with `--list`.
 - Proceeding on the current branch in Step 1e without first stating its name out loud.
+- Committing on a branch that doesn't match the repo's branch pattern (Step 1a), answering a fresh launcher-named workspace (`issue-N`, `<user>/<slug>`, `worktree-<name>`) with the Step 1b mismatch gate instead of renaming it in place, or renaming a pushed branch (or one with a PR) without asking first.
 - Silently picking one side of an open question the card itself poses, instead of surfacing it at Step 2.
 - Skipping Step 3 brainstorming because the issue "seems clear" — no spec or plan on disk means stop.
 - Starting Step 5 before the spec doc and plan exist and are user-approved.
@@ -451,6 +475,7 @@ For individual reviewer comments — particularly any that seem unclear, technic
 |---------|-----|
 | Building issue #N on a branch whose number is different (or on `main`) without asking | Run the Step 1b mismatch gate; default to a worktree off `main` |
 | Piling issue #N's work onto a branch already attached to a meatier issue | That branch can't be PR'd for #N alone — make a fresh worktree off `main` so #N gets its own quick, independent PR |
+| Keeping a launcher's branch name (`issue-2840`, `<user>/<slug>`) because the workspace was made for this issue | Step 1a: rename it to the branch pattern in place and link it with `gh issue develop`; Step 0's in-flight map and repo tooling key off the issue number |
 | Creating the worktree branch but forgetting to link it to the issue card | `gh issue develop <N> --base main --name <N>-<slug>`, then verify with `--list` |
 | Reading only the issue card and skipping its parent epic | Step 1f is mandatory before read-back — read the epic for how this card fits the larger arc (track, blockers, stopgap-vs-end-state) |
 | Building on a card/epic that references concepts the repo no longer has (a removed pipeline/stage/layer, a renamed or deleted module/type, a dep described as production that's dev-only, a doc framed as the contract that a generated schema superseded) | Step 1f staleness check catches it — PAUSE, quote the stale line, offer to cross to `/plan-issues` before coding |
