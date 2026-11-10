@@ -5,7 +5,7 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/build-from-issue/SKILL.md",
-      "computedHash": "1cf697fe14a8255c42b6f88ff3a4bd78d19adbc09384d8f95033cf51cb3b2c1c"
+      "computedHash": "517b96d65d2b6706848c0a55ff02177705afdeec5a1fa6095e66dca7c116ccc1"
     },
     "clean-up-kanban": {
       "source": "emigre459/agentic-ai-dev-template",

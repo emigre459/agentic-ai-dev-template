@@ -68,39 +68,124 @@ def test_gate_states_the_default_pattern() -> None:
     assert f"the default is {_DEFAULT}" in gate
 
 
-def test_fresh_launcher_workspace_is_renamed_in_place_and_linked() -> None:
-    gate = _gate()
+def _item(gate: str, start: str, end: str | None = None) -> str:
+    """Return the gate text from ``start`` up to ``end`` (or the gate's end)."""
+    assert start in gate, f"the gate needs {start!r}"
+    rest = gate.split(start, 1)[1]
+    return rest.split(end, 1)[0] if end else rest
+
+
+def test_pattern_is_resolved_at_session_start() -> None:
+    """Step 0 and Step 1 both read branch names, so the pattern comes first."""
+    resolve = _item(_gate(), "**Resolve the pattern**", "\n2. ")
+    assert "at session start" in resolve
+    assert "before Step 0" in resolve and "before Step 1" in resolve
+    assert "`<branch>`" in resolve
+    step_0 = _section(_text(), "## Step 0: Propose Next (no-target mode)")
+    assert "resolve it first, Step 1a item 1" in step_0
+
+
+def test_only_a_fresh_workspace_for_this_issue_is_renamed() -> None:
+    fresh = _item(_gate(), "**Fresh launcher workspace", "\n3. ")
+    assert "Only a fresh workspace is renamed here" in fresh
     for check in (
         "git rev-list --count origin/main..HEAD",
         "@{upstream}",
-        "git ls-remote --heads origin",
-        "gh pr list --head",
+        "git ls-remote --heads origin <current-branch>",
+        "gh pr list --head <current-branch> --state all",
+        "git status --porcelain",
     ):
-        assert check in gate, check
+        assert check in fresh, check
+    # Uncommitted changes count only when the prompt names #N AND the user agrees.
+    assert "the launcher's prompt names #N **and** the user confirms" in fresh
+    assert "AskUserQuestion" in fresh
+    assert "goes to the Step 1b mismatch gate instead" in fresh
+
+
+def test_fresh_workspace_is_renamed_with_the_branch_placeholder() -> None:
+    fresh = _item(_gate(), "**Fresh launcher workspace", "\n3. ")
     for command in (
-        "git branch -m <N>-<kebab-title>",
-        "gh issue develop <N> --repo <owner>/<repo> --base main --name <N>-<kebab-title>",
-        "git branch -u origin/<N>-<kebab-title>",
-        "git pull --ff-only",
-        "gh issue develop --list <N>",
+        "git branch -m <branch>",
+        "gh issue develop <N> --repo <owner>/<repo> --base main --name <branch>",
+        "git fetch origin <branch> && git branch -u origin/<branch>",
+        "git pull --ff-only origin <branch>",
+        "gh issue develop --list <N> --repo <owner>/<repo>",
     ):
-        assert command in gate, command
-    assert "Step 1b" in gate and "mismatch gate" in gate
-    # An issue that already has a linked branch is a resume, not a second branch.
-    assert "git switch <existing>" in gate
+        assert command in fresh, command
+
+
+def test_existing_branch_for_the_issue_is_checked_before_any_rename() -> None:
+    fresh = _item(_gate(), "**Fresh launcher workspace", "\n3. ")
+    rename = fresh.index("git branch -m <branch>")
+    linked = fresh.index("gh issue develop --list <N>")
+    unlinked = fresh.index("git show-ref --verify refs/heads/<branch>")
+    assert linked < rename and unlinked < rename
+    assert "git ls-remote --heads origin <branch>" in fresh
+    # `gh issue develop --name` fails on an existing name: ask, don't guess.
+    unlinked_rule = fresh[unlinked : fresh.index("Otherwise rename")]
+    assert "AskUserQuestion" in unlinked_rule
+    assert "would fail" in unlinked_rule
+
+
+def test_resume_refuses_a_branch_checked_out_elsewhere_and_a_divergence() -> None:
+    resume = _item(_gate(), "**Resume**", "\n3. ")
+    assert "git worktree list" in resume
+    assert (
+        "git fetch origin <existing> && git switch <existing> && "
+        "git branch -u origin/<existing> && git pull --ff-only origin <existing>"
+    ) in resume
+    assert "diverged" in resume and "stop" in resume
+
+
+def test_other_non_matching_branches_go_through_step_1b_unrenamed() -> None:
+    other = _item(_gate(), "**Any other non-matching branch**", "\n4. ")
+    assert "is **not** renamed here" in other
+    assert "Step 1b mismatch gate under its original name" in other
+    assert "only once the user picks it in Step 1b (the Step 1e path)" in other
+    local = _item(other, "**Local-only:**", "\n   - ")
+    assert "git branch -m <old> <new>" in local
 
 
 def test_gate_asks_before_renaming_a_pushed_branch() -> None:
-    gate = _gate()
-    pushed = gate.split("Any other non-matching branch", 1)
-    assert len(pushed) == 2, "the gate needs an 'Any other non-matching branch' item"
-    rule = pushed[1]
-    assert "AskUserQuestion" in rule
+    other = _item(_gate(), "**Any other non-matching branch**", "\n4. ")
+    pushed = _item(other, "**Pushed, no open PR:**", "\n   - ")
+    assert "AskUserQuestion" in pushed
     assert (
         "gh api -X POST repos/<owner>/<repo>/branches/<old>/rename -f new_name=<new>"
-        in rule
+        in pushed
     )
-    assert "moves open PRs" in rule
+
+
+def test_an_open_prs_head_is_never_renamed() -> None:
+    """GitHub closes a PR whose head is renamed; it retargets only base PRs."""
+    other = _item(_gate(), "**Any other non-matching branch**", "\n4. ")
+    head = _item(other, "**Head of an open PR:**", "\n\n")
+    assert "never rename it" in head
+    assert "Keep the name" in head
+    assert "*closes* an open PR whose head branch is renamed" in head
+    for path in (_SKILL, _README):
+        assert "moves open PRs" not in path.read_text(encoding="utf-8"), path.name
+
+
+def test_opening_rule_and_red_flag_name_the_open_pr_exception() -> None:
+    opening = _gate().strip().split("\n", 1)[0]
+    assert "one exception" in opening and "open PR" in opening
+    red_flags = _section(_text(), "## Red Flags — Stop and Reassess")
+    (flag,) = [line for line in red_flags.splitlines() if "Step 1a" in line]
+    assert "the one exception is the head of an open PR" in flag
+    assert "renaming an open PR's head" in flag
+
+
+def test_step_1e_on_main_checks_for_commits_before_switching() -> None:
+    current = _text().split("### 1e. Current-branch path", 1)[1].split("\n## ", 1)[0]
+    on_main = _item(current, "**On `main` or a detached HEAD:**", "\n- ")
+    check = on_main.index("git rev-list --count origin/main..HEAD")
+    existing = on_main.index("check for an existing branch for #N")
+    create = on_main.index("git switch -c <branch>")
+    assert check < existing < create
+    assert "before any switch" in on_main
+    assert "AskUserQuestion" in on_main[:existing]
+    assert "never commit for an issue on `main` or on no branch" in _gate()
 
 
 def test_every_branch_naming_site_points_at_the_resolved_pattern() -> None:
