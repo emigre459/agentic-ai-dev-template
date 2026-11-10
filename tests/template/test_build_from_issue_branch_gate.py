@@ -118,23 +118,35 @@ def test_existing_branch_for_the_issue_is_checked_before_any_rename() -> None:
     fresh = _item(_gate(), "**Fresh launcher workspace", "\n3. ")
     rename = fresh.index("git branch -m <branch>")
     linked = fresh.index("gh issue develop --list <N>")
-    unlinked = fresh.index("git show-ref --verify refs/heads/<branch>")
+    unlinked = fresh.index("an *unlinked* branch for #N")
     assert linked < rename and unlinked < rename
-    assert "git ls-remote --heads origin <branch>" in fresh
-    # `gh issue develop --name` fails on an existing name: ask, don't guess.
     unlinked_rule = fresh[unlinked : fresh.index("Otherwise rename")]
+    # `gh issue develop --name` fails on an existing name: ask, don't guess.
     assert "AskUserQuestion" in unlinked_rule
-    assert "would fail" in unlinked_rule
+    assert "fail after the rename" in unlinked_rule
 
 
-def test_resume_refuses_a_branch_checked_out_elsewhere_and_a_divergence() -> None:
+def test_duplicate_check_catches_any_branch_for_the_issue() -> None:
+    """A differently named `<N>-old-title` is still a duplicate of #N's work."""
+    fresh = _item(_gate(), "**Fresh launcher workspace", "\n3. ")
+    unlinked_rule = fresh[
+        fresh.index("an *unlinked* branch for #N") : fresh.index("Otherwise rename")
+    ]
+    assert "git ls-remote --heads origin '<N>-*'" in unlinked_rule
+    assert "git branch --list '<N>-*'" in unlinked_rule
+    assert "not just one named exactly `<branch>`" in unlinked_rule
+    assert "still a duplicate" in unlinked_rule
+
+
+def test_local_only_resume_switches_without_fetching() -> None:
+    """No `origin/<existing>` means nothing to fetch or pull: a plain switch."""
     resume = _item(_gate(), "**Resume**", "\n3. ")
-    assert "git worktree list" in resume
-    assert (
-        "git fetch origin <existing> && git switch <existing> && "
-        "git branch -u origin/<existing> && git pull --ff-only origin <existing>"
-    ) in resume
-    assert "diverged" in resume and "stop" in resume
+    local = _item(resume, "**A local-only branch**", "Say in one line")
+    assert "`git ls-remote --heads origin <existing>` is empty" in local
+    assert "run just `git switch <existing>`" in local
+    assert "git push -u origin <existing>" in local
+    # A branch that is on origin keeps the full fetch-switch-track-pull sequence.
+    assert "git fetch origin <existing> && git switch <existing>" in resume
 
 
 def test_other_non_matching_branches_go_through_step_1b_unrenamed() -> None:
