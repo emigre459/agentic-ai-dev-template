@@ -103,9 +103,11 @@ tasks by layer. A plan without a `## Stack` section is a single PR.
 ```
 
 - **2–4 rows**, `L1`, `L2`, ... in order, none skipped.
-- **Branch names.** L1 is the session's own linked branch (`{issue-number}-{kebab-case}`,
-  or whatever branch the session already runs on), so issue linking and in-flight
-  detection keep working. Each layer above adds `-l<k>-` after the number.
+- **Branch names.** L1 is the session's own linked branch, which the skill's Step 1a
+  branch-name gate has already matched to the repo's branch pattern (default
+  `{issue-number}-{kebab-case}`), so issue linking and in-flight detection keep
+  working. Each layer above adds `-l<k>-` after the number, and follows the same
+  pattern.
 - **Lower layers say `Refs #N`; the top layer says `Closes #N`.** A stack that
   delivers only a slice of the card says `Refs #N` on every layer.
 

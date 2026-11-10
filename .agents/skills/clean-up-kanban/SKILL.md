@@ -127,7 +127,7 @@ The shared logic behind build-from-issue's Step 0 (propose next, session start) 
 
 **In-flight classifier** (strongest signal wins; ground every verdict in the evidence):
 1. **Open PR referencing the issue** → definitely in-flight. Never propose; name the PR.
-2. **Remote branch matching the issue** (leading `{number}-` in the branch name, or `gh issue develop --list` link) **with commits ahead of main and recent activity (~7 days)** → probably in-flight. Don't propose; say who pushed last.
+2. **Remote branch matching the issue** (matching the repo's branch pattern, which `build-from-issue` Step 1a resolves (by default a leading `{number}-`), or a `gh issue develop --list` link) **with commits ahead of main and recent activity (~7 days)** → probably in-flight. Don't propose; say who pushed last.
 3. **Stale branch** (matches the issue, but no PR, no recent commits) → "started-and-stalled": surface as a RESUME candidate, distinct from fresh picks.
 4. **Project `Status` = In progress** → treat as in-flight when populated (weakest signal; often unmaintained).
 
