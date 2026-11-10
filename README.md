@@ -223,8 +223,11 @@ number.
 ```
 
 `build-from-issue` defaults to `{issue-number}-{kebab-case}` when no pattern is set.
-Its Step 1a renames a launcher-named branch to the pattern before the first commit,
-and asks before renaming one that is already pushed. Set the pattern when your
+Its Step 1a renames a fresh launcher-named workspace (no commits, nothing pushed, no
+PR) to the pattern before the first commit. Any other non-matching branch goes
+through the usual mismatch question first; a pushed one is renamed only after you
+agree, and an open PR's head is never renamed, because GitHub closes a PR whose head
+branch is renamed. Set the pattern when your
 tooling parses the issue number out of a branch name (a per-worktree database or
 container name, a CI job keyed on the issue): a branch that doesn't match is
 invisible to that tooling, and to the in-flight check that keeps two sessions off
