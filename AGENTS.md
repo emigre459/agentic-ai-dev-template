@@ -21,11 +21,14 @@ Each rule is a Markdown file with frontmatter:
 | File | Applies to | Summary |
 |------|-----------|---------|
 | `.agents/rules/shared/push-every-commit.md` | always | Push to origin after EVERY commit (`-u` on the first) — the remote branch is the in-flight signal build-from-issue Step 0/11b and parallel sessions read |
+| `.agents/rules/shared/no-hardcoded-waits.md` | always | Wait on the real event/state, not a fixed sleep; raw time only as the timeout, pacing through one named helper |
 | `.agents/rules/shared/*.md` | always / varies | Git, commit, issue-workflow, and meta conventions — read the directory |
 <!-- STACK:python -->
 | `.agents/rules/python/uv-python.md` | always | Use `uv` for all Python execution and dependency management |
 | `.agents/rules/python/python-best-practices.md` | `**/*.py` | Style, type hints, TDD, API design, docstrings |
 | `.agents/rules/python/no-blind-except.md` | `**/*.py` | Narrow excepts; catch-all only if it re-raises or a human agreed |
+| `.agents/rules/python/tests-no-network.md` | `**/tests/**/*.py` | Default-lane tests can't reach the network (blocked in CI); mock, use an opt-in lane, or `enable_socket` with a reason |
+| `.agents/rules/python/retries-through-tenacity.md` | `**/*.py` | Retries and polls go through one tenacity module; no hand-written loops; routine retries log at DEBUG |
 | `.agents/rules/python/*.md` (others) | varies | dotenv loading, library-vs-scripts structure |
 <!-- /STACK:python -->
 <!-- STACK:react -->
