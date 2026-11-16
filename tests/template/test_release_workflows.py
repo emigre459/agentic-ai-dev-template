@@ -510,3 +510,19 @@ def test_runbook_covers_the_whole_stack_from_its_top_layer() -> None:
     assert "| L5 | `49-l5-branch-name-gate` | `67` |" in kit
     assert "gh pr checkout 67" in kit
     assert "gh pr checkout 62" not in kit
+
+
+def test_runbook_calls_the_actions_remotely_as_consumers_do() -> None:
+    """Consumers call the actions as owner/repo/.github/actions/x@ref, not local copies.
+
+    Both actions read the CLI pin from the sibling ../skills-cli folder, which only a
+    remote call (a whole-repo download at the ref) can prove is there.
+    """
+    section4h = _runbook_section("### 4h.", "## 5. A test release")
+    remote = "emigre459/agentic-ai-dev-template/.github/actions"
+    assert f"uses: {remote}/skills-drift@$REF" in section4h
+    assert f"uses: {remote}/skills-update@$REF" in section4h
+    assert "git rm -r -q .github/actions" in section4h  # no local copy to fall back on
+    assert "skills-cli/package.json" in section4h  # the failure this step exists for
+    results = _KIT.read_text().split("## 7. Results", 1)[1]
+    assert "| 4h |" in results

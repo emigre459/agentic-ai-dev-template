@@ -496,6 +496,74 @@ did not trigger CI: check the token can write Contents on this repo.
 
 Leave the PR unmerged. Section 5 reuses this repo.
 
+### 4h. The actions work when called remotely, as consumers call them
+
+4c to 4g ran local copies of the actions. A repo made from the template, or one that
+adopted the kit, calls them remotely instead:
+`uses: emigre459/agentic-ai-dev-template/.github/actions/<name>@<tag>`. Both actions
+read the CLI pin from a neighboring folder (`../skills-cli/package.json`), and only a
+remote call proves that folder is there when GitHub fetches the action. Not optional:
+nothing else in this runbook or the test suite covers it.
+
+Point both workflows at this stack's top branch, the way `make init` points them at a
+release tag, and delete the local copies so nothing can fall back on them:
+
+```bash
+cd "$SCRATCH"
+git checkout main
+git pull --ff-only origin main
+REF=$(git -C "$REVIEW_DIR" branch --show-current)
+REMOTE=emigre459/agentic-ai-dev-template/.github/actions
+sed -i.bak "s#uses: ./.github/actions/skills-drift#uses: $REMOTE/skills-drift@$REF#" .github/workflows/ci.yml
+sed -i.bak "s#uses: ./.github/actions/skills-update#uses: $REMOTE/skills-update@$REF#" .github/workflows/skills-update.yml
+rm .github/workflows/*.bak
+git rm -r -q .github/actions
+grep -h "uses: $REMOTE" .github/workflows/*.yml
+git commit -am "Call the kit's actions remotely"
+git push origin main
+```
+
+**Expect:** `REF` is `49-l5-branch-name-gate`. `grep` prints these two lines:
+- `uses: emigre459/agentic-ai-dev-template/.github/actions/skills-drift@$REF`
+- `uses: emigre459/agentic-ai-dev-template/.github/actions/skills-update@$REF`
+
+with `$REF` filled in, and the push succeeds. The push to `main` runs `ci.yml`. Watch
+that run, then run the update workflow:
+
+```bash
+SHA=$(git rev-parse HEAD)
+RUN=$(gh run list --workflow ci.yml --json databaseId,headSha --jq ".[] | select(.headSha == \"$SHA\") | .databaseId" | head -1)
+echo "run=$RUN"
+gh run watch "$RUN" --exit-status
+gh run view "$RUN" --log | grep "All project skills are up to date"
+T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh workflow run skills-update.yml
+```
+
+If `run=` is empty, wait a few seconds and repeat the `RUN=` line. Then watch the
+update run created after `T0`:
+
+```bash
+RUN=$(gh run list --workflow skills-update.yml --json databaseId,createdAt --jq "[.[] | select(.createdAt > \"$T0\")][0].databaseId // empty")
+echo "run=$RUN"
+gh run watch "$RUN" --exit-status
+gh run view "$RUN" --log | grep -E "SKILLS_CLI_VERSION|skills@"
+```
+
+**Expect:** both runs are green. The `skills drift` log has the CLI's
+`All project skills are up to date`, which it can only print after reading the pin
+(without it, the check stops with "cannot read the skills CLI pin"). The update run's
+log shows `SKILLS_CLI_VERSION: 1.8.1` (the pin when this kit was written) in its step
+environment, and the `npx -y "skills@${SKILLS_CLI_VERSION}"` step that used it.
+
+**If not:**
+- **A failure naming `skills-cli/package.json`** ("cannot read the skills CLI pin", or
+  a `node` error in the "Stage the scripts and the CLI pin" step) means a remote action
+  can't see its neighboring folder, and every consumer's drift check and update PR would
+  fail the same way. Report it on #59 (it owns the pin) with the log.
+- **"Can't find 'action.yml'"** means the `uses:` line is wrong: check `REF` is a
+  branch that exists on the remote.
+
 ## 5. A test release (reviewer-run)
 
 This checks the L3 release flow in the same scratch repo: the labels, the `v0.0.0`
@@ -792,6 +860,7 @@ first release and its re-pin PR, so until then only its tests cover it
 | 4 | The update workflow opens one PR bumping `gh-stack`, with CI dispatched on the branch | |
 | 4f | A second run reuses the PR and doesn't push | |
 | 4g | (Optional) With `SKILLS_UPDATE_TOKEN`, the PR's own `pull_request` CI runs and nothing is dispatched | |
+| 4h | Called remotely at the stack's branch, with no local copies, the drift check and the update workflow both run the pinned CLI | |
 | 5 | With the `v0.0.0` baseline, a `minor` PR yields a `v0.1.0` draft; a branch run is skipped; a wrong `version` fails without publishing; a main run publishes with the summary above the PR list | |
 | 6 | Each layer's diff reads well in its own PR; the judgment calls hold up | |
 
