@@ -26,5 +26,9 @@
       "arrowParentheses": "always"
     }
   },
-  "linter": { "enabled": true, "rules": { "preset": "recommended" } }
+  "linter": { "enabled": true, "rules": {
+      "preset": "recommended",
+      "suspicious": { "noEmptyBlockStatements": "error" }
+    }
+  }
 }

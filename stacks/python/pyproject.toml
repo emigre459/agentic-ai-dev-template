@@ -48,7 +48,7 @@ line-length = 88
 target-version = "py313"
 
 [tool.ruff.lint]
-extend-select = ["E501", "W", "D"]
+extend-select = ["E501", "W", "D", "BLE"]
 extend-ignore = ["D107"]
 
 [tool.ruff.lint.pydocstyle]

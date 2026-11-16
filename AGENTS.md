@@ -25,11 +25,13 @@ Each rule is a Markdown file with frontmatter:
 <!-- STACK:python -->
 | `.agents/rules/python/uv-python.md` | always | Use `uv` for all Python execution and dependency management |
 | `.agents/rules/python/python-best-practices.md` | `**/*.py` | Style, type hints, TDD, API design, docstrings |
+| `.agents/rules/python/no-blind-except.md` | `**/*.py` | Narrow excepts; catch-all only if it re-raises or a human agreed |
 | `.agents/rules/python/*.md` (others) | varies | dotenv loading, library-vs-scripts structure |
 <!-- /STACK:python -->
 <!-- STACK:react -->
 | `.agents/rules/react/bun-react.md` | always | Use `bun` for all JS/TS execution and dependency management |
 | `.agents/rules/react/react-best-practices.md` | `**/*.{ts,tsx}` | Components, hooks, Biome/Vitest/tsc conventions |
+| `.agents/rules/react/no-blind-catch.md` | `**/*.{ts,tsx}` | Narrow catches and rethrow the rest; swallowing catch-all only if a human agreed |
 <!-- /STACK:react -->
 
 ## Project Overview
