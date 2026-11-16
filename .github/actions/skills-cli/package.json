@@ -1,0 +1,8 @@
+{
+  "name": "skills-cli-pin",
+  "private": true,
+  "description": "The exact skills CLI version every skills-* action runs (npx -y skills@<version>). Dependabot bumps it; regenerate tests/template/fixtures/skills_lock/golden.json with the new version in the same PR.",
+  "dependencies": {
+    "skills": "1.8.1"
+  }
+}

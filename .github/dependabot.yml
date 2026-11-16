@@ -51,6 +51,16 @@ updates:
     groups:
       python-dev:
         update-types: ["minor", "patch"]
+  # The skills CLI version every skills-* action runs (npx -y skills@<pin>). A
+  # bump must come with golden.json regenerated from the new CLI (see
+  # tests/template/test_skills_lock.py); the hash tests fail until it does.
+  - package-ecosystem: "npm"
+    directory: "/.github/actions/skills-cli"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "javascript"]
+    commit-message:
+      prefix: "deps"
 # <<< STACK:template
   - package-ecosystem: "github-actions"
     directory: "/"
