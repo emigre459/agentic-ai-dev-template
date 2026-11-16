@@ -13,8 +13,8 @@ inputs:
       push is made as this token's identity (a GitHub App or PAT push triggers the
       PR's pull_request CI; a GITHUB_TOKEN push does not). It needs contents: write
       and pull-requests: write, plus actions: write when dispatch-ci is "true".
-      Only the push and the PR step see it: the `npx skills@latest` steps run with
-      the job's own github.token instead.
+      Only the push and the PR step see it: the `npx skills` steps run with the
+      job's own github.token instead.
     required: true
   dispatch-ci:
     description: >-
@@ -45,11 +45,18 @@ runs:
     # Copy both scripts OUTSIDE the work tree first: the checkout below replaces the
     # work tree with the base branch's content, and they must not vanish with it
     # (this also keeps the scripts and the YAML that calls them on the same ref).
-    - name: Stage the scripts outside the work tree
+    # The skills CLI version comes from the same ref: the pin in ../skills-cli.
+    - name: Stage the scripts and the CLI pin outside the work tree
       shell: bash
       run: |
         cp "$GITHUB_ACTION_PATH/update-pr.sh" "$RUNNER_TEMP/skills_update_pr.sh"
         cp "$GITHUB_ACTION_PATH/bump-pins.mjs" "$RUNNER_TEMP/skills_bump_pins.mjs"
+        version="$(node -p 'require(process.env.GITHUB_ACTION_PATH + "/../skills-cli/package.json").dependencies.skills')"
+        if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::the skills CLI pin must be an exact X.Y.Z version, not '$version'"
+          exit 1
+        fi
+        echo "SKILLS_CLI_VERSION=$version" >> "$GITHUB_ENV"
 
     - name: Rebuild the update branch on the latest base
       shell: bash
@@ -63,7 +70,7 @@ runs:
         git fetch origin "$BRANCH" || echo "No existing $BRANCH on origin"
         git checkout -B "$BRANCH" "origin/$BASE"
 
-    # The unpinned `npx skills@latest` steps get the job's own token (enough to
+    # The third-party `npx skills` steps get the job's own token (enough to
     # read public sources), never `inputs.token`: a PAT or App token must not
     # reach third-party code. Only the push-credential step and the PR helper
     # below see `inputs.token`.
@@ -82,7 +89,7 @@ runs:
       env:
         GITHUB_TOKEN: ${{ github.token }}
         DISABLE_TELEMETRY: "1"
-      run: npx -y skills@latest update -p -y
+      run: npx -y "skills@${SKILLS_CLI_VERSION}" update -p -y
 
     # actions/checkout persists GITHUB_TOKEN as an http extraheader; left alone, every
     # push would go out as GITHUB_TOKEN whatever `token` is. Replace it with `token`,

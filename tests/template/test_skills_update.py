@@ -29,6 +29,10 @@ _REPO = Path(__file__).resolve().parents[2]
 _ACTION = _REPO / ".github" / "actions" / "skills-update"
 _BUMP = _ACTION / "bump-pins.mjs"
 _UPDATE_PR = _ACTION / "update-pr.sh"
+# The exact skills CLI version every skills-* action runs (see test_skills_lock.py).
+_PINNED_CLI: str = json.loads(
+    (_REPO / ".github" / "actions" / "skills-cli" / "package.json").read_text()
+)["dependencies"]["skills"]
 
 needs_node = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is not on PATH"
@@ -136,10 +140,12 @@ class _Bump:
         for name, entry in skills.items():
             entry.setdefault("skillPath", f"skills/{name}/SKILL.md")
         (self.root / "skills-lock.json").write_text(
-            json.dumps({"version": 1, "skills": skills}, indent=2) + "\n"
+            json.dumps({"version": 2, "skills": skills}, indent=2) + "\n"
         )
 
-    def run(self) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, cli_version: str | None = _PINNED_CLI
+    ) -> subprocess.CompletedProcess[str]:
         self.cfg_path.write_text(json.dumps(self.cfg))
         env = {
             **os.environ,
@@ -148,6 +154,9 @@ class _Bump:
             "FAKE_LOG": str(self.log),
         }
         env.pop("DISABLE_TELEMETRY", None)
+        env.pop("SKILLS_CLI_VERSION", None)
+        if cli_version is not None:
+            env["SKILLS_CLI_VERSION"] = cli_version
         return subprocess.run(  # nosec B603 B607
             ["node", str(_BUMP), "--root", str(self.root)],
             capture_output=True,
@@ -201,7 +210,7 @@ def test_bumps_to_newest_stable_semver(bump: _Bump) -> None:
     assert bump.calls("npx") == [
         [
             "-y",
-            "skills@latest",
+            f"skills@{_PINNED_CLI}",
             "add",
             f"{_SOURCE}#v0.2.0",
             "--skill",
@@ -404,7 +413,7 @@ def test_one_cli_call_per_source_with_every_installed_skill(bump: _Bump) -> None
     (npx,) = bump.calls("npx")
     assert npx == [
         "-y",
-        "skills@latest",
+        f"skills@{_PINNED_CLI}",
         "add",
         f"{_SOURCE}#v0.2.0",
         "--skill",
@@ -874,9 +883,60 @@ def test_action_is_a_composite_with_the_documented_inputs() -> None:
     assert "using: composite" in text
     for name in ("token", "dispatch-ci", "branch", "base", "ci-workflow", "labels"):
         assert f"\n  {name}:" in text, name
-    assert "skills@latest update -p -y" in text
+    assert 'npx -y "skills@${SKILLS_CLI_VERSION}" update -p -y' in text
+    assert "skills@latest" not in text
     assert 'DISABLE_TELEMETRY: "1"' in text
     assert "uses: actions/checkout" not in text  # the caller checks the repo out
+
+
+@needs_node
+@pytest.mark.parametrize("version", [None, "latest", "1.8", "^1.8.1"])
+def test_bump_refuses_to_run_without_an_exact_cli_version(
+    tmp_path: Path, version: str | None
+) -> None:
+    bump = _Bump(tmp_path)
+    bump.install("alpha")
+    bump.write_lock({"alpha": {"source": _SOURCE, "ref": "v0.1.0"}})
+    result = bump.run(cli_version=version)
+    assert result.returncode != 0
+    assert "SKILLS_CLI_VERSION" in result.stderr
+    assert bump.calls("npx") == [] and bump.calls("gh") == []
+
+
+def test_action_stages_the_cli_pin_before_the_checkout() -> None:
+    steps = _steps()
+    stage = steps[0]
+    assert "skills-cli/package.json" in stage["run"]
+    assert "SKILLS_CLI_VERSION=" in stage["run"] and "$GITHUB_ENV" in stage["run"]
+    # Read from the action's own files, before the work tree is replaced.
+    assert stage is steps[_step_index('cp "$GITHUB_ACTION_PATH/bump-pins.mjs"')]
+    assert _step_index("checkout -B") > 0
+
+
+@needs_bash
+def test_action_stage_step_exports_the_pinned_version(tmp_path: Path) -> None:
+    """Run the staging step's script against a copy of the action folders."""
+    actions = tmp_path / "actions"
+    shutil.copytree(_ACTION, actions / "skills-update")
+    shutil.copytree(_ACTION.parent / "skills-cli", actions / "skills-cli")
+    runner_temp, env_file = tmp_path / "temp", tmp_path / "env"
+    runner_temp.mkdir()
+    env_file.touch()
+    result = subprocess.run(  # nosec B603 B607
+        ["bash", "-c", _steps()[0]["run"]],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "GITHUB_ACTION_PATH": str(actions / "skills-update"),
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_ENV": str(env_file),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert env_file.read_text() == f"SKILLS_CLI_VERSION={_PINNED_CLI}\n"
+    assert (runner_temp / "skills_bump_pins.mjs").is_file()
 
 
 def _steps() -> list[dict[str, Any]]:
@@ -922,7 +982,7 @@ def test_the_push_credential_comes_from_the_token_input() -> None:
     helper = _step_index('bash "$RUNNER_TEMP/skills_update_pr.sh"')
     # Written to .git/config only after both npx steps, right before the helper.
     assert index == helper - 1
-    assert _step_index("skills@latest update") < index
+    assert _step_index("skills@${SKILLS_CLI_VERSION}") < index
     assert _step_index(_BUMP_RUN) < index
     assert steps[-1]["env"]["GH_TOKEN"] == "${{ inputs.token }}"  # gh uses it too
 
@@ -932,11 +992,11 @@ def test_the_token_input_never_reaches_the_npx_steps() -> None:
     credential = _step_index("extraheader")
     holders = [i for i, s in enumerate(steps) if "inputs.token" in yaml.safe_dump(s)]
     # Only the push-credential step and the PR helper see the chosen token; the
-    # unpinned `npx skills@latest` steps get the job's own token (public reads).
+    # third-party `npx skills` steps get the job's own token (public reads).
     assert holders == [credential, _step_index(_HELPER_RUN)]
     for step in steps[:credential]:
         assert "inputs.token" not in yaml.safe_dump(step), step["name"]
-    for fragment in (_BUMP_RUN, "skills@latest update"):
+    for fragment in (_BUMP_RUN, "skills@${SKILLS_CLI_VERSION}"):
         env = steps[_step_index(fragment)]["env"]
         assert env["GITHUB_TOKEN"] == "${{ github.token }}", fragment
         assert env.get("GH_TOKEN", "${{ github.token }}") == "${{ github.token }}"
@@ -1072,7 +1132,7 @@ def _secret_uses(node: Any, found: list[str] | None = None) -> list[str]:
 def test_update_workflow_token_precedence() -> None:
     wf = _workflow("skills-update.yml")
     (job,) = wf["jobs"].values()
-    # No secret in workflow or job env: the unpinned `npx skills@latest` in the
+    # No secret in workflow or job env: the third-party `npx skills` in the
     # action would otherwise run with the App key / PAT in its environment.
     assert not _secret_uses(wf["env"]) and not _secret_uses(job.get("env", {}))
 

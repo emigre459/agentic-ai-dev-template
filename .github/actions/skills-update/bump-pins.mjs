@@ -2,12 +2,15 @@
 // Bump tag-pinned agent skills to their source's newest stable release.
 //
 // Usage:
-//   node bump-pins.mjs --root <repo>
+//   SKILLS_CLI_VERSION=<X.Y.Z> node bump-pins.mjs --root <repo>
+//
+// SKILLS_CLI_VERSION is the exact skills CLI version to run (the action reads it
+// from ../skills-cli/package.json); without one the script refuses to run.
 //
 // Reads <root>/skills-lock.json. An entry whose `ref` looks like vMAJOR.MINOR.PATCH
 // is tag-pinned; every other entry tracks a branch and is left to
-// `npx skills@latest update -p -y`, which never moves a tag-pinned entry off its
-// tag. For each source with tag-pinned entries:
+// `npx skills@<version> update -p -y`, which never moves a tag-pinned entry off
+// its tag. For each source with tag-pinned entries:
 //
 //   1. `gh api repos/<source>/releases --paginate`: the newest release that is
 //      neither a draft nor a prerelease and is tagged vMAJOR.MINOR.PATCH.
@@ -19,7 +22,7 @@
 //      skill. Installed and upstream skills are matched by `skillPath`, not name.
 //   3. The skills installed from the source that still exist upstream are
 //      reinstalled at the new tag with ONE call per source:
-//      `npx -y skills@latest add <source>#<tag> --skill <n> ... -a <agent> -y`
+//      `npx -y skills@<version> add <source>#<tag> --skill <n> ... -a <agent> -y`
 //      (`universal` when the folders live under .agents/skills/, else
 //      `claude-code`). The CLI rewrites the folders and the lock's ref/hash.
 //
@@ -42,6 +45,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 
 const LOCK_FILE = 'skills-lock.json';
 const SEMVER_TAG = /^v(\d+)\.(\d+)\.(\d+)$/;
+const EXACT_VERSION = /^\d+\.\d+\.\d+$/;
 
 class Failure extends Error {}
 
@@ -187,6 +191,12 @@ function parseArgs(argv) {
 
 function main() {
   const root = parseArgs(process.argv.slice(2));
+  const cliVersion = process.env.SKILLS_CLI_VERSION ?? '';
+  if (!EXACT_VERSION.test(cliVersion)) {
+    fail(
+      `SKILLS_CLI_VERSION must be the exact skills CLI version to run (X.Y.Z), not ${JSON.stringify(cliVersion)}`,
+    );
+  }
   const summary = { bumped: [], available: [], removed: [], no_releases: [] };
 
   const lockPath = join(root, LOCK_FILE);
@@ -251,7 +261,7 @@ function main() {
       if (keep.length === 0) continue;
 
       const agent = agentFor(root, keep[0]);
-      const args = ['-y', 'skills@latest', 'add', `${source}#${newest}`];
+      const args = ['-y', `skills@${cliVersion}`, 'add', `${source}#${newest}`];
       for (const name of keep) args.push('--skill', name);
       args.push('-a', agent, '-y');
       sh('npx', args, { cwd: root, passthrough: true });

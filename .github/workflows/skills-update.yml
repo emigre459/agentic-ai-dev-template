@@ -65,7 +65,7 @@ jobs:
           node-version: "22"
       # Secrets are handed to exactly one step each and never put in job or workflow
       # env. The token chosen below goes to the action's `token` input, which only
-      # its push-credential and PR steps see; its unpinned `npx skills@latest` steps
+      # its push-credential and PR steps see; its third-party `npx skills` steps
       # run with the job's own github.token. This probe sees the secrets and writes
       # only booleans (an unset secret is ""). Half an App is a misconfiguration:
       # the run fails rather than quietly falling back to another token.
