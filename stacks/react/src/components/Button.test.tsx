@@ -5,7 +5,7 @@ import { Button } from './Button';
 
 describe('Button', () => {
   it('renders its label', () => {
-    render(<Button label="Click me" onClick={() => {}} />);
+    render(<Button label="Click me" onClick={vi.fn()} />);
     expect(
       screen.getByRole('button', { name: 'Click me' }),
     ).toBeInTheDocument();
