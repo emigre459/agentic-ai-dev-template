@@ -68,6 +68,7 @@ appliesTo: "**/*.py"
 - Implement proper fixtures
 - Use proper mocking with pytest-mock
 - Test all error scenarios
+- Default-lane tests must not reach the network; see `tests-no-network.md`
 
 ## Security
 - Use HTTPS in production
@@ -87,6 +88,11 @@ appliesTo: "**/*.py"
 - Create custom exception classes
 - Use proper try-except blocks
 - Implement proper logging and logging levels
+- Log levels are for the operator: WARNING and above must be ACTIONABLE.
+  Expected, self-inflicted or purely informational noise (e.g. a retry that is
+  part of normal operation, a navigation cancelling its own in-flight requests)
+  goes to DEBUG. If a line needs no action, it must not be a WARNING: a run log
+  full of non-actionable warnings trains operators to ignore the real ones.
 - Do not use f-strings for logs, use % notation (so they are lazy-evaluated)
 - Do not use print statements outside of standalone scripts, anything worth seeing on the terminal should be a logger.X() call
 - Return proper error responses
