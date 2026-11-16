@@ -61,6 +61,8 @@ def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
     assert dependabot.count('package-ecosystem: "uv"') == 1
     assert 'directory: "/"' in dependabot
     assert "stacks/" not in dependabot
+    # the template-only guard test is gone post-init; don't point at it
+    assert "test_dependabot_policy" not in dependabot
     # major-only policy survives init; the promoted uv entry keeps the
     # uv-build minor exception (tests/template/test_dependabot_policy.py)
     for entry in yaml.safe_load(dependabot)["updates"]:
@@ -121,6 +123,7 @@ def test_initialize_react_removes_root_python_tooling(template_tree: Path) -> No
     dependabot = (template_tree / ".github" / "dependabot.yml").read_text()
     assert 'package-ecosystem: "uv"' not in dependabot
     assert 'package-ecosystem: "bun"' in dependabot
+    assert "test_dependabot_policy" not in dependabot
     # major-only policy survives init on every remaining entry
     for entry in yaml.safe_load(dependabot)["updates"]:
         assert entry["allow"] == [_MAJOR_RULE]

@@ -8,8 +8,11 @@
 # for every update type, with each entry's labels and commit prefix.
 # Take a minor/patch change outside a security fix as a deliberate upgrade in a
 # normal PR (see the upgrade-deps skill).
+# >>> STACK:template
 #
-# Guarded by tests/template/test_dependabot_policy.py.
+# Guarded by tests/template/test_dependabot_policy.py (removed with the rest of
+# the template machinery at init).
+# <<< STACK:template
 version: 2
 updates:
 # >>> STACK:python
