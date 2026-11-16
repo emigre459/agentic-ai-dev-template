@@ -3,6 +3,11 @@
 `allow` with `update-types` limits *version* updates; GitHub documents that
 security updates are created regardless. The one exception is uv-build minors
 in the python stack: uv ships breaking changes in 0.x minor releases.
+
+uv rules are limited to direct dependencies: a major of an indirect dependency
+is its parent package's call, and arrives with a deliberate `uv lock --upgrade`.
+dependabot-core skips the dependency-type filter for security updates, so a
+vulnerable indirect dependency still gets a security PR.
 """
 
 from pathlib import Path
@@ -17,8 +22,10 @@ MAJOR_RULE: dict[str, Any] = {
     "dependency-name": "*",
     "update-types": ["version-update:semver-major"],
 }
+UV_MAJOR_RULE: dict[str, Any] = {**MAJOR_RULE, "dependency-type": "direct"}
 UV_BUILD_MINOR_RULE: dict[str, Any] = {
     "dependency-name": "uv-build",
+    "dependency-type": "direct",
     "update-types": ["version-update:semver-minor"],
 }
 
@@ -37,8 +44,9 @@ def _label(entry: dict[str, Any]) -> str:
 def test_every_entry_allows_only_majors() -> None:
     for entry in load_updates(DEPENDABOT):
         allow = entry.get("allow", [])
-        assert MAJOR_RULE in allow, f"{_label(entry)}: missing the semver-major rule"
-        extra = [rule for rule in allow if rule != MAJOR_RULE]
+        major = UV_MAJOR_RULE if entry["package-ecosystem"] == "uv" else MAJOR_RULE
+        assert major in allow, f"{_label(entry)}: missing the semver-major rule"
+        extra = [rule for rule in allow if rule != major]
         assert all(
             rule == UV_BUILD_MINOR_RULE for rule in extra
         ), f"{_label(entry)}: unexpected allow rules {extra}"

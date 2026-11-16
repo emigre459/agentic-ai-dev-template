@@ -12,8 +12,10 @@ _MAJOR_RULE = {
     "dependency-name": "*",
     "update-types": ["version-update:semver-major"],
 }
+_UV_MAJOR_RULE = {**_MAJOR_RULE, "dependency-type": "direct"}
 _UV_BUILD_MINOR_RULE = {
     "dependency-name": "uv-build",
+    "dependency-type": "direct",
     "update-types": ["version-update:semver-minor"],
 }
 
@@ -67,7 +69,7 @@ def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
     # uv-build minor exception (tests/template/test_dependabot_policy.py)
     for entry in yaml.safe_load(dependabot)["updates"]:
         if entry["package-ecosystem"] == "uv":
-            assert entry["allow"] == [_MAJOR_RULE, _UV_BUILD_MINOR_RULE]
+            assert entry["allow"] == [_UV_MAJOR_RULE, _UV_BUILD_MINOR_RULE]
         else:
             assert entry["allow"] == [_MAJOR_RULE]
     # README interview stripped

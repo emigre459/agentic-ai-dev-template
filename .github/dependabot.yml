@@ -5,9 +5,12 @@
 # PR where someone will notice it (a major left unnoticed is how a project ends
 # up a whole SDK version behind when the vendor removes APIs). `update-types`
 # limits version updates only: Dependabot security updates are still created
-# for every update type, with each entry's labels and commit prefix. The rule
-# names no `dependency-type`, so a major of an indirect (lockfile-only)
-# dependency can open a PR too.
+# for every update type, with each entry's labels and commit prefix.
+# The uv rules add `dependency-type: "direct"`: a major of an indirect
+# (lockfile-only) dependency is its parent package's call, and taking it alone
+# makes this repo the parent's compatibility tester; it arrives with a
+# deliberate `uv lock --upgrade` instead. Security updates still reach indirect
+# dependencies: Dependabot ignores `dependency-type` for them.
 # Take a minor/patch change outside a security fix as a deliberate upgrade in a
 # normal PR (see the upgrade-deps skill).
 # >>> STACK:template
@@ -29,11 +32,13 @@ updates:
       prefix: "deps"
     allow:
       - dependency-name: "*"
+        dependency-type: "direct"
         update-types: ["version-update:semver-major"]
       # uv ships breaking changes in 0.x MINOR releases, and the build-system
       # pin in pyproject.toml spans a single minor line, so a uv-build minor is
       # effectively a major here.
       - dependency-name: "uv-build"
+        dependency-type: "direct"
         update-types: ["version-update:semver-minor"]
 # <<< STACK:python
 # >>> STACK:react
@@ -71,6 +76,7 @@ updates:
       prefix: "deps"
     allow:
       - dependency-name: "*"
+        dependency-type: "direct"
         update-types: ["version-update:semver-major"]
 # <<< STACK:template
   - package-ecosystem: "github-actions"

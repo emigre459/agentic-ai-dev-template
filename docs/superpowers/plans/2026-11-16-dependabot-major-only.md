@@ -12,8 +12,8 @@
 
 ## Global Constraints
 
-- Major rule, verbatim, on every entry: `{dependency-name: "*", update-types: ["version-update:semver-major"]}`, with no `dependency-type`.
-- uv-build exception, only on the uv `/stacks/python` entry: `{dependency-name: "uv-build", update-types: ["version-update:semver-minor"]}`.
+- Major rule, verbatim, on every entry: `{dependency-name: "*", update-types: ["version-update:semver-major"]}`; on the two uv entries it also has `dependency-type: "direct"` (amended 2026-11-16, see the spec).
+- uv-build exception, only on the uv `/stacks/python` entry: `{dependency-name: "uv-build", dependency-type: "direct", update-types: ["version-update:semver-minor"]}`.
 - Remove groups `python-dev` (both), `react-dev`, `github-actions`. Keep `vite` and `vitest` (patterns only, no `update-types`).
 - `# >>> STACK:<x>` / `# <<< STACK:<x>` markers unchanged.
 - Schedules, labels and commit-message prefixes unchanged. No `open-pull-requests-limit`.

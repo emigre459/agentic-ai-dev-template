@@ -54,9 +54,17 @@ The template, and every repo seeded from it, adopts the same policy.
     - dependency-name: "*"
       update-types: ["version-update:semver-major"]
   ```
-  exactly as in the issue, with **no `dependency-type`**. The user chose this
-  knowingly: dependabot-core defaults an allow rule's type to "all", so
-  majors of indirect dependencies may also get PRs.
+  exactly as in the issue. **Amended 2026-11-16 (after the PR opened):** the two
+  uv entries add `dependency-type: "direct"` to their rules (both the `*` major
+  rule and the uv-build rule). dependabot-core defaults an allow rule's type
+  to "all", so without it, majors of indirect dependencies also got PRs
+  downstream (e.g. a CLI library a framework builds on, under no tested cap).
+  A major of an indirect dependency is its parent package's call; it arrives
+  with a deliberate `uv lock --upgrade`. Security updates are unaffected:
+  dependabot-core's `allowed_update?` skips the dependency-type filter when
+  `security_updates_only`. The bun and github-actions entries stay as above
+  (GitHub's options reference lists `indirect` support for uv but not bun, and
+  workflow actions are all direct).
 - The uv `/stacks/python` entry gets a second allow rule (rules are OR'd):
   `{dependency-name: "uv-build", update-types: ["version-update:semver-minor"]}`.
   Dependabot stores Python names in normalized form (`uv-build`).
