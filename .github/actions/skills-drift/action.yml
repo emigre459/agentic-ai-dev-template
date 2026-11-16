@@ -1,7 +1,10 @@
 name: Skills drift check
 description: >-
   Fail when a vendored agent skill no longer matches its computedHash in
-  skills-lock.json (the hash the skills CLI writes).
+  skills-lock.json. In a repo that installed the skills, the pinned skills CLI
+  (../skills-cli/package.json) does the check (`npx skills check`); a newer
+  upstream version is reported, not failed. The template repo checks its own
+  skills offline.
 inputs:
   root:
     description: Repository root that holds skills-lock.json and the skill folders.
@@ -14,6 +17,10 @@ runs:
       shell: bash
       env:
         SKILLS_ROOT: ${{ inputs.root }}
+        # The CLI fetches each skill's source to compare it; a token keeps those
+        # reads under the GitHub API rate limit. The job's own token only reads.
+        GITHUB_TOKEN: ${{ github.token }}
+        DISABLE_TELEMETRY: "1"
       run: |
         args=(--root "$SKILLS_ROOT")
         if [ -f "$SKILLS_ROOT/scripts/init_template.py" ]; then

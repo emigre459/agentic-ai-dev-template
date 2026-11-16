@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import keyword
+import os
 import re
 import shutil
 import subprocess
@@ -373,98 +374,72 @@ _LOCK_FILE = "skills-lock.json"
 _HASH_SCRIPT = Path(".github") / "actions" / "skills-drift" / "skills-lock.mjs"
 _SKILLS_DIR = Path(".agents") / "skills"
 
-# ICU root collation order of the printable ASCII punctuation, the one
-# `String.prototype.localeCompare` uses: whitespace, then these, then digits,
-# then letters (see `_locale_sort_key`).
-_PUNCTUATION_ORDER = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$"
-_DIGITS_ORDER = "0123456789"
+# Names the skills CLI leaves out of a skill folder's hash (lock version 2).
+_EXCLUDED_FILES = frozenset({"metadata.json"})
+_EXCLUDED_DIRS = frozenset({".git", "__pycache__", "__pypackages__"})
 
 
-def _locale_sort_key(name: str) -> tuple[list[int], list[int]]:
-    """Sort key emulating ``String.prototype.localeCompare`` (ICU root collation).
+def _collect_skill_files(
+    directory: Path,
+    prefix: str,
+    root: str,
+    ancestors: frozenset[str],
+    found: list[tuple[str, Path]],
+) -> None:
+    """Collect ``(relative path, file)`` pairs under ``directory`` the way the CLI does.
 
-    The ``skills`` CLI orders the files it hashes with ``localeCompare``; the hash
-    only matches if this port orders them the same way. Only the ordering rules
-    that occur in a skill folder's relative POSIX paths are emulated:
-
-    - primary: whitespace, then punctuation and symbols (in ``_PUNCTUATION_ORDER``
-      order, so ``_`` < ``-`` < ``.`` < ``/``), then digits, then letters compared
-      case-insensitively; a shorter string that is a prefix sorts first;
-    - tertiary, only on a full primary tie: lowercase before uppercase, decided
-      at the first differing letter.
-
-    Accented and other non-ASCII characters are not collated like ICU does (they
-    sort after ASCII letters by code point). That is outside this port's scope:
-    it only ever hashes this repo's own skills, and a wrong order surfaces as a
-    hash mismatch, never as silently accepted content. The node-vs-port test over
-    the real skills is the guard.
-
-    Parameters
-    ----------
-    name
-        Relative POSIX path of a file inside a skill folder.
-
-    Returns
-    -------
-    tuple[list[int], list[int]]
-        ``(primary weights, tertiary weights)``; compare as a tuple.
+    Excluded names are skipped; a symlink counts as its target when that resolves
+    inside the skill folder (``root``, its real path) and is left out otherwise
+    (broken, cyclic or escaping links); a directory reached again through a link
+    is skipped.
     """
-    primary: list[int] = []
-    tertiary: list[int] = []
-    for char in name:
-        lower = char.lower()
-        if char in _PUNCTUATION_ORDER:
-            primary.append(_PUNCTUATION_ORDER.index(char))
-        elif char in _DIGITS_ORDER:
-            primary.append(len(_PUNCTUATION_ORDER) + _DIGITS_ORDER.index(char))
-        elif "a" <= lower <= "z":
-            primary.append(
-                len(_PUNCTUATION_ORDER) + len(_DIGITS_ORDER) + ord(lower) - ord("a")
-            )
-        else:
-            primary.append(1000 + ord(char))
-        tertiary.append(1 if char != lower else 0)
-    return primary, tertiary
-
-
-def _skill_files(skill_dir: Path) -> list[Path]:
-    """List the regular files under ``skill_dir`` the way the skills CLI does.
-
-    Skips ``.git`` and ``node_modules`` directories and never follows symlinks
-    (a symlink, to a file or a directory, is not a regular file and is ignored).
-    """
-    found: list[Path] = []
-    for entry in skill_dir.iterdir():
-        if entry.is_symlink():
+    real_dir = os.path.realpath(directory)
+    if real_dir in ancestors:
+        return
+    branch = ancestors | {real_dir}
+    for entry in directory.iterdir():
+        is_dir = entry.is_dir() and not entry.is_symlink()
+        if entry.name in _EXCLUDED_FILES or (is_dir and entry.name in _EXCLUDED_DIRS):
             continue
-        if entry.is_dir():
-            if entry.name not in (".git", "node_modules"):
-                found.extend(_skill_files(entry))
-        elif entry.is_file():
-            found.append(entry)
-    return found
-
-
-def _ordered_skill_files(skill_dir: Path) -> list[Path]:
-    """Return the skill folder's hashed files in the CLI's ``localeCompare`` order."""
-    return sorted(
-        _skill_files(skill_dir),
-        key=lambda path: _locale_sort_key(path.relative_to(skill_dir).as_posix()),
-    )
+        path = prefix + entry.name
+        if entry.is_symlink():
+            target = os.path.realpath(entry)
+            if not os.path.exists(target) or (
+                target != root and not target.startswith(root + os.sep)
+            ):
+                continue
+            is_dir = os.path.isdir(target)
+            if is_dir and entry.name in _EXCLUDED_DIRS:
+                continue
+        elif not is_dir and not entry.is_file():
+            continue
+        if is_dir:
+            _collect_skill_files(entry, f"{path}/", root, branch, found)
+        else:
+            found.append((path, entry))
 
 
 def _python_skill_hash(skill_dir: Path) -> str:
     """SHA-256 of a skill folder, identical to the ``skills`` CLI's ``computedHash``.
 
-    A stdlib port of ``computeSkillFolderHash`` for machines without ``node``: the
-    digest of every regular file, in ``localeCompare`` order of its POSIX relative
-    path, each contributing its path then its bytes. Tested against the CLI's own
+    A stdlib port of the CLI's version-2 ``computeSkillFolderHash`` for machines
+    without ``node``: the files sorted by the UTF-8 bytes of their ``/``-separated
+    relative paths, each framed as ``path NUL length NUL content``, with CRLF
+    turned into LF in text files (no NUL byte). Tested against the CLI's own
     output (``tests/template/fixtures/skills_lock/golden.json``).
     """
+    found: list[tuple[str, Path]] = []
+    _collect_skill_files(skill_dir, "", os.path.realpath(skill_dir), frozenset(), found)
     digest = hashlib.sha256()
-    for path in _ordered_skill_files(skill_dir):
-        digest.update(path.relative_to(skill_dir).as_posix().encode("utf-8"))
-        digest.update(path.read_bytes())
+    for rel, path in sorted(found, key=lambda item: item[0].encode("utf-8")):
+        content = path.read_bytes()
+        if b"\0" not in content:
+            content = content.replace(b"\r\n", b"\n")
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(len(content)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(content)
     return digest.hexdigest()
 
 

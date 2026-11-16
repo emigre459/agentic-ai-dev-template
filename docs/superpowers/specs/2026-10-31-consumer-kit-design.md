@@ -28,11 +28,18 @@ agent drafts at most one paragraph describing each release.
 - **`skills-lock.json` (project lock) entries** hold `source`, `ref` (branch or tag),
   `sourceType`, `skillPath` and `computedHash`. Source: vercel-labs/skills
   `src/local-lock.ts`.
-- **`computedHash`** is SHA-256 over every regular file in the skill folder:
-  - files are sorted by relative path with JavaScript `localeCompare`;
-  - each file contributes its relative POSIX path, then its bytes;
-  - `.git` and `node_modules` are skipped, and symlinks are not followed;
-  - `__pycache__` is **not** skipped, so the drift check must run on a clean checkout.
+- **`computedHash`** (lock version 2, CLI 1.8.0+, re-verified 2026-11-15 after
+  vercel-labs/skills#2685) is SHA-256 over the skill folder's files
+  (`src/skill-hash.ts`):
+  - files are sorted by the UTF-8 bytes of their `/`-separated relative paths;
+  - each file is framed as `path NUL length NUL content`, with CRLF turned into LF
+    in text files (those without a NUL byte);
+  - files named `metadata.json` and `.git`, `__pycache__` and `__pypackages__`
+    directories are skipped; `node_modules` is hashed;
+  - a symlink counts as its target when that is inside the folder, else it is skipped.
+- Version 1 (CLI 1.7.x and earlier) sorted with `localeCompare` and fed path, then
+  bytes, with no framing. The CLI migrates a v1 lock to v2 when it reads one, so the
+  kit writes v2 and leaves v1 locks in consumer repos to the CLI.
 - **`skills update` never moves an entry off its `ref`.** A tag-pinned entry is
   re-checked against that same tag, so it never updates on its own. A branch-tracking
   entry (or one with no ref) follows its branch (`src/update.ts`).
@@ -59,7 +66,7 @@ battle-tested, so L2 ports it (org-neutral, no downstream names or issue numbers
 rather than designing from scratch.
 
 **The workflow** (`skills-update.yml`):
-- runs `npx -y skills@latest update -p -y` on Node 22 (current CLIs need Node >= 22.20);
+- runs `npx -y skills@<pin> update -p -y` (the pinned CLI version) on Node 22 (current CLIs need Node >= 22.20);
 - rebuilds a fixed branch on the latest `main` before updating;
 - copies its helper script outside the work tree before switching branches.
 
@@ -137,11 +144,19 @@ for freshness against upstream).
    pinned lock it also deletes every `.agents/skills/<name>/` the lock doesn't list
    (unreleased skills added on main after the tag), and fails if a workflow still
    references a local `./.github/actions/skills-*` copy after the rewrite.
-3. A stdlib Node script reproduces the CLI's
-   `computedHash` exactly (same algorithm, same `localeCompare` sort; credit
-   vercel-labs/skills, MIT). Modes:
-   - `check`: for every lock entry, find the installed folder and fail when its hash
-     differs, naming each skill that drifted and what to do;
+3. A stdlib Node script reproduces the CLI's version-2
+   `computedHash` exactly (same algorithm; credit vercel-labs/skills, MIT), checked
+   against golden values produced by the CLI version pinned in
+   `.github/actions/skills-cli/package.json`. Every action runs that exact CLI
+   version, never `skills@latest`, and Dependabot bumps the pin. Modes:
+   - `check`: in a repo that installed the skills, run the pinned CLI's own
+     `npx skills check`. Its "has local changes" lines fail the check as drift; a
+     skill whose folder is gone fails as missing (checked first, since the CLI reads
+     it as an update). Its "has an update" lines pass with a notice: a newer
+     upstream version is the update PR's business, not drift. A CLI run that fails
+     without naming a skill fails the check;
+   - `check --template`: in the template repo, hash offline (the CLI would compare
+     untagged entries with `main` and flag every skill a PR edits);
    - `write`: regenerate the template's own entries from a given tag's content (the
      skill set is the tag's, not the working tree's). Template only; `make skills_lock`
      wraps it, and the re-pin PR uses it. Without a tag it refuses to overwrite a lock
@@ -172,7 +187,7 @@ re-installing a tag would wipe unreleased work. Each run:
 2. For each **tag-pinned** entry, look up its source's newest semver release tag. If it
    is newer, reinstall that entry's skills at the new tag with the `skills` CLI, which
    rewrites the folder and the lock.
-3. Run `npx -y skills@latest update -p -y` for the **branch-tracking** entries, without
+3. Run `npx -y skills@<pin> update -p -y` for the **branch-tracking** entries, without
    touching tag-pinned ones.
 3a. **New or removed skills at a newer tag:**
     - the PR updates the skills the repo already has;

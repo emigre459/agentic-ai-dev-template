@@ -9,8 +9,6 @@ from typing import Any, NoReturn
 import pytest
 
 from scripts.init_template import (
-    _locale_sort_key,
-    _ordered_skill_files,
     _python_skill_hash,
     ensure_clean_worktree,
     initialize,
@@ -622,22 +620,11 @@ def test_python_hash_port_matches_golden() -> None:
     assert _python_skill_hash(_FIXTURES / "demo-skill") == golden
 
 
-def _node_sorted(names: list[str]) -> list[str]:
-    """Sort ``names`` with node's ``localeCompare``, as the skills CLI does."""
-    script = (
-        "const n = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
-        "n.sort((a, b) => a.localeCompare(b));"
-        "console.log(JSON.stringify(n));"
-    )
-    result = subprocess.run(  # nosec B603 B607
-        ["node", "-e", script],
-        input=json.dumps(names),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    sorted_names: list[str] = json.loads(result.stdout)
-    return sorted_names
+def test_python_hash_port_matches_golden_on_edge_cases(edge_skill: Path) -> None:
+    """CRLF, binary bytes, excluded names, node_modules and every kind of symlink."""
+    golden = json.loads((_FIXTURES / "golden.json").read_text())["edge-skill"]
+
+    assert _python_skill_hash(edge_skill) == golden
 
 
 @_NEEDS_NODE
@@ -647,11 +634,6 @@ def _node_sorted(names: list[str]) -> list[str]:
     ids=lambda p: p.name,
 )
 def test_python_hash_port_matches_node_for_every_real_skill(skill_dir: Path) -> None:
-    """Guard on the port's ``localeCompare`` emulation, over the real skills."""
-    paths = [
-        p.relative_to(skill_dir).as_posix() for p in _ordered_skill_files(skill_dir)
-    ]
-    assert paths == _node_sorted(paths)
     node = subprocess.run(  # nosec B603 B607
         ["node", str(_HASH_SCRIPT), "hash", str(skill_dir)],
         capture_output=True,
@@ -659,19 +641,6 @@ def test_python_hash_port_matches_node_for_every_real_skill(skill_dir: Path) -> 
         check=True,
     )
     assert _python_skill_hash(skill_dir) == node.stdout.strip()
-
-
-@_NEEDS_NODE
-def test_python_sort_key_matches_localecompare_on_tricky_names() -> None:
-    names = [
-        "SKILL.md", "skill.md", "Skill.md", "a.md", "A.md", "a b.md", "a_b.md",
-        "a-b.md", "a1.md", "A1.md", "ab.md", "aB.md", "_private.md", ".hidden",
-        "1.txt", "10.txt", "2.txt", "sub/b.txt", "sub/A.txt", "sub.md", "sub-x/a",
-        "sub_x/a", "scripts/render.py", "scripts/Render.py", "scripts/__init__.py",
-        "references/stacked-prs.md", "references/parallel-fixes.md", "Zeta.md",
-        "zeta.md", "(x).md", "x+y.md", "x&y.md", "x,y.md", "x~y.md", "x@y.md",
-    ]  # fmt: skip
-    assert sorted(names, key=_locale_sort_key) == _node_sorted(names)
 
 
 def test_init_pins_with_the_python_hash_when_node_is_missing(
