@@ -28,6 +28,7 @@ dev = [
     "mypy>=1.13.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
+    "pytest-socket>=0.8.1",
     "pytest-xdist>=3.6.1",
     "ruff>=0.15.20",
 ]
@@ -60,8 +61,13 @@ convention = "numpy"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-n auto -m 'not e2e and not integration'"
+addopts = "-n auto -m 'not e2e and not integration' --allow-hosts=127.0.0.0/8,::1,localhost --allow-unix-socket"
+# A blocked connect in a background thread surfaces only as pytest's thread-exception
+# warning; promote it to an error when it names NetworkBlocked (tests/_network_block.py).
+filterwarnings = [
+    "error:(?s).*NetworkBlocked:pytest.PytestUnhandledThreadExceptionWarning",
+]
 markers = [
-    "integration: marks tests that call live external APIs",
+    "integration: marks tests that call live external APIs. Opt-in lane: keeps real network access, while default-lane tests are blocked from non-loopback hosts",
     "e2e: marks tests that exercise the full pipeline against live services",
 ]
