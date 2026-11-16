@@ -212,7 +212,26 @@ conventions are fair game:
 <!-- .agents/skill-config/build-from-issue.md -->
 - Write specs under `docs/design/` instead of `docs/superpowers/specs/`.
 - Our E2E target is `make smoke`.
+
+## Branch pattern
+
+`{issue-number}-{kebab-case}`, required. Examples: `42-retry-failed-webhooks`; a
+stack layer, `42-l2-retry-queue`. Launcher names such as `issue-42`,
+`<user>/<slug>` and `worktree-<name>` don't match, so the skill renames them.
+Why: `scripts/dev_env.sh` names each worktree's database after the leading issue
+number.
 ```
+
+`build-from-issue` defaults to `{issue-number}-{kebab-case}` when no pattern is set.
+Its Step 1a renames a fresh launcher-named workspace (no commits, nothing pushed, no
+PR) to the pattern before the first commit. Any other non-matching branch goes
+through the usual mismatch question first; a pushed one is renamed only after you
+agree, and an open PR's head is never renamed, because GitHub closes a PR whose head
+branch is renamed. Set the pattern when your
+tooling parses the issue number out of a branch name (a per-worktree database or
+container name, a CI job keyed on the issue): a branch that doesn't match is
+invisible to that tooling, and to the in-flight check that keeps two sessions off
+the same card. Say why in the file, so the next reader knows what breaks.
 
 A line like `Merge the PR yourself once CI is green.` would be skipped and reported:
 merging without your one-off OK is a hard stop.
