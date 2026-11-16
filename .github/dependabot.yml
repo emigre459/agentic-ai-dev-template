@@ -1,3 +1,15 @@
+# Security updates always; version updates for MAJOR versions only.
+#
+# Every entry has an `allow` rule on `version-update:semver-major`, so routine
+# minor/patch bumps no longer open weekly PRs, while each major lands on its own
+# PR where someone will notice it (a major left unnoticed is how a project ends
+# up a whole SDK version behind when the vendor removes APIs). `update-types`
+# limits version updates only: Dependabot security updates are still created
+# for every update type, with each entry's labels and commit prefix.
+# Take a minor/patch change outside a security fix as a deliberate upgrade in a
+# normal PR (see the upgrade-deps skill).
+#
+# Guarded by tests/template/test_dependabot_policy.py.
 version: 2
 updates:
 # >>> STACK:python
@@ -10,10 +22,14 @@ updates:
     labels: ["dependencies", "python"]
     commit-message:
       prefix: "deps"
-    groups:
-      # Bundle routine minor/patch bumps into one PR; majors still land alone.
-      python-dev:
-        update-types: ["minor", "patch"]
+    allow:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      # uv ships breaking changes in 0.x MINOR releases, and the build-system
+      # pin in pyproject.toml spans a single minor line, so a uv-build minor is
+      # effectively a major here.
+      - dependency-name: "uv-build"
+        update-types: ["version-update:semver-minor"]
 # <<< STACK:python
 # >>> STACK:react
   # bun-managed stack (bun.lock); "npm" cannot read bun.lock.
@@ -24,6 +40,9 @@ updates:
     labels: ["dependencies", "javascript"]
     commit-message:
       prefix: "deps"
+    allow:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       # Keep peer-coupled packages together so a major on one doesn't land as a
       # separate, mutually-incompatible PR. (See #4: vite 8 needs plugin-react 6;
@@ -32,9 +51,6 @@ updates:
         patterns: ["vite", "@vitejs/*"]
       vitest:
         patterns: ["vitest", "@vitest/*"]
-      # Everything else: bundle routine minor/patch bumps; majors land alone.
-      react-dev:
-        update-types: ["minor", "patch"]
 # <<< STACK:react
 # >>> STACK:template
   # Repo-root uv project — the TEMPLATE's own tooling (its pyproject.toml +
@@ -48,9 +64,9 @@ updates:
     labels: ["dependencies", "python"]
     commit-message:
       prefix: "deps"
-    groups:
-      python-dev:
-        update-types: ["minor", "patch"]
+    allow:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 # <<< STACK:template
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -59,6 +75,6 @@ updates:
     labels: ["dependencies", "github-actions"]
     commit-message:
       prefix: "ci"
-    groups:
-      github-actions:
-        update-types: ["minor", "patch"]
+    allow:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
