@@ -11,20 +11,23 @@ read-only and gave repos files of their own to customize them. #49 gives repos t
 install pinned to a release tag; a nightly "Update agent skills" PR that moves the pins
 forward, the way Dependabot does; a CI check that fails when a vendored skill was edited
 (the drift check); and a hand-cut release flow (release-drafter, a `release` skill, a
-`release.yml` workflow) with the version taken from PR labels. `CHANGELOG.md` is gone in
+`release.yml` workflow) with the version taken from PR labels. Every step that runs the
+skills CLI runs the exact version pinned in `.github/actions/skills-cli/package.json`
+(1.8.1 at the time of writing), never whatever version is newest. `CHANGELOG.md` is gone in
 favor of GitHub Releases. The design is
 `docs/superpowers/specs/2026-10-31-consumer-kit-design.md`; the README sections to read
 alongside it are "Installing the skills", "Staying up to date", "The drift check" and
 "Cutting a release".
 
-**The stack** (four PRs; the top one, L4, holds the whole change):
+**The stack** (five PRs; the top one, L5, holds the whole change):
 
 | Layer | Branch | PR | Owns |
 |-------|--------|----|------|
-| L1 | `49-consumer-kit` | `59` | `skills-lock.json`, the drift action and `skills-lock.mjs`, `make init` pinning, the required `skills drift` check |
+| L1 | `49-consumer-kit` | `59` | `skills-lock.json` (lock version 2), the drift action and `skills-lock.mjs`, the skills CLI pin, `make init` pinning, the required `skills drift` check |
 | L2 | `49-l2-update-pr` | `60` | the nightly update: `skills-update.yml`, the `skills-update` action, `bump-pins.mjs`, `update-pr.sh` |
-| L3 | `49-l3-releases` | `61` | `release-drafter.yml` and its workflow, `release.yml`, the `patch`/`minor`/`major` labels, `CHANGELOG.md` deleted |
+| L3 | `49-l3-releases` | `61` | `release-drafter.yml` and its workflow, `release.yml`, the `patch`/`minor`/`major` labels, the `v0.0.0` baseline at bootstrap, `CHANGELOG.md` deleted |
 | L4 | `49-l4-release-agent` | `62` | the `release` skill, `build-from-issue` bump suggestions, README, `AGENTS.md`, this runbook |
+| L5 | `49-l5-branch-name-gate` | `67` | `build-from-issue`'s branch-name gate (an addendum; nothing in this runbook exercises it) |
 
 Sections 4 and 5 are marked **reviewer-run**: they create a GitHub repository and run
 workflows in it, which only you should do. The agent that wrote this kit ran sections 0
@@ -32,8 +35,8 @@ to 3, and the local half of section 4, but nothing on GitHub.
 
 ## 0. Prerequisites
 
-You need `git`, `gh` (logged in), `node` 22 or newer with `npx`, `uv`, and `jq`. Turn off
-the skills CLI's telemetry for this session:
+You need `git`, `gh` (logged in), `node` 22 or newer with `npx`, `uv`, `jq`, and network
+access to npm and GitHub. Turn off the skills CLI's telemetry for this session:
 
 ```bash
 export DISABLE_TELEMETRY=1
@@ -47,6 +50,13 @@ Sections 4 and 5 push `.github/workflows/` files. If your git remotes use HTTPS,
 token needs the `workflow` scope or the push is rejected: run
 `gh auth refresh -s workflow` now. (SSH remotes don't need it.)
 
+Sections 4 and 5 also run Actions in a private repo you own. On a free personal account,
+check Settings, Billing, **Budgets and alerts** first: an Actions budget of `$0` with
+"stop usage when the limit is reached" on makes every run end in `startup_failure`,
+with no job and no log. The only clue is a check-run annotation, "The job was not
+started because your account is locked due to a billing issue." Delete that budget, or
+turn its stop off; no payment method is needed for the free minutes.
+
 Optional: the `gh stack` extension gives you `gh stack view` and `gh stack checkout`.
 You don't need it to review.
 
@@ -59,24 +69,28 @@ Check out the top layer (it contains every layer's change). Use a fresh clone:
 ```bash
 gh repo clone emigre459/agentic-ai-dev-template consumer-kit-review
 cd consumer-kit-review
-gh pr checkout 62
+gh pr checkout 67
 REVIEW_DIR=$PWD   # later sections come back here
+CLI=$(jq -r '.dependencies.skills' .github/actions/skills-cli/package.json)
 git branch --show-current
+echo "skills CLI pin: $CLI"
 ```
 
-**Expect:** the last line prints `49-l4-release-agent`.
+**Expect:** `49-l5-branch-name-gate`, then the pinned CLI version (`1.8.1` when this kit
+was written). Every `npx` command below uses `skills@$CLI`.
 
 **If not:** `gh pr checkout` fails with "no pull requests found" when you are not in the
-clone, or `62` was not replaced with a number.
+clone. An empty `CLI` means the checkout predates the pin: re-run `gh pr checkout 67
+--force`.
 
 The stack branches are force-pushed whenever the author restacks them, so never update
 a layer branch from the remote with a plain pull. To refresh after the author pushes,
-re-run `gh pr checkout 62 --force`, which resets the local branch to the PR head.
+re-run `gh pr checkout 67 --force`, which resets the local branch to the PR head.
 
 ## 1. Automated checks
 
 Use one terminal for the whole kit. If you open a new one, set `DISABLE_TELEMETRY`,
-`REVIEW_DIR`, `ME` and `SCRATCH` again (section 0, 4b).
+`REVIEW_DIR`, `CLI`, `ME` and `SCRATCH` again (section 0, 4b).
 
 ```bash
 cd "$REVIEW_DIR"
@@ -84,7 +98,7 @@ make tooling_deps
 uv run pytest tests/template/test_skills_lock.py tests/template/test_initialize.py tests/template/test_skills_update.py tests/template/test_apply_repo_settings.py tests/template/test_release_workflows.py tests/template/test_skill_extension_points.py -q
 ```
 
-**Expect:** every test passes, none skipped. (When this kit was written: `287 passed`.)
+**Expect:** every test passes, none skipped. (When this kit was written: `320 passed`.)
 
 **If not:** a failing file tells you the layer. `test_skills_lock.py` and
 `test_initialize.py` are L1, `test_skills_update.py` is L2, `test_apply_repo_settings.py`
@@ -135,14 +149,15 @@ release and its re-pin PR, each is compared with that tag's copy of the skill.)
 
 ## 2. Hash parity with the real CLI
 
-The drift check is only useful if its hash is byte-for-byte the one `npx skills add`
-writes as `computedHash`. Install a real skill with the CLI into a scratch directory,
-pinned to an older release so a newer one exists (that matters in section 4):
+The drift check is only useful if the hashes agree byte for byte with the ones the
+pinned CLI writes as `computedHash` (lock version 2). Install a real skill with that
+CLI into a scratch directory, pinned to an older release so a newer one exists (that
+matters in section 4):
 
 ```bash
 gh api repos/github/gh-stack/releases --jq '.[].tag_name'
 rm -rf /tmp/kit-parity && mkdir /tmp/kit-parity && cd /tmp/kit-parity
-npx -y skills@latest add github/gh-stack#v0.2.0 --skill gh-stack -a universal -y
+npx -y "skills@$CLI" add github/gh-stack#v0.2.0 --skill gh-stack -a universal -y
 cat skills-lock.json
 ```
 
@@ -150,7 +165,8 @@ If `v0.2.0` is not in the list, pick any tag from it that is not the newest, and
 for the rest of this runbook. `-a universal` puts the skill in `.agents/skills/`.
 
 **Expect:** the CLI prints `Installed 1 skill` and `./.agents/skills/gh-stack`.
-`skills-lock.json` lists `gh-stack` with `"ref": "v0.2.0"` and a `computedHash`.
+`skills-lock.json` starts with `"version": 2` and lists `gh-stack` with
+`"ref": "v0.2.0"` and a `computedHash`.
 
 Now compare it with the script's own hash of the same folder:
 
@@ -162,23 +178,25 @@ echo "$MINE"
 test "$LOCKED" = "$MINE" && echo MATCH
 ```
 
-**Expect:** the two hex strings are identical and `MATCH` prints. (For `v0.2.0` when
-this kit was written: `6a5289601eedbeedc2d79c2d8627277afb9b9a3fbd78b4da3399a46dd788ae0a`.)
+**Expect:** the two hex strings are identical and `MATCH` prints. (For `v0.2.0` with
+CLI 1.8.1: `3df848720149e1d94a26a3779b3ec8e7d0ff79aa92947ed55970cc5c56522e20`.)
 
-**If not:** a mismatch is the stack's worst failure: the drift check would fail on every
-untouched install. Report the tag and both hashes. First check you are on the L4 checkout
-(`echo "$REVIEW_DIR"`), then whether a newer `skills` CLI changed its hashing
-(`npx -y skills@latest --version`).
+**If not:** a mismatch means the template writes hashes the CLI disagrees with, which
+breaks the template's own lock and `make init`'s verification. Report the tag, the CLI
+version (`echo "$CLI"`) and both hashes. First check you are on the L5 checkout
+(`echo "$REVIEW_DIR"`) and that you installed with `skills@$CLI`, not a newer CLI.
 
 ## 3. The drift check fails on a local edit
 
-Still in `/tmp/kit-parity`. First the clean case:
+Still in `/tmp/kit-parity`. In a repo that installed the skills, the check runs the
+pinned CLI's own `npx skills check` (so it needs the network). First the clean case:
 
 ```bash
 node "$REVIEW_DIR/.github/actions/skills-drift/skills-lock.mjs" check --root .; echo "exit=$?"
 ```
 
-**Expect:** no output and `exit=0`.
+**Expect:** the CLI's output, ending in `All project skills are up to date`, then
+`exit=0`.
 
 Now edit the installed skill, as someone ignoring "treat skill folders as read-only"
 would:
@@ -188,27 +206,46 @@ echo "LOCAL-EDIT" >> .agents/skills/gh-stack/SKILL.md
 node "$REVIEW_DIR/.github/actions/skills-drift/skills-lock.mjs" check --root .; echo "exit=$?"
 ```
 
-**Expect:** a `DRIFT gh-stack: .agents/skills/gh-stack hashes to <hash>, skills-lock.json
-has <hash>` line, then advice to revert the edit or move the change to
-`.agents/rules/` or `.agents/skill-config/<skill>.md`, then `exit=1`.
+**Expect:** the CLI's `✎ gh-stack has local changes`, then
+`DRIFT gh-stack: the installed files differ from its computedHash in skills-lock.json`,
+advice to revert the edit or move the change to `.agents/rules/` or
+`.agents/skill-config/<skill>.md`, the restore command
+(`npx -y skills@<pin> experimental_install --force`), and `exit=1`.
 
-Reinstalling the pinned tag restores the folder, and a deleted folder is reported as
-missing:
+Run the restore command it printed, then delete the folder:
 
 ```bash
-npx -y skills@latest add github/gh-stack#v0.2.0 --skill gh-stack -a universal -y
+npx -y "skills@$CLI" experimental_install --force
 node "$REVIEW_DIR/.github/actions/skills-drift/skills-lock.mjs" check --root .; echo "exit=$?"
 rm -rf .agents/skills/gh-stack
 node "$REVIEW_DIR/.github/actions/skills-drift/skills-lock.mjs" check --root .; echo "exit=$?"
 ```
 
-**Expect:** `exit=0` after the reinstall; after the `rm`,
-`MISSING gh-stack: no folder at .agents/skills/gh-stack or .claude/skills/gh-stack`
+**Expect:** `exit=0` after the restore; after the `rm`,
+`MISSING gh-stack: no SKILL.md in .agents/skills/gh-stack or .claude/skills/gh-stack`
 and `exit=1`.
 
-**If not:** `exit=0` after the edit means the check isn't comparing the folder with the
-lock; look at the `check` function in `.github/actions/skills-drift/skills-lock.mjs`.
-An exit of `2` means it couldn't read the lock file: check you are in `/tmp/kit-parity`.
+Last, a lock written by an older CLI (version 1) still checks, because the pinned CLI
+reads it:
+
+```bash
+rm -rf /tmp/kit-v1 && mkdir /tmp/kit-v1 && cd /tmp/kit-v1
+npx -y skills@1.7.6 add github/gh-stack#v0.2.0 --skill gh-stack -a universal -y
+jq .version skills-lock.json
+node "$REVIEW_DIR/.github/actions/skills-drift/skills-lock.mjs" check --root .; echo "exit=$?"
+echo "LOCAL-EDIT" >> .agents/skills/gh-stack/SKILL.md
+node "$REVIEW_DIR/.github/actions/skills-drift/skills-lock.mjs" check --root . | grep DRIFT
+jq .version skills-lock.json
+```
+
+**Expect:** `1`, then `exit=0`; after the edit a `DRIFT gh-stack` line; and the lock is
+still version `1` (the check never rewrites it).
+
+**If not:** `exit=0` after an edit means the check isn't reading the CLI's verdict; look
+at `cliProblems` in `.github/actions/skills-drift/skills-lock.mjs`. An exit of `2` names
+its reason on stderr: an unreadable lock (check you are in the scratch directory), or a
+CLI run that failed without naming a skill (often the network: run
+`npx -y "skills@$CLI" check` yourself to see why).
 
 ## 4. The nightly update PR, no token (reviewer-run)
 
@@ -227,8 +264,8 @@ scratch folder first:
 
 ```bash
 rm -rf /tmp/kit-bump && mkdir /tmp/kit-bump && cd /tmp/kit-bump
-npx -y skills@latest add github/gh-stack#v0.2.0 --skill gh-stack -a universal -y
-node "$REVIEW_DIR/.github/actions/skills-update/bump-pins.mjs" --root . 2>/dev/null
+npx -y "skills@$CLI" add github/gh-stack#v0.2.0 --skill gh-stack -a universal -y
+SKILLS_CLI_VERSION="$CLI" node "$REVIEW_DIR/.github/actions/skills-update/bump-pins.mjs" --root . 2>/dev/null
 jq -c '.skills["gh-stack"] | {ref, computedHash}' skills-lock.json
 node "$REVIEW_DIR/.github/actions/skills-drift/skills-lock.mjs" check --root .; echo "exit=$?"
 ```
@@ -236,7 +273,9 @@ node "$REVIEW_DIR/.github/actions/skills-drift/skills-lock.mjs" check --root .; 
 **Expect:** one line of JSON whose `bumped` array holds `gh-stack` with `"from":"v0.2.0"`
 and `"to"` set to the newest release (`v0.3.0` when this kit was written), and
 `"available":[]`, `"removed":[]`, `"no_releases":[]`. The lock then shows the new `ref`
-and a new `computedHash`, and the drift check passes (`exit=0`) on the bumped folder.
+and a new `computedHash` (the lock is still `"version": 2`), and the drift check passes
+(`exit=0`) on the bumped folder. (The action passes `SKILLS_CLI_VERSION` itself, read
+from the pin; run by hand without it, `bump-pins.mjs` refuses to start.)
 
 **If not:** with no `bumped` entry, check that the newest release is not a draft or
 pre-release, and that its tag looks like `vX.Y.Z`
@@ -260,7 +299,7 @@ echo "$ME $SCRATCH"
 ### 4c. Copy in the kit's pieces and a minimal CI
 
 The update workflow calls `./.github/actions/skills-update`, so the action goes in
-beside it. The CI workflow is the smallest one that has what the update PR needs: a
+beside it, with `skills-cli`, the pin both actions read. The CI workflow is the smallest one that has what the update PR needs: a
 `workflow_dispatch:` trigger (the action dispatches it on the `skills-update` branch)
 and a `skills drift` job.
 
@@ -269,6 +308,7 @@ cd "$SCRATCH"
 mkdir -p .github/workflows .github/actions
 cp -R "$REVIEW_DIR/.github/actions/skills-update" .github/actions/
 cp -R "$REVIEW_DIR/.github/actions/skills-drift" .github/actions/
+cp -R "$REVIEW_DIR/.github/actions/skills-cli" .github/actions/
 cp "$REVIEW_DIR/.github/workflows/skills-update.yml" .github/workflows/
 cat > .github/workflows/ci.yml <<'EOF'
 name: ci
@@ -293,19 +333,20 @@ EOF
 ls -R .github | head -20
 ```
 
-**Expect:** `.github/actions/skills-drift`, `.github/actions/skills-update` and the two
-workflow files.
+**Expect:** `.github/actions/skills-cli`, `.github/actions/skills-drift`,
+`.github/actions/skills-update` and the two workflow files.
 
 Now install an OLD release of `gh-stack`, pinned to a tag. `-a universal` is what makes
 `skills-lock.json` pin the release:
 
 ```bash
-npx -y skills@latest add github/gh-stack#v0.2.0 --skill gh-stack -a universal -y
+npx -y "skills@$CLI" add github/gh-stack#v0.2.0 --skill gh-stack -a universal -y
 jq -c '.skills["gh-stack"] | {ref, skillPath}' skills-lock.json
 node .github/actions/skills-drift/skills-lock.mjs check --root .; echo "exit=$?"
 ```
 
-**Expect:** `{"ref":"v0.2.0","skillPath":"skills/gh-stack/SKILL.md"}`, then `exit=0`.
+**Expect:** `{"ref":"v0.2.0","skillPath":"skills/gh-stack/SKILL.md"}`, then the CLI's
+`All project skills are up to date` and `exit=0`.
 
 ### 4d. Allow Actions to open PRs, then push
 
@@ -457,9 +498,11 @@ Leave the PR unmerged. Section 5 reuses this repo.
 
 ## 5. A test release (reviewer-run)
 
-This checks the L3 release flow in the same scratch repo: the labels, a draft release
-that follows the PR label, the `main`-only guard, the approved-version guard, and a
-published release with your summary above the PR list.
+This checks the L3 release flow in the same scratch repo: the labels, the `v0.0.0`
+baseline, a draft release that follows the PR label, the `main`-only guard, the
+approved-version guard, and a published release with your summary above the PR list.
+Use a scratch repo with no published release: if you kept one from an earlier run that
+has one, delete it (5f) and start again at 4b.
 
 ### 5a. Add the release pieces and the labels
 
@@ -484,7 +527,24 @@ gh label list
 **Expect:** `patch`, `minor` and `major` are created and listed, all lowercase.
 
 **If not:** "already exists" is fine if you re-ran it. A missing `labels.json` means you
-are not in the L3 or L4 checkout.
+are not in the L5 checkout.
+
+Now the baseline. With no published release, release-drafter has nothing to compare
+with: it would draft `v0.0.1` listing no PRs and ignore the `minor` label. A repo made
+from the template gets a `v0.0.0` baseline from `make apply_repo_settings_bootstrap`
+(it also sets the ruleset, which would block this runbook's direct pushes to `main`, so
+it isn't run here). Publish the same baseline by hand, at the repo's first commit, with
+the bootstrap's own notes:
+
+```bash
+BASE=$(git rev-list --max-parents=0 HEAD)
+NOTES=$(cd "$REVIEW_DIR" && uv run python -c 'from scripts.apply_repo_settings import BASELINE_NOTES; print(BASELINE_NOTES)')
+gh release create v0.0.0 --target "$BASE" --title v0.0.0 --latest=false --notes "$NOTES"
+gh release list
+```
+
+**Expect:** `v0.0.0` is listed as a published release (not a draft). Any draft from the
+5a push (such as `v0.0.1`) may be listed too; the next drafter run replaces it.
 
 ### 5b. Merge one PR labeled `minor`
 
@@ -518,19 +578,21 @@ Then watch it and read the draft. (`gh release view` with no tag shows the lates
 
 ```bash
 gh run watch "$RUN" --exit-status
-gh api "repos/$ME/skills-kit-scratch/releases" --jq '.[0] | [.tag_name, .draft]'
-gh api "repos/$ME/skills-kit-scratch/releases" --jq '.[0].body'
+gh api "repos/$ME/skills-kit-scratch/releases" --jq '[.[] | select(.draft)][0] | [.tag_name, .draft]'
+gh api "repos/$ME/skills-kit-scratch/releases" --jq '[.[] | select(.draft)][0].body'
 ```
 
-**Expect:** the first line prints `["v0.1.0",true]` (a draft named `v0.1.0`: a `minor`
-PR on a repo with no releases), and the body lists `Add a feature` with its PR number.
-An earlier draft from the first push (such as `v0.0.1`) may have existed; the draft
-should now have moved to `v0.1.0`.
+**Expect:** the first line prints `["v0.1.0",true]` (a draft named `v0.1.0`: one
+`minor` PR since the `v0.0.0` baseline), and the body lists `Add a feature` with its PR
+number and no "Release Drafter could not find a previous published release" warning.
 
-**If not:** a `v0.0.1` draft after the minor PR means the label was not read: check
-`gh pr view scratch-feature --json labels` shows `minor`, and that the label name is exactly lowercase
-(the config's `version-resolver` matches the names `major`, `minor`, `patch`). No draft
-at all means the `release drafter` run failed: open it with `gh run view --log-failed`.
+**If not:** a `v0.0.1` draft with `* No changes` and that warning means the baseline is
+missing: check `gh release list` shows `v0.0.0` as published, not a draft or a
+pre-release. A `v0.0.1` draft that does list the PR means the label was not read: check
+`gh pr view scratch-feature --json labels` shows `minor`, and that the label name is
+exactly lowercase (the config's `version-resolver` matches the names `major`, `minor`,
+`patch`). No draft at all means the `release drafter` run failed: open it with
+`gh run view --log-failed`.
 
 ### 5c. The workflow refuses to publish from a branch
 
@@ -550,8 +612,8 @@ gh release list
 **Expect:** the run on `scratch-branch` is not a `success`: either the run's conclusion
 is `skipped`, or the job list shows `publish release` with conclusion `skipped` (the
 exact run-level value for a skipped-by-`if:` job is the less certain part, so judge by
-the job). The release list still shows only the draft `v0.1.0`, no published release
-and no `v0.1.0` tag. (A tag created from a branch would pin consumers to unmerged
+the job). The release list still shows only the baseline `v0.0.0` and the draft
+`v0.1.0`: no published `v0.1.0` and no `v0.1.0` tag. (A tag created from a branch would pin consumers to unmerged
 code.)
 
 **If not:** a published release, or a `success` run, means the `if: github.ref ==
@@ -582,8 +644,9 @@ If `run=` is empty, wait and repeat the `RUN=` line.
 
 **Expect:** `exit=1`. The failed step is "Check the version matches the approved one",
 and its log says `release-drafter would publish v0.1.0, but the approved version is
-v9.9.9. Nothing was published`. The release list still shows only the draft `v0.1.0`,
-and `git ls-remote --tags` prints nothing.
+v9.9.9. Nothing was published`. The release list still shows only the baseline
+`v0.0.0` and the draft `v0.1.0`, and `git ls-remote --tags` prints only
+`refs/tags/v0.0.0`.
 
 **If not:** a published release, or a green run, means the check before the publish step
 in `.github/workflows/release.yml` is missing or compares the wrong output. A failure in
@@ -612,7 +675,7 @@ git ls-remote --tags origin v0.1.0
 - the run is green and its summary page says `Released v0.1.0` with a link;
 - the first command prints `v0.1.0` and `false` (published, not a draft);
 - the body starts with your summary paragraph, then a blank line, then the merged-PR list
-  with `Add a feature`;
+  with `Add a feature`, and has no release-drafter warning block;
 - `git ls-remote` prints one line ending in `refs/tags/v0.1.0`.
 
 **If not:**
@@ -628,7 +691,7 @@ git ls-remote --tags origin v0.1.0
 ```bash
 cd "$HOME"
 gh repo delete "$ME/skills-kit-scratch" --yes
-rm -rf "$SCRATCH" /tmp/kit-parity /tmp/kit-bump
+rm -rf "$SCRATCH" /tmp/kit-parity /tmp/kit-v1 /tmp/kit-bump
 ```
 
 `gh repo delete` needs the `delete_repo` scope: run `gh auth refresh -s delete_repo`
@@ -637,25 +700,26 @@ first, or delete the repo in its Settings page on github.com. If you made a toke
 
 ## 6. Reviewing the stack
 
-- **One layer at a time, bottom-up: L1, then L2, L3, L4.** Open each PR's "Files
+- **One layer at a time, bottom-up: L1, then L2, L3, L4, L5.** Open each PR's "Files
   changed" tab: it shows only that layer's diff, because each PR is based on the one
   below it. Read the layer owning the code, using the table at the top.
 - **Comments go on the layer that owns the code,** even when you saw the problem while
   running the top layer. The author fixes it there and restacks.
-- **Don't merge from a lower layer.** The stack lands from the top PR (`62`), which
+- **Don't merge from a lower layer.** The stack lands from the top PR (`67`), which
   brings the layers below it. Each layer must be green on its own before that.
 - To see one layer's diff locally, compare it with the branch below it:
 
 ```bash
 cd "$REVIEW_DIR"
-git fetch origin 49-consumer-kit 49-l2-update-pr 49-l3-releases 49-l4-release-agent
+git fetch origin 49-consumer-kit 49-l2-update-pr 49-l3-releases 49-l4-release-agent 49-l5-branch-name-gate
 git diff --stat origin/main...origin/49-consumer-kit
 git diff --stat origin/49-consumer-kit origin/49-l2-update-pr
 git diff --stat origin/49-l2-update-pr origin/49-l3-releases
 git diff --stat origin/49-l3-releases origin/49-l4-release-agent
+git diff --stat origin/49-l4-release-agent origin/49-l5-branch-name-gate
 ```
 
-**Expect:** four summaries matching the "Owns" column above. A file in the wrong layer
+**Expect:** five summaries matching the "Owns" column above. A file in the wrong layer
 is worth a comment.
 
 A few reading checks on the top layer:
@@ -687,9 +751,19 @@ Judgment calls worth a second opinion:
 - **The template's drift check verifies the lock against tags,** not the working tree
   (once entries have a `ref`), because `main` is allowed to be ahead of the lock.
 - **Secrets are scoped to the steps that need them,** never put in job or workflow `env`,
-  because the update action runs the unpinned `npx skills@latest`. Inside the action, the
+  because the update action runs third-party code (`npx skills`). Inside the action, the
   chosen token reaches only the push-credential and PR steps; the `npx` steps run with
   the job's own `github.token`.
+- **One pinned skills CLI, two kinds of check.** Every action runs the exact CLI version
+  in `.github/actions/skills-cli/package.json` (Dependabot bumps it in the template;
+  consumers get it with each release). In an installed repo the drift check is the CLI's
+  own `npx skills check`, so a future hash change can't split the CLI from the check;
+  it needs the network, and an upstream update passes as `UPDATE`. The template checks
+  offline, because the CLI would compare its untagged entries with `main` and flag
+  every skill a PR edits.
+- **A `v0.0.0` baseline release** gives release-drafter its comparison point for the
+  first real release. Bootstrap creates it in new repos; the `release` skill offers it,
+  at a commit the user picks, in repos without one.
 - **Labels are matched case-insensitively and renamed to lowercase** by
   `make apply_repo_settings_bootstrap`: a repo's existing `Minor` is renamed `minor`
   (GitHub rejects a second `minor` beside it), because release-drafter's label match is
@@ -712,13 +786,13 @@ first release and its re-pin PR, so until then only its tests cover it
 | # | Check | Pass? |
 |---|-------|-------|
 | 1 | Automated tests pass; counts are 11/11/11; an edited skill fails the shipped-lock guard | |
-| 2 | The script's hash equals the CLI's `computedHash` | |
-| 3 | The drift check passes clean, fails on an edit (`exit=1`) and on a missing folder | |
+| 2 | The script's hash equals the pinned CLI's `computedHash` (lock version 2) | |
+| 3 | The drift check passes clean, fails on an edit (`exit=1`) and on a missing folder, and still works on a version-1 lock | |
 | 4a | The local bump dry run names `gh-stack` and the new release; the drift check still passes | |
 | 4 | The update workflow opens one PR bumping `gh-stack`, with CI dispatched on the branch | |
 | 4f | A second run reuses the PR and doesn't push | |
 | 4g | (Optional) With `SKILLS_UPDATE_TOKEN`, the PR's own `pull_request` CI runs and nothing is dispatched | |
-| 5 | A `minor` PR yields a `v0.1.0` draft; a branch run is skipped; a wrong `version` fails without publishing; a main run publishes with the summary above the PR list | |
+| 5 | With the `v0.0.0` baseline, a `minor` PR yields a `v0.1.0` draft; a branch run is skipped; a wrong `version` fails without publishing; a main run publishes with the summary above the PR list | |
 | 6 | Each layer's diff reads well in its own PR; the judgment calls hold up | |
 
 Leave findings as review comments on the PR for the layer that owns the code, ideally on

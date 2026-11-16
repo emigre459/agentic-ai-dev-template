@@ -429,3 +429,84 @@ def test_runbook_has_the_optional_pat_path_and_init_caveat() -> None:
     assert "## CI on this PR" in section4
     assert "with a real `ref`" in kit
     assert "make skills_lock TAG=" in kit
+
+
+# --- the first release: release-drafter needs a published baseline -----------
+
+
+def test_release_skill_offers_a_baseline_before_reading_the_draft() -> None:
+    text = _skill_text("release")
+    step0 = text.split("## Step 0:", 1)[1].split("\n## ", 1)[0]
+    assert text.index("## Step 0:") < text.index("## Step 1:")
+    assert (
+        "gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName"
+        in step0
+    )
+    assert "AskUserQuestion" in step0
+    assert "gh release create v0.0.0 --target" in step0
+    assert "--latest=false" in step0
+    assert "git rev-list --max-parents=0" in step0  # the default: the first commit
+    assert "gh workflow run release-drafter.yml --ref main" in step0
+    red_flags = text.split("## Red flags", 1)[1]
+    assert "baseline" in red_flags
+
+
+def test_readme_explains_the_pinned_cli_and_the_baseline() -> None:
+    readme = _readme()
+    drift = readme.split("## The drift check", 1)[1].split("\n## ", 1)[0]
+    assert "npx skills check" in drift
+    assert "UPDATE" in drift
+    assert "MISSING" in drift
+    release = readme.split("## Cutting a release", 1)[1].split("\n## ", 1)[0]
+    assert "v0.0.0" in release
+    assert "make apply_repo_settings_bootstrap" in release
+    assert "skills@latest" not in readme
+
+
+def _runbook_section(start: str, end: str) -> str:
+    kit = _KIT.read_text()
+    return kit[kit.index(start) : kit.index(end)]
+
+
+def test_runbook_uses_the_pinned_cli_and_copies_its_pin() -> None:
+    kit = _KIT.read_text()
+    assert "skills@latest" not in kit
+    assert '"skills@$CLI"' in kit
+    section4c = _runbook_section("### 4c.", "### 4d.")
+    assert (
+        'cp -R "$REVIEW_DIR/.github/actions/skills-cli" .github/actions/' in section4c
+    )
+    section4a = _runbook_section("### 4a.", "### 4b.")
+    assert 'SKILLS_CLI_VERSION="$CLI"' in section4a
+
+
+def test_runbook_expects_the_v2_hash_and_covers_a_v1_lock() -> None:
+    section2 = _runbook_section("## 2. Hash parity", "## 3.")
+    assert (
+        "3df848720149e1d94a26a3779b3ec8e7d0ff79aa92947ed55970cc5c56522e20" in section2
+    )
+    assert '"version": 2' in section2
+    section3 = _runbook_section("## 3. The drift check", "## 4.")
+    assert "skills@1.7.6" in section3  # an older CLI's version-1 lock still checks
+
+
+def test_runbook_names_the_actions_budget_trap() -> None:
+    section0 = _runbook_section("## 0. Prerequisites", "## 1.")
+    assert "startup_failure" in section0
+    assert "Budgets and alerts" in section0
+
+
+def test_runbook_seeds_the_baseline_before_the_first_release() -> None:
+    section5 = _runbook_section("## 5. A test release", "## 6.")
+    assert section5.index("gh release create v0.0.0") < section5.index("### 5b.")
+    section5b = _runbook_section("### 5b.", "### 5c.")
+    assert '["v0.1.0",true]' in section5b
+    # Two releases exist from here on: pick the draft, not the newest entry.
+    assert "select(.draft)" in section5b
+
+
+def test_runbook_covers_the_whole_stack_from_its_top_layer() -> None:
+    kit = _KIT.read_text()
+    assert "| L5 | `49-l5-branch-name-gate` | `67` |" in kit
+    assert "gh pr checkout 67" in kit
+    assert "gh pr checkout 62" not in kit

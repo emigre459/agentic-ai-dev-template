@@ -236,6 +236,10 @@ npx skills add emigre459/agentic-ai-dev-template#vX.Y.Z
   `DISABLE_TELEMETRY=1 npx skills add ...`. The nightly workflow below sets it for you.
 - Commit `.agents/skills/` and `skills-lock.json` together. Edits inside a skill
   folder are not kept: see "Customizing the skills in your repo".
+- **Any CLI version's lock works.** The skills CLI 1.8 writes lock version 2; older
+  versions wrote version 1. The kit's own steps run the exact CLI version it pins
+  (`.github/actions/skills-cli/package.json` in this repo, moved forward by Dependabot
+  and shipped with each release), which reads both.
 
 ## Staying up to date
 
@@ -252,6 +256,9 @@ titled "Update agent skills" from the `skills-update` branch, labeled `dependenc
   the way a superseded Dependabot PR does. When another merge covers only some of
   the updates, the PR shrinks to the rest.
 - It never merges itself. Review the diff and merge it like any other PR.
+- It runs the skills CLI version the kit pins, never `npx skills` at whatever version
+  is newest, so a CLI release can't change your lock or its hash format under you. A
+  newer CLI reaches you with the next release of the kit.
 
 Which identity opens the PR decides whether its CI runs. Set one of these as a
 repository secret, or neither:
@@ -308,7 +315,22 @@ from the template get this from `make finalize_repo_settings`).
 `skills drift` fails a pull request when a vendored skill no longer matches the hash
 recorded for it (`computedHash`) in `skills-lock.json`: an edited, added or deleted
 file inside a skill folder, or a skill folder that is missing. It is the guard behind
-"treat skill folders as read-only". When it fails:
+"treat skill folders as read-only".
+
+In your repo it asks the skills CLI itself, at the version the kit pins:
+`npx skills check` hashes each installed skill against the lock. Its verdicts:
+
+- `DRIFT <skill>`: the skill's files changed. The check fails.
+- `MISSING <skill>`: the skill's folder (with its `SKILL.md`) is gone. The check fails.
+- `UPDATE <skill>`: a newer version exists upstream, for a skill that follows a
+  branch instead of a tag. The check passes: moving it is the update PR's job.
+
+The CLI reads each skill's source from GitHub, so the job needs network access; it
+uses the job's own token for those reads. A CLI run that fails for another reason, such
+as a network error, fails the check rather than passing it: re-run the job. In this
+template the check runs offline instead, against its own skills.
+
+When it fails:
 
 - To keep repo-specific behavior, undo the edit and put it in
   `.agents/skill-config/<skill>.md`. A fix to the skill itself goes upstream as a PR.
@@ -317,10 +339,11 @@ file inside a skill folder, or a skill folder that is missing. It is the guard b
   the check fails.
 
 Run on your machine, the check can report drift that CI does not. It hashes every
-file on disk, so untracked files inside a vendored skill, such as a `__pycache__`
-folder from running one of its scripts or a `.DS_Store`, change the hash. CI runs it
-on a clean checkout, which is the result that counts. To reproduce a failure locally,
-first remove the untracked files (`git clean -n .agents/skills` lists them).
+file on disk (except `__pycache__` folders and files named `metadata.json`, which the
+CLI leaves out), so an untracked file inside a vendored skill, such as a `.DS_Store`,
+changes the hash. CI runs it on a clean checkout, which is the result that counts. To
+reproduce a failure locally, first remove the untracked files
+(`git clean -n .agents/skills` lists them).
 
 ## Cutting a release
 
@@ -355,6 +378,15 @@ substitutes `$VARIABLES` in it.
 The skill never publishes without your explicit OK for that release, and never merges
 anything.
 
+**The first release** needs a published release to compare with: release-drafter lists
+the PRs merged since the last one and bumps its version. With none, it drafts `v0.0.1`
+with no PRs listed and ignores the labels. `make apply_repo_settings_bootstrap`
+publishes a `v0.0.0` baseline release in a new repo, at its initial commit. In a repo
+that has no published release (this template before its first, or an existing repo
+adopting the kit), the `release` skill offers to publish that baseline first, at a
+commit you pick: by default the repo's first commit, so the first release lists every
+PR merged so far.
+
 **In this template**, a release also has a follow-up: the `release` skill offers to
 open a PR on a `release-pin-vX.Y.Z` branch that runs `make skills_lock TAG=vX.Y.Z`,
 recording the tag and hashes in `skills-lock.json`. Repos made from the template start
@@ -374,7 +406,8 @@ jq -c '.[]' labels.json | while read -r l; do gh label create "$(jq -r .name <<<
 rm labels.json
 ```
 
-There is no re-pin step, which only the template has.
+There is no re-pin step, which only the template has. Without a published release
+yet, let the `release` skill create the `v0.0.0` baseline (above).
 
 ## Prerequisites
 

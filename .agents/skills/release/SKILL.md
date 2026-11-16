@@ -12,6 +12,34 @@ allowed-tools: Bash AskUserQuestion Read
 
 Publishes the release that `release-drafter` keeps drafted from merged PRs. The version comes from the PR labels (`major`, `minor`; no label means patch), so it is chosen earlier, when PRs are labeled. This skill reads the draft, writes a one-paragraph summary, and publishes through `.github/workflows/release.yml`, which runs only from `main` and creates the tag. **Publishing is outward-facing: never publish without the user's explicit OK for that release, and this skill never merges anything.**
 
+## Step 0: Make sure there is a release to compare with
+
+release-drafter lists the PRs merged since the last **published** release and bumps that release's version. With none, it has no baseline: the draft is `v0.0.1` with no PRs listed, whatever the labels say, under a warning block. So check first:
+
+```bash
+gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName
+```
+
+A non-empty list means there is a baseline: go to Step 1. An empty one (`[]`) means this is the first release. A repo made from the template got a `v0.0.0` baseline from `make apply_repo_settings_bootstrap`; this one has none (the template itself, or an existing repo that adopted the kit). Explain that, and ask with `AskUserQuestion` whether to publish a `v0.0.0` baseline release and at which commit:
+
+1. **The repo's first commit (Recommended)**: `git rev-list --max-parents=0 origin/main`. The first release then lists every PR merged so far.
+2. **A commit or tag the user names**: only PRs merged after it are listed.
+3. **No baseline**: stop here; publishing now would only produce the `v0.0.1` draft above.
+
+On a choice of 1 or 2, publish the baseline at that full commit SHA, re-draft, and wait for the new drafter run as Step 2 does (record the time first, take the run created after it):
+
+```bash
+git fetch origin
+gh release create v0.0.0 --target <full commit SHA> --title v0.0.0 --latest=false \
+  --notes "Baseline for release notes, not a release of the code: release-drafter compares each release with the previous published one."
+date -u +%Y-%m-%dT%H:%M:%SZ
+gh workflow run release-drafter.yml --ref main
+gh run list --workflow release-drafter.yml --event workflow_dispatch --json databaseId,createdAt
+gh run watch <run-id> --exit-status
+```
+
+The baseline is a published release and a tag, so it needs the user's OK like any release; never create it unasked. Then go on to Step 1.
+
 ## Step 1: Find the draft release
 
 ```bash
@@ -80,6 +108,7 @@ Offer it to the user with `AskUserQuestion`; do it only on their OK, never autom
 ## Red flags
 
 - Publishing, or calling the workflow, before the user's explicit OK on the version and the paragraph.
+- Publishing the first release of a repo with no published release (Step 0) without offering the `v0.0.0` baseline, or creating the baseline without the user's OK.
 - Sending a `version` other than the one the user approved, or reading the draft after relabeling without first re-running the drafter.
 - Publishing from a branch other than `main`, or hand-editing the release to change its version.
 - A summary of more than one paragraph, or one that lists every PR.
