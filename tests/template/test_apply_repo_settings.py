@@ -442,10 +442,18 @@ class _FakeGh:
         reject_merge_queue: bool = False,
         fail_ruleset_with: str | None = None,
         labels: list | None = None,
+        releases: list | None = None,
     ) -> None:
         self.repo, self.org, self.rulesets = repo, org, rulesets or []
         self.labels = labels if labels is not None else list(_DESIRED_LABELS)
         self.label_writes: list[tuple[str, str, dict]] = []
+        # A repo that already published a release unless a test says otherwise.
+        self.releases = (
+            releases
+            if releases is not None
+            else [{"tag_name": "v1.0.0", "draft": False, "prerelease": False}]
+        )
+        self.release_writes: list[tuple[str, dict]] = []
         self.reject_merge_queue = reject_merge_queue
         self.fail_ruleset_with = fail_ruleset_with
         self.calls: list[list[str]] = []
@@ -464,6 +472,8 @@ class _FakeGh:
                 body = self.rulesets[0]
             elif endpoint == "repos/acme/repo":
                 body = self.repo
+            elif endpoint.startswith("repos/acme/repo/releases?"):
+                body = self.releases
             elif endpoint.startswith("repos/acme/repo/labels?"):
                 query = parse_qs(urlsplit(endpoint).query)
                 page, size = int(query["page"][0]), int(query["per_page"][0])
@@ -479,7 +489,9 @@ class _FakeGh:
             return SimpleNamespace(stdout=json.dumps(body))
         method = args[args.index("--method") + 1]
         endpoint = args[args.index("--method") + 2]
-        if "/labels" in endpoint:
+        if endpoint == "repos/acme/repo/releases":
+            self.release_writes.append((method, json.loads(str(kwargs["input"]))))
+        elif "/labels" in endpoint:
             self.label_writes.append(
                 (method, endpoint, json.loads(str(kwargs["input"])))
             )
@@ -820,3 +832,52 @@ def test_labels_stay_a_no_op_on_rerun() -> None:
     gh = _FakeGh(_repo("Organization", "public"))  # live labels == desired labels
     main(["--repo", "acme/repo", "--yes"], runner=gh)
     assert gh.label_writes == []
+
+
+# --- the release baseline (release-drafter needs a published release) ---------
+
+
+@pytest.mark.parametrize(
+    "releases",
+    [
+        [],
+        [{"tag_name": "v0.0.1", "draft": True, "prerelease": False}],
+        [{"tag_name": "v0.1.0-rc.1", "draft": False, "prerelease": True}],
+    ],
+    ids=["none", "draft-only", "prerelease-only"],
+)
+def test_bootstrap_publishes_a_baseline_when_there_is_no_release(
+    releases: list,
+) -> None:
+    repo = {**_repo("Organization", "public"), "default_branch": "trunk"}
+    gh = _FakeGh(repo, releases=releases)
+    assert (
+        main(["--repo", "acme/repo", "--phase", "bootstrap", "--yes"], runner=gh) == 0
+    )
+    ((method, payload),) = gh.release_writes
+    assert method == "POST"
+    assert payload["tag_name"] == "v0.0.0"
+    assert payload["target_commitish"] == "trunk"
+    assert payload["draft"] is False and payload["prerelease"] is False
+    assert "baseline" in payload["body"].lower()
+
+
+def test_bootstrap_lists_the_baseline_in_its_plan(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    gh = _FakeGh(_repo("Organization", "public"), releases=[])
+    main(["--repo", "acme/repo", "--phase", "bootstrap", "--yes"], runner=gh)
+    assert "baseline: POST (tag=v0.0.0)" in capsys.readouterr().out
+
+
+def test_bootstrap_leaves_a_repo_with_a_published_release_alone() -> None:
+    gh = _FakeGh(_repo("Organization", "public"))
+    main(["--repo", "acme/repo", "--phase", "bootstrap", "--yes"], runner=gh)
+    assert gh.release_writes == []
+
+
+def test_final_phase_never_creates_a_baseline() -> None:
+    gh = _FakeGh(_repo("Organization", "public"), releases=[])
+    main(["--repo", "acme/repo", "--yes"], runner=gh)
+    assert gh.release_writes == []
+    assert not any("releases" in " ".join(call) for call in gh.calls)

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Reconcile this repo's live settings with .github/repo-settings/.
 
-Covers the `main` ruleset, PR-merge prefs, Dependabot security updates, and the
+Covers the `main` ruleset, PR-merge prefs, Dependabot security updates, the
 semver bump labels (`patch` / `minor` / `major`; labels are only ever created or
-updated, never deleted).
+updated, never deleted), and, in the bootstrap phase of a repo with no published
+release, a `v0.0.0` baseline release that gives release-drafter something to
+compare the first real release with.
 Reads the canonical settings, diffs them against the live repo (via `gh`), prints
 the diff, and — unless ``--yes`` — asks for confirmation before applying. Idempotent.
 """
@@ -34,7 +36,7 @@ if TYPE_CHECKING:
     # One planned change: (setting kind, HTTP method, ruleset id for a PUT or
     # label name for a label change).
     Action = tuple[
-        Literal["ruleset", "merge", "security", "label"],
+        Literal["ruleset", "merge", "security", "label", "baseline"],
         Literal["POST", "PUT", "PATCH"],
         int | str | None,
     ]
@@ -277,6 +279,25 @@ def plan_label_actions(
     return actions
 
 
+BASELINE_TAG = "v0.0.0"
+BASELINE_NOTES = (
+    "Baseline for release notes, not a release of the code: release-drafter "
+    "compares each release with the previous published one, and without one it "
+    "drafts v0.0.1 with no changes listed and ignores the bump labels. Created by "
+    "`make apply_repo_settings_bootstrap`."
+)
+
+
+def plan_baseline_action(releases: Sequence[JsonObject]) -> list[Action]:
+    """Plan the ``v0.0.0`` baseline when no release is published.
+
+    A draft or a prerelease doesn't count: release-drafter looks only at published,
+    non-prerelease releases for its comparison baseline.
+    """
+    published = [r for r in releases if not r.get("draft") and not r.get("prerelease")]
+    return [] if published else [("baseline", "POST", BASELINE_TAG)]
+
+
 def plan_actions(
     current_rulesets: list[JsonObject],
     current_merge: JsonObject,
@@ -408,6 +429,7 @@ def _apply_actions(
     desired: Desired,
     desired_ruleset: JsonObject,
     runner: Callable[..., CommandResult],
+    current_repo: JsonObject | None = None,
 ) -> None:
     """Apply a confirmed settings plan to the explicit repository target."""
     for kind, method, ident in actions:
@@ -452,6 +474,22 @@ def _apply_actions(
                 runner,
                 input=json.dumps(payload),
             )
+        elif kind == "baseline":
+            release = {
+                "tag_name": BASELINE_TAG,
+                "target_commitish": (current_repo or {}).get("default_branch")
+                or "main",
+                "name": BASELINE_TAG,
+                "body": BASELINE_NOTES,
+                "draft": False,
+                "prerelease": False,
+                "make_latest": "false",
+            }
+            _run_gh(
+                ["api", "--method", "POST", f"repos/{repo}/releases", "--input", "-"],
+                runner,
+                input=json.dumps(release),
+            )
 
 
 def main(
@@ -482,6 +520,13 @@ def main(
         current_rulesets = _current_rulesets(repo, runner)
         current_merge = _gh_json(["api", f"repos/{repo}"], runner) or {}
         current_labels = _current_labels(repo, runner)
+        # Only bootstrap seeds the baseline: at that point the default branch holds
+        # just the new repo's initial commit.
+        current_releases = (
+            _gh_json(["api", f"repos/{repo}/releases?per_page=100"], runner) or []
+            if args.phase == "bootstrap"
+            else None
+        )
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
@@ -528,13 +573,15 @@ def main(
         desired_labels=desired.labels,
         current_labels=current_labels,
     )
+    if current_releases is not None:
+        actions.extend(plan_baseline_action(current_releases))
     if not actions:
         print(f"{repo}: settings already aligned — no changes.")
         return 0
 
     print(f"{repo}: planned {args.phase} changes:")
     for kind, method, ident in actions:
-        key = "name" if kind == "label" else "id"
+        key = {"label": "name", "baseline": "tag"}.get(kind, "id")
         print(f"  - {kind}: {method}" + (f" ({key}={ident})" if ident else ""))
 
     if not args.yes:
@@ -545,7 +592,9 @@ def main(
 
     try:
         try:
-            _apply_actions(actions, repo, desired, desired_ruleset, runner)
+            _apply_actions(
+                actions, repo, desired, desired_ruleset, runner, current_merge
+            )
         except RuntimeError as exc:
             # Only when eligibility was a guess: GitHub's 422 settles it. Ruleset
             # actions run first, so nothing else was applied before the failure.
@@ -553,7 +602,9 @@ def main(
                 raise
             desired_ruleset = without_rule(desired_ruleset, "merge_queue")
             print(_no_queue_notice(repo, "GitHub rejected the merge_queue rule"))
-            _apply_actions(actions, repo, desired, desired_ruleset, runner)
+            _apply_actions(
+                actions, repo, desired, desired_ruleset, runner, current_merge
+            )
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2

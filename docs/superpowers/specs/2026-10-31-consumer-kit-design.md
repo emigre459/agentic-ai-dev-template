@@ -225,7 +225,15 @@ re-installing a tag would wipe unreleased work. Each run:
 4. **Labels.** `minor` and `major` (and `patch`, for explicitness) are created in the
    repo-settings bootstrap phase, so new repos have them. The template repo gets them
    the same way.
-5. **Delete `CHANGELOG.md`.** Remove it from `test_root_hygiene.py`'s list, reword
+5. **A `v0.0.0` baseline release.** With no published release, release-drafter v7 has
+   no comparison baseline: it drafts `v0.0.1` with no PRs listed, ignores the bump
+   labels, and appends a warning (found in review, 2026-11-15). It compares
+   `refs/tags/<last published release>..main`, so a published `v0.0.0` fixes it. The
+   bootstrap phase publishes one at the default branch's tip (the new repo's initial
+   commit) when the repo has no published, non-prerelease release. The `release`
+   skill offers the same baseline, with the user's OK, to a repo that has none (the
+   template itself, or an existing repo adopting the kit), at a commit the user picks.
+6. **Delete `CHANGELOG.md`.** Remove it from `test_root_hygiene.py`'s list, reword
    `build-from-issue` Step 11's "no changelog step" note to point at Releases, and drop
    it from `review-guidelines.md`'s list.
 
