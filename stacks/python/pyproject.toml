@@ -13,7 +13,12 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["uv_build>=0.12.0,<0.13.0"]
+# One uv/uv_build minor line, matching the uv CI installs (setup-uv: latest).
+# uv bumps the MINOR version for breaking changes, and build-system.requires is
+# not locked by uv.lock, so the range spans a single minor. Dependabot opens a
+# PR for the next line (uv-build minor exception in .github/dependabot.yml);
+# move both bounds then.
+requires = ["uv_build>=0.13.0,<0.14.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
