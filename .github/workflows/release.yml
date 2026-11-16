@@ -1,0 +1,81 @@
+name: release
+
+# Cuts a release by hand: Actions -> release -> Run workflow, with a one-paragraph
+# summary and the version you approved. It publishes the draft that
+# release-drafter keeps up to date (creating the tag), with the summary as the
+# release's header, but only if release-drafter still resolves that version.
+
+on:
+  workflow_dispatch:
+    inputs:
+      summary:
+        description: At most one paragraph describing the release
+        required: true
+        type: string
+      version:
+        description: >-
+          The version you approved, for example v0.2.0. The run fails without
+          publishing if release-drafter would publish a different one.
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: publish release
+    # Publishing creates the tag: only ever from main, never from a branch run
+    # that would pin consumers to unmerged code.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      # Resolve the version release-drafter would publish, writing nothing.
+      - uses: release-drafter/release-drafter@v7
+        id: preview
+        with:
+          commitish: main
+          dry-run: true
+      # A label changed since the user approved the draft (or the draft was never
+      # re-read) must not publish an unapproved version. Inputs reach the shell
+      # only through env, never by interpolation into the script.
+      - name: Check the version matches the approved one
+        env:
+          APPROVED_VERSION: ${{ inputs.version }}
+          WOULD_PUBLISH: ${{ steps.preview.outputs.tag_name }}
+        run: |
+          if [ -z "${WOULD_PUBLISH}" ]; then
+            echo "::error::release-drafter resolved no version; expected ${APPROVED_VERSION}. Nothing was published."
+            exit 1
+          fi
+          if [ "${WOULD_PUBLISH}" != "${APPROVED_VERSION}" ]; then
+            echo "::error::release-drafter would publish ${WOULD_PUBLISH}, but the approved version is ${APPROVED_VERSION}. Nothing was published: re-read the draft, then re-run with the version it shows."
+            exit 1
+          fi
+          echo "release-drafter resolves ${WOULD_PUBLISH}, the approved version."
+      - uses: release-drafter/release-drafter@v7
+        id: drafter
+        with:
+          commitish: main
+          publish: true
+          header: ${{ inputs.summary }}
+      # The summary is free text: it reaches the shell only through env, never
+      # by interpolation into the script.
+      - name: Report the release
+        env:
+          TAG_NAME: ${{ steps.drafter.outputs.tag_name }}
+          HTML_URL: ${{ steps.drafter.outputs.html_url }}
+          SUMMARY: ${{ inputs.summary }}
+        run: |
+          {
+            echo "## Released ${TAG_NAME}"
+            echo
+            echo "${HTML_URL}"
+            echo
+            printf '%s\n' "${SUMMARY}"
+          } >> "$GITHUB_STEP_SUMMARY"

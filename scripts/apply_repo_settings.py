@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Reconcile this repo's live settings with .github/repo-settings/.
 
-Covers the `main` ruleset, PR-merge prefs, and Dependabot security updates.
+Covers the `main` ruleset, PR-merge prefs, Dependabot security updates, the
+semver bump labels (`patch` / `minor` / `major`; labels are only ever created or
+updated, never deleted), and, in the bootstrap phase of a repo with no published
+release, a `v0.0.0` baseline release that gives release-drafter something to
+compare the first real release with.
 Reads the canonical settings, diffs them against the live repo (via `gh`), prints
 the diff, and — unless ``--yes`` — asks for confirmation before applying. Idempotent.
 """
@@ -14,10 +18,11 @@ import json
 import re
 import subprocess
 import sys
-from collections.abc import Callable, Container
+from collections.abc import Callable, Container, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     # Aliases live here because this stdlib-only script may run under an older
@@ -28,11 +33,12 @@ if TYPE_CHECKING:
     # A decoded GitHub JSON object. Values are mixed (strings, booleans, lists,
     # nested objects), so ``dict[str, str]`` would be wrong; keys are always str.
     JsonObject = dict[str, Any]
-    # One planned change: (setting kind, HTTP method, ruleset id for a PUT).
+    # One planned change: (setting kind, HTTP method, ruleset id for a PUT or
+    # label name for a label change).
     Action = tuple[
-        Literal["ruleset", "merge", "security"],
+        Literal["ruleset", "merge", "security", "label", "baseline"],
         Literal["POST", "PUT", "PATCH"],
-        int | None,
+        int | str | None,
     ]
 
 
@@ -67,10 +73,11 @@ class Desired:
     ruleset: JsonObject
     merge: JsonObject
     security: JsonObject
+    labels: list[JsonObject]
 
 
 def load_desired(settings_dir: Path) -> Desired:
-    """Load the desired ruleset + merge + security settings from ``settings_dir``."""
+    """Load the desired ruleset, merge, security, and label settings."""
     ruleset = json.loads((settings_dir / "ruleset.json").read_text(encoding="utf-8"))
     merge = json.loads(
         (settings_dir / "merge-settings.json").read_text(encoding="utf-8")
@@ -78,7 +85,8 @@ def load_desired(settings_dir: Path) -> Desired:
     security = json.loads(
         (settings_dir / "security-settings.json").read_text(encoding="utf-8")
     )
-    return Desired(ruleset=ruleset, merge=merge, security=security)
+    labels = json.loads((settings_dir / "labels.json").read_text(encoding="utf-8"))
+    return Desired(ruleset=ruleset, merge=merge, security=security, labels=labels)
 
 
 def ruleset_for_phase(
@@ -238,6 +246,58 @@ def security_settings_match(desired: JsonObject, current_repo: JsonObject) -> bo
     return _is_subset(desired, current_repo)
 
 
+def _label_matches(desired: JsonObject, current: JsonObject) -> bool:
+    """Whether a live label already has the desired color and description.
+
+    GitHub returns the color as lowercase hex and a missing description as null,
+    so compare the color case-insensitively and treat null as empty.
+    """
+    return str(desired["color"]).lower() == str(current.get("color", "")).lower() and (
+        desired.get("description") or ""
+    ) == (current.get("description") or "")
+
+
+def plan_label_actions(
+    desired_labels: Sequence[JsonObject], current_labels: Sequence[JsonObject]
+) -> list[Action]:
+    """Plan label changes: create what's missing, update what drifted, never delete.
+
+    Labels the repo has beyond ``desired_labels`` are left alone. GitHub treats
+    label names case-insensitively (creating ``minor`` next to ``Minor`` is a 422),
+    so a case-variant is never created: it is renamed to the desired casing, and
+    the PATCH action carries the LIVE name, which addresses the label's URL.
+    """
+    live = {label["name"].casefold(): label for label in current_labels}
+    actions: list[Action] = []
+    for label in desired_labels:
+        name = label["name"]
+        existing = live.get(name.casefold())
+        if existing is None:
+            actions.append(("label", "POST", name))
+        elif existing["name"] != name or not _label_matches(label, existing):
+            actions.append(("label", "PATCH", existing["name"]))
+    return actions
+
+
+BASELINE_TAG = "v0.0.0"
+BASELINE_NOTES = (
+    "Baseline for release notes, not a release of the code: release-drafter "
+    "compares each release with the previous published one, and without one it "
+    "drafts v0.0.1 with no changes listed and ignores the bump labels. Created by "
+    "`make apply_repo_settings_bootstrap`."
+)
+
+
+def plan_baseline_action(releases: Sequence[JsonObject]) -> list[Action]:
+    """Plan the ``v0.0.0`` baseline when no release is published.
+
+    A draft or a prerelease doesn't count: release-drafter looks only at published,
+    non-prerelease releases for its comparison baseline.
+    """
+    published = [r for r in releases if not r.get("draft") and not r.get("prerelease")]
+    return [] if published else [("baseline", "POST", BASELINE_TAG)]
+
+
 def plan_actions(
     current_rulesets: list[JsonObject],
     current_merge: JsonObject,
@@ -245,12 +305,15 @@ def plan_actions(
     desired_merge: JsonObject,
     desired_security: JsonObject,
     forbidden_rule_types: Container[str] | None = None,
+    desired_labels: Sequence[JsonObject] = (),
+    current_labels: Sequence[JsonObject] = (),
 ) -> list[Action]:
     """Compute the minimal set of apply actions.
 
     Returns a list of ``Action`` tuples: ``("ruleset", "POST"|"PUT", id_or_None)``,
-    ``("merge", "PATCH", None)``, and/or ``("security", "PATCH", None)``. Empty
-    list means everything is already aligned.
+    ``("merge", "PATCH", None)``, ``("security", "PATCH", None)``, and/or
+    ``("label", "POST"|"PATCH", label_name)``. Empty list means everything is
+    already aligned.
     """
     actions: list[Action] = []
     main = find_main_ruleset(current_rulesets)
@@ -265,6 +328,7 @@ def plan_actions(
         actions.append(("merge", "PATCH", None))
     if not security_settings_match(desired_security, current_merge):
         actions.append(("security", "PATCH", None))
+    actions.extend(plan_label_actions(desired_labels, current_labels))
     return actions
 
 
@@ -338,12 +402,34 @@ def _current_rulesets(
     ]
 
 
+def _current_labels(
+    repo: str,
+    runner: Callable[..., CommandResult] = subprocess.run,
+    per_page: int = 100,
+) -> list[JsonObject]:
+    """Fetch every label on ``repo``, following pagination page by page."""
+    labels: list[JsonObject] = []
+    page = 1
+    while True:
+        batch = (
+            _gh_json(
+                ["api", f"repos/{repo}/labels?per_page={per_page}&page={page}"], runner
+            )
+            or []
+        )
+        labels.extend(batch)
+        if len(batch) < per_page:
+            return labels
+        page += 1
+
+
 def _apply_actions(
     actions: list[Action],
     repo: str,
     desired: Desired,
     desired_ruleset: JsonObject,
     runner: Callable[..., CommandResult],
+    current_repo: JsonObject | None = None,
 ) -> None:
     """Apply a confirmed settings plan to the explicit repository target."""
     for kind, method, ident in actions:
@@ -367,6 +453,42 @@ def _apply_actions(
                 ["api", "--method", "PATCH", f"repos/{repo}", "--input", "-"],
                 runner,
                 input=json.dumps(desired.security),
+            )
+        elif kind == "label":
+            label = next(
+                lbl
+                for lbl in desired.labels
+                if lbl["name"].casefold() == str(ident).casefold()
+            )
+            endpoint = f"repos/{repo}/labels"
+            payload = label
+            if method == "PATCH":
+                # `ident` is the live name; rename it when its casing differs so
+                # release-drafter's label match is exact.
+                endpoint += f"/{quote(str(ident), safe='')}"
+                payload = {k: v for k, v in label.items() if k != "name"}
+                if ident != label["name"]:
+                    payload["new_name"] = label["name"]
+            _run_gh(
+                ["api", "--method", method, endpoint, "--input", "-"],
+                runner,
+                input=json.dumps(payload),
+            )
+        elif kind == "baseline":
+            release = {
+                "tag_name": BASELINE_TAG,
+                "target_commitish": (current_repo or {}).get("default_branch")
+                or "main",
+                "name": BASELINE_TAG,
+                "body": BASELINE_NOTES,
+                "draft": False,
+                "prerelease": False,
+                "make_latest": "false",
+            }
+            _run_gh(
+                ["api", "--method", "POST", f"repos/{repo}/releases", "--input", "-"],
+                runner,
+                input=json.dumps(release),
             )
 
 
@@ -397,6 +519,14 @@ def main(
     try:
         current_rulesets = _current_rulesets(repo, runner)
         current_merge = _gh_json(["api", f"repos/{repo}"], runner) or {}
+        current_labels = _current_labels(repo, runner)
+        # Only bootstrap seeds the baseline: at that point the default branch holds
+        # just the new repo's initial commit.
+        current_releases = (
+            _gh_json(["api", f"repos/{repo}/releases?per_page=100"], runner) or []
+            if args.phase == "bootstrap"
+            else None
+        )
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
@@ -440,14 +570,19 @@ def main(
         desired.merge,
         desired.security,
         forbidden_rule_types=DEFERRED_RULE_TYPES if args.phase == "bootstrap" else None,
+        desired_labels=desired.labels,
+        current_labels=current_labels,
     )
+    if current_releases is not None:
+        actions.extend(plan_baseline_action(current_releases))
     if not actions:
         print(f"{repo}: settings already aligned — no changes.")
         return 0
 
     print(f"{repo}: planned {args.phase} changes:")
     for kind, method, ident in actions:
-        print(f"  - {kind}: {method}" + (f" (id={ident})" if ident else ""))
+        key = {"label": "name", "baseline": "tag"}.get(kind, "id")
+        print(f"  - {kind}: {method}" + (f" ({key}={ident})" if ident else ""))
 
     if not args.yes:
         reply = input("Apply these changes? [y/N] ").strip().lower()
@@ -457,7 +592,9 @@ def main(
 
     try:
         try:
-            _apply_actions(actions, repo, desired, desired_ruleset, runner)
+            _apply_actions(
+                actions, repo, desired, desired_ruleset, runner, current_merge
+            )
         except RuntimeError as exc:
             # Only when eligibility was a guess: GitHub's 422 settles it. Ruleset
             # actions run first, so nothing else was applied before the failure.
@@ -465,7 +602,9 @@ def main(
                 raise
             desired_ruleset = without_rule(desired_ruleset, "merge_queue")
             print(_no_queue_notice(repo, "GitHub rejected the merge_queue rule"))
-            _apply_actions(actions, repo, desired, desired_ruleset, runner)
+            _apply_actions(
+                actions, repo, desired, desired_ruleset, runner, current_merge
+            )
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
