@@ -7,7 +7,7 @@ Small change; short design.
 Dependabot opens a grouped minor/patch PR every week per ecosystem, plus each
 major alone. The minor/patch churn costs a weekly review for little value. A
 major left unnoticed is how a project ends up a whole SDK version behind when
-the vendor removes APIs. Gridium/gridium-agent settled on the middle ground
+the vendor removes APIs. A downstream repo settled on the middle ground
 (2026-11-12): **version-update PRs for majors only; security updates always.**
 The template, and every repo seeded from it, adopts the same policy.
 
@@ -28,7 +28,7 @@ The template, and every repo seeded from it, adopts the same policy.
 ## Non-goals
 
 - Syncing downstream repos: a post-merge follow-up under the
-  template-propagation norm (gridium-agent already has the policy).
+  template-propagation norm (that downstream repo already has the policy).
 - Folding the open minor/patch PRs (#68–#71, #73). After merge they should
   auto-close; any that don't get closed with a comment pointing at this PR.
 - Changing schedules, labels, commit prefixes or adding
@@ -37,7 +37,7 @@ The template, and every repo seeded from it, adopts the same policy.
 ## Approaches
 
 1. **`allow` on semver-major per entry (picked).** What the issue specifies and
-   what gridium-agent runs. One rule per entry, explicit, and security updates
+   what the downstream repo runs. One rule per entry, explicit, and security updates
    are documented as unaffected.
 2. `ignore` on `version-update:semver-minor` and `semver-patch` for `*`.
    Equivalent effect, but it reads as "ignore everything" and diverges from
