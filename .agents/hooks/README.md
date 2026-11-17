@@ -22,7 +22,8 @@ allowed just because it starts with `uv run`. The parser handles compound comman
 wrappers `timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin` and
 `env`. Anything it cannot parse is no opinion, including heredocs (`<<`),
 subshells and other bare parentheses, `${...}` other than a plain `${NAME}` or
-`${1}`, and `$[...]`. Redirect targets are resolved through symlinks before the
+`${1}`, `$[...]`, and the zsh forms `$~x` and `$x[...]`. Backslash-newline
+continuations are joined first, as the shell does, so they cannot hide any of these. Redirect targets are resolved through symlinks before the
 root check.
 
 It never allows or denies on uncertainty. A bad payload, an unreadable policy, a

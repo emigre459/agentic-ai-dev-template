@@ -833,3 +833,10 @@ def test_dangling_root_policy_symlink_does_not_fall_back(tmp_path: Path) -> None
     policy.symlink_to(tmp_path / "does-not-exist.json")
     proc = _run_from_other_dir(tmp_path, root, '{"allow": ["make *"]}')
     assert (proc.returncode, proc.stdout) == (0, "")
+
+
+def test_gate_sh_continuation_heredoc_is_no_opinion(tmp_path: Path) -> None:
+    root = _project(tmp_path, {"allow": ["git add *", "git commit *"]})
+    payload = _bash(HEREDOC_SMUGGLE.replace("<<", "<\\\n<", 1))
+    proc = _run(root, payload, entry="gate.sh")
+    assert (proc.returncode, proc.stdout) == (0, "")

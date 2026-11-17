@@ -462,6 +462,27 @@ ADVERSARIAL_DEFER_CASES = [
     "echo $((1+2))",
     "(touch /tmp/P)",
     "echo x; f() { touch /tmp/P; }",
+    # Bash deletes backslash-newline before tokenizing (outside single quotes),
+    # so a continuation must not hide `<<`, `${` or `$[` from the scanner.
+    HEREDOC_SMUGGLE.replace("<<", "<\\\n<", 1),
+    "y='a[$(touch /tmp/P)]'; git add $\\\n{x[y]}",
+    "y='a[$(touch /tmp/P)]'; echo \"$\\\n{x[y]}\"",
+    "y='a[$(touch /tmp/P)]'; echo $\\\n[y]",
+    "echo $\\\n(touch /tmp/P)",
+    # A comment is not continued, but the line after it still is.
+    "echo x # \\\n" + HEREDOC_SMUGGLE.replace("<<", "<\\\n<", 1),
+    # A continuation inside `cd` still changes directory.
+    "c\\\nd /etc && echo x > passwd",
+    # zsh GLOB_SUBST: `$~x` expands x as a glob, so a qualifier in it runs code.
+    "x='*(e:touch /tmp/P:)'; git add $~x",
+    "x='*(e:touch /tmp/P:)'; echo $~x",
+    'echo "$~x"',
+    # zsh subscripts `$x[y]` (unbraced, also in double quotes) and evaluates y
+    # as math, which runs a `$(...)` nested in y's value.
+    "y='a[$(touch /tmp/P)]'; echo $x[y]",
+    "y='a[$(touch /tmp/P)]'; echo \"$x[y]\"",
+    "echo $1[y]",
+    "y='a[$(touch /tmp/P)]'; echo $x\\\n[y]",
 ]
 
 
@@ -529,3 +550,37 @@ def test_git_grep_abbreviated_pager_option_denies() -> None:
     verdict = _shell(cmd, _banned_policy())
     assert verdict.decision == GATE.DENY
     assert r"old_api\(" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "echo a \\\n  b",
+        'git commit -m "wip" \\\n  --no-verify',
+        # `\\` before a newline is an escaped backslash: the newline separates.
+        "echo x\\\\\necho y",
+        # Inside single quotes backslash-newline is literal.
+        "echo 'a\\\nb'",
+    ],
+)
+def test_line_continuations_still_allowed(cmd: str) -> None:
+    assert allowed(cmd) is True
+
+
+def test_multi_line_continued_command_allowed() -> None:
+    cmd = "gh pr view 1 \\\n  --json title \\\n  --jq .title"
+    assert GATE.is_fully_allowed(cmd, ["gh pr view *"], ROOTS, CWD, HOME) is True
+
+
+def test_continuation_does_not_hide_withheld_command() -> None:
+    policy = GATE.Policy(allow=("git *",), withhold=("git push *",))
+    assert _shell("git \\\npush origin x", policy).decision == GATE.NO_OPINION
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    ["git --attr-source HEAD push origin main", "git --attr-source=HEAD push origin"],
+)
+def test_withhold_skips_attr_source(cmd: str) -> None:
+    policy = GATE.Policy(allow=("git *",), withhold=("git push *",))
+    assert _shell(cmd, policy).decision == GATE.NO_OPINION

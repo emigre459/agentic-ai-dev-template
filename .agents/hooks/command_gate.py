@@ -223,6 +223,52 @@ def _read_backtick(s: str, start: int) -> tuple[str, int, bool]:
     return "", i, False
 
 
+def _splice_continuations(s: str, i: int) -> str:
+    """Remove every backslash-newline pair that starts at ``s[i]``.
+
+    Parameters
+    ----------
+    s : str
+        The shell text being scanned.
+    i : int
+        Index where a continuation may start.
+
+    Returns
+    -------
+    str
+        ``s`` with the continuations at ``i`` removed.
+    """
+    while s.startswith("\\\n", i):
+        s = s[:i] + s[i + 2 :]
+    return s
+
+
+def _follows_param(s: str, i: int) -> bool:
+    """Return True when ``s[i]`` directly follows an unbraced ``$NAME``/``$1``/``$#``.
+
+    zsh treats such a ``[`` as a subscript, and evaluating the subscript as
+    math can run code held in a variable's value.
+
+    Parameters
+    ----------
+    s : str
+        The (continuation-spliced) shell text being scanned.
+    i : int
+        Index of the ``[``.
+
+    Returns
+    -------
+    bool
+        True when a parameter expansion ends right before ``i``.
+    """
+    j = i
+    while j > 0 and (s[j - 1].isalnum() or s[j - 1] == "_"):
+        j -= 1
+    if j < i and j > 0 and s[j - 1] == "$":
+        return True
+    return i >= 2 and s[i - 1] in "#?@*!$-" and s[i - 2] == "$"
+
+
 def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
     """Extract command/process substitutions and blank them out.
 
@@ -235,9 +281,12 @@ def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
 
     Also fail closed, because they hide a body or can run code: an unquoted
     heredoc ``<<`` (a ``<<<`` here-string is fine), ``${...}`` unless its body
-    is a plain name or a single digit, ``$[...]``, and any unquoted ``(`` or
-    ``)`` that is not part of ``$(``, ``<(`` or ``>(``. Both the allow view and
-    the banned/withhold view go through this scanner, so they cannot drift.
+    is a plain name or a single digit, ``$[...]``, zsh ``$~`` and ``$x[...]``
+    subscripts, and any unquoted
+    ``(`` or ``)`` that is not part of ``$(``, ``<(`` or ``>(``. Backslash-
+    newline continuations outside single quotes and comments are spliced out
+    first, as bash does, so they cannot hide any of these. Both the allow view
+    and the banned/withhold view go through this scanner, so they cannot drift.
 
     Parameters
     ----------
@@ -254,6 +303,17 @@ def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
     out: list[str] = []
     i, n, quote = 0, len(s), None
     while i < n:
+        if quote != "'":
+            # Bash deletes a backslash-newline outside single quotes before it
+            # tokenizes (`<\⏎<` is `<<`, `$\⏎{` is `${`). Splice it out at `i`,
+            # and at `i + 1` unless `s[i]` starts an escape, a single quote or
+            # a comment (none of which continue), so no lookahead is split.
+            s = _splice_continuations(s, i)
+            if s[i : i + 1] not in ("\\", "'", "#"):
+                s = _splice_continuations(s, i + 1)
+            n = len(s)
+            if i >= n:
+                break
         c = s[i]
         if quote == "'":
             out.append(c)
@@ -313,6 +373,10 @@ def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
             continue
         if active and s.startswith("$[", i):
             return inners, "", False  # legacy arithmetic expansion
+        if active and s.startswith("$~", i):
+            return inners, "", False  # zsh GLOB_SUBST: a glob qualifier runs code
+        if active and c == "[" and _follows_param(s, i):
+            return inners, "", False  # zsh `$x[y]`: y is evaluated as math
         if active and s.startswith("$(", i):
             inner, j, ok = _read_paren(s, i + 2)
             if not ok:
@@ -881,12 +945,13 @@ def is_fully_allowed(
     bool
         True when every executed command matches the allow-list.
     """
-    # Also scan a quote/backslash-free copy: bash runs `"cd"` / `'cd'` as the
-    # builtin, and dequote_leading lets such a word match a `cd` pattern.
+    # Also scan a quote/backslash/continuation-free copy: bash runs `"cd"`,
+    # `'cd'` and `c\⏎d` as the builtin, and the parser lets such a word match
+    # a `cd` pattern. Over-detecting a directory change only defers more.
     dir_changed = (
         dir_changed
         or bool(DIR_CHANGE.search(cmd))
-        or bool(DIR_CHANGE.search(re.sub(r"[\"'\\]", "", cmd)))
+        or bool(DIR_CHANGE.search(re.sub(r"\\\n|[\"'\\]", "", cmd)))
     )
     inners, blanked, ok = scan_substitutions(cmd)
     if not ok:
@@ -1127,7 +1192,7 @@ def _writes_file(command: str) -> bool:
 # Git global options that take a separate value when written without `=`.
 GIT_ARG_OPTIONS = frozenset(
     {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
-    | {"--exec-path"}
+    | {"--exec-path", "--attr-source"}
 )
 # Single-letter git global flags that take no value.
 GIT_SHORT_FLAGS = frozenset({"-p", "-P"})
