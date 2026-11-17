@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -394,3 +398,256 @@ def test_read_tool_is_other() -> None:
     call = HOOK.parse_payload(_claude("Read", {"file_path": "/r/a"}))
     assert call is not None
     assert (call.fmt, call.kind, call.edits) == ("claude", "other", ())
+
+
+# --- Decision path (subprocess) --------------------------------------------------
+
+HOOKS_DIR = REPO / ".agents" / "hooks"
+
+
+def _project(
+    tmp_path: Path,
+    policy: Any = None,
+    settings: dict[str, Any] | None = None,
+    *,
+    raw_policy: str | None = None,
+) -> Path:
+    """Build a throwaway git project holding a copy of the hook directory."""
+    root = tmp_path / "proj"
+    shutil.copytree(
+        HOOKS_DIR,
+        root / ".agents" / "hooks",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    text = raw_policy if raw_policy is not None else json.dumps(policy or {})
+    (root / ".agents" / "hooks" / "policy.json").write_text(text)
+    if settings is not None:
+        (root / ".claude").mkdir()
+        (root / ".claude" / "settings.json").write_text(json.dumps(settings))
+    (tmp_path / "home").mkdir(exist_ok=True)
+    return root
+
+
+def _run(
+    root: Path,
+    payload: Any,
+    *flags: str,
+    claude_code: bool = True,
+    entry: str = "hook.py",
+    stdin: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(root.parent / "home"),
+    }
+    if claude_code:
+        env["CLAUDE_PROJECT_DIR"] = str(root)
+    script = [
+        ("python3" if entry.endswith(".py") else "sh"),
+        str(root / ".agents" / "hooks" / entry),
+    ]
+    return subprocess.run(
+        [*script, *flags],
+        input=stdin if stdin is not None else json.dumps(payload),
+        capture_output=True,
+        text=True,
+        cwd=root,
+        env=env,
+        check=False,
+    )
+
+
+def _bash(command: str) -> dict[str, Any]:
+    return _claude("Bash", {"command": command}, cwd=".")
+
+
+def _decision(proc: subprocess.CompletedProcess[str]) -> str | None:
+    if not proc.stdout.strip():
+        return None
+    out = json.loads(proc.stdout)
+    return out["hookSpecificOutput"]["permissionDecision"]  # type: ignore[no-any-return]
+
+
+BANNED = {
+    "banned": [{"pattern": "old_call", "message": "gone", "replacement": "new_call"}]
+}
+
+
+@pytest.mark.parametrize(
+    ("fmt", "keys"),
+    [
+        ("claude", {"hookSpecificOutput"}),
+        ("cursor", {"permission", "user_message", "agent_message"}),
+        ("copilot", {"permissionDecision", "permissionDecisionReason"}),
+        ("gemini", {"decision", "reason"}),
+    ],
+)
+@pytest.mark.parametrize("decision", ["allow", "deny"])
+def test_render_shapes(fmt: str, keys: set[str], decision: str) -> None:
+    out = json.loads(HOOK.render(fmt, HOOK.Verdict(decision, "why")))
+    assert set(out) == keys
+    flat = json.dumps(out)
+    assert f'"{decision}"' in flat and '"why"' in flat
+    if fmt == "claude":
+        inner = out["hookSpecificOutput"]
+        assert inner["hookEventName"] == "PreToolUse"
+        assert inner["permissionDecision"] == decision
+        assert inner["permissionDecisionReason"] == "why"
+
+
+def test_render_no_opinion_is_none() -> None:
+    assert HOOK.render("claude", HOOK.Verdict(HOOK.NO_OPINION)) is None
+
+
+def test_deny_writes_reason_to_stderr_and_exits_0(tmp_path: Path) -> None:
+    root = _project(tmp_path, BANNED)
+    proc = _run(root, _bash("old_call --x"))
+    assert proc.returncode == 0
+    assert _decision(proc) == "deny"
+    assert "old_call" in proc.stderr and "new_call" in proc.stderr
+
+
+def test_allow_listed_command_is_allowed(tmp_path: Path) -> None:
+    root = _project(tmp_path, {"allow": ["make *"]})
+    assert _decision(_run(root, _bash("make lint"))) == "allow"
+
+
+def test_deny_only_downgrades_allow(tmp_path: Path) -> None:
+    root = _project(tmp_path, {"allow": ["make *"], **BANNED})
+    allowed = _run(root, _bash("make lint"), "--deny-only")
+    assert (allowed.returncode, allowed.stdout) == (0, "")
+    assert _decision(_run(root, _bash("old_call"), "--deny-only")) == "deny"
+
+
+def test_banned_edit_is_denied_relative_to_payload_cwd(tmp_path: Path) -> None:
+    root = _project(tmp_path, BANNED)
+    payload = _claude(
+        "Write", {"file_path": "src/a.py", "content": "old_call()"}, cwd=str(root)
+    )
+    assert _decision(_run(root, payload)) == "deny"
+
+
+def test_personal_claude_allows_only_under_claude_code(tmp_path: Path) -> None:
+    root = _project(tmp_path, {}, {})
+    rule = {"permissions": {"allow": ["Bash(make x)"]}}
+    home_claude = tmp_path / "home" / ".claude"
+    home_claude.mkdir()
+    (home_claude / "settings.json").write_text(json.dumps(rule))
+    assert _decision(_run(root, _bash("make x"))) == "allow"
+    assert _decision(_run(root, _bash("make x"), claude_code=False)) is None
+    (home_claude / "settings.json").unlink()
+
+    (root / ".claude" / "settings.local.json").write_text(json.dumps(rule))
+    assert _decision(_run(root, _bash("make x"))) == "allow"
+    assert _decision(_run(root, _bash("make x"), claude_code=False)) is None
+    (root / ".claude" / "settings.local.json").unlink()
+
+    (root / ".claude" / "settings.json").write_text(json.dumps(rule))
+    assert _decision(_run(root, _bash("make x"))) == "allow"
+    assert _decision(_run(root, _bash("make x"), claude_code=False)) == "allow"
+
+
+def test_claude_ask_deny_withhold(tmp_path: Path) -> None:
+    for key in ("ask", "deny"):
+        settings = {
+            "permissions": {"allow": ["Bash(git *)"], key: ["Bash(git push *)"]}
+        }
+        root = _project(tmp_path / key, {}, settings)
+        assert _decision(_run(root, _bash("git status"))) == "allow"
+        assert _decision(_run(root, _bash("git push x"))) is None
+
+
+def test_additional_directories_are_write_roots(tmp_path: Path) -> None:
+    command = "echo x > /opt/shared/y"
+    base = {"allow": ["echo *"]}
+    plain = _project(tmp_path / "a", base, {})
+    assert _decision(_run(plain, _bash(command))) is None
+    shared = _project(
+        tmp_path / "b",
+        base,
+        {"permissions": {"additionalDirectories": ["/opt/shared"]}},
+    )
+    assert _decision(_run(shared, _bash(command))) == "allow"
+
+
+def test_policy_write_roots_expand_relative_and_home(tmp_path: Path) -> None:
+    root = _project(
+        tmp_path, {"allow": ["echo *"], "write_roots": ["out", "~/scratch"]}
+    )
+    assert _decision(_run(root, _bash(f"echo x > {root}/out/y"))) == "allow"
+    assert (
+        _decision(_run(root, _bash(f"echo x > {tmp_path}/home/scratch/y"))) == "allow"
+    )
+
+
+@pytest.mark.parametrize(
+    "stdin",
+    ["not json", "{}", "[1]", "[" * 200000, '{"tool_name": 1, "tool_input": 2}'],
+)
+def test_fail_open_on_bad_stdin(tmp_path: Path, stdin: str) -> None:
+    root = _project(tmp_path, {"allow": ["make *"]})
+    proc = _run(root, None, stdin=stdin)
+    assert (proc.returncode, proc.stdout) == (0, "")
+
+
+@pytest.mark.parametrize(
+    "raw", ["{", '{"allow": "x"}', '{"banned": "x"}', '{"safe_env": {"a": 1}}', "[]"]
+)
+def test_fail_open_on_unreadable_policy(tmp_path: Path, raw: str) -> None:
+    root = _project(tmp_path, raw_policy=raw)
+    proc = _run(root, _bash("old_call"))
+    assert (proc.returncode, proc.stdout) == (0, "")
+
+
+def test_invalid_banned_regex_skips_only_its_entry(tmp_path: Path) -> None:
+    banned = [
+        {"pattern": "("},
+        {"pattern": "old_call", "message": "m", "replacement": "r"},
+        None,
+    ]
+    root = _project(tmp_path, {"banned": banned})
+    proc = _run(root, _bash("old_call"))
+    assert proc.returncode == 0
+    assert _decision(proc) == "deny"
+
+
+def test_safe_env_extends_base(tmp_path: Path) -> None:
+    root = _project(tmp_path, {"allow": ["make *"], "safe_env": ["MY_TOGGLE"]})
+    assert _decision(_run(root, _bash("MY_TOGGLE=1 make x"))) == "allow"
+    assert _decision(_run(root, _bash("OTHER=1 make x"))) is None
+
+
+def test_gate_sh_missing_hook_fails_open(tmp_path: Path) -> None:
+    only = tmp_path / "only"
+    only.mkdir()
+    shutil.copy(HOOKS_DIR / "gate.sh", only / "gate.sh")
+    proc = subprocess.run(
+        ["sh", str(only / "gate.sh")],
+        input=json.dumps(_bash("make x")),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (proc.returncode, proc.stdout) == (0, "")
+
+
+def test_gate_sh_passes_flags(tmp_path: Path) -> None:
+    root = _project(tmp_path, {"allow": ["make *"]})
+    full = _run(root, _bash("make x"), entry="gate.sh")
+    assert _decision(full) == "allow"
+    flagged = _run(root, _bash("make x"), "--deny-only", entry="gate.sh")
+    assert (flagged.returncode, flagged.stdout) == (0, "")
+
+
+def test_gate_sh_is_executable() -> None:
+    assert os.access(HOOKS_DIR / "gate.sh", os.X_OK)
+
+
+def test_shipped_policy_is_empty() -> None:
+    assert json.loads((HOOKS_DIR / "policy.json").read_text()) == {
+        "allow": [],
+        "safe_env": [],
+        "write_roots": [],
+        "banned": [],
+    }
