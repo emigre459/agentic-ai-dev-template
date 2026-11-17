@@ -13,6 +13,12 @@
       "skillPath": ".agents/skills/clean-up-kanban/SKILL.md",
       "computedHash": "dc9c09bf84df126bb25ab7fcec5f75d55de079839c350e282e0c741cf692c3cd"
     },
+    "daily-update": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/daily-update/SKILL.md",
+      "computedHash": "23718b471e8e0a3ee44c512e10c4172c482daa2300ec32e04a408b06acfb914c"
+    },
     "explain-diff": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
