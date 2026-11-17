@@ -214,8 +214,9 @@ list is complete):
 target):
 
 - `python3 <skill-dir>/scripts/single_flight.py <name> -- <command…>` runs the
-  command under an exclusive lock on `${SINGLE_FLIGHT_DIR:-/tmp}/<repo>-<name>.lock`
-  (`fcntl.flock`; where `fcntl` is missing, it runs unlocked and warns). While
+  command under an exclusive lock on `<dir>/<name>.lock`, where `<dir>` defaults to
+  `/tmp/<repo>-<uid>` (`<repo>` from the origin remote, so every worktree shares it)
+  and `SINGLE_FLIGHT_DIR` overrides the directory (`fcntl.flock`; where `fcntl` is missing, it runs unlocked and warns). While
   waiting it prints who holds the lock (a sidecar holder file) and propagates the
   command's exit status.
 - **Stack-neutral.** It runs on plain `python3` (stdlib, no project env, no uv) and

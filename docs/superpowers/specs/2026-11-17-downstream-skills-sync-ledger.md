@@ -10,9 +10,10 @@ residual diff at the end.
 The downstream repos are **A** (backend, leads), **B** (frontend) and **C** (internal
 starter). PR numbers without a prefix are A's; B's and C's carry `B` / `C`.
 
-**Sync points.** A's six #56 skills (build-from-issue, plan-issues, clean-up-kanban,
-resolve-pr-concerns, review-skill, pr-check) plus the seven review helpers in A's
-`work-the-backlog/scripts/`, `.agentrules/pr-check-scope.md` and
+**Sync points.** The six skills #56 covered: five in A (build-from-issue,
+plan-issues, clean-up-kanban, resolve-pr-concerns, review-skill; A has no pr-check)
+and pr-check, which only B and C carry. For A's five, plus the seven review helpers in
+A's `work-the-backlog/scripts/`, `.agentrules/pr-check-scope.md` and
 `scripts/single_flight.sh`: since 2026-10-20. The explain-diff pair: since
 2026-08-11. B and C: every commit touching `.agents/skills` since 2026-10-01. A's
 generic-only skills: their whole history. Taken from full-history clones; A at
@@ -68,10 +69,10 @@ build-from-issue.
 
 | Date | PR | Paths | Change | Verdict | Task |
 |---|---|---|---|---|---|
-| 2026-10-21 | B #31 | clean-up-kanban SKILL.md (§1a, epic template); plan-issues SKILL.md | No evergreen epics: prefer a new, drainable epic; split past ~60 children | already in template (#56) | — |
-| 2026-10-29 | B #36 | build-from-issue SKILL.md; resolve-pr-concerns SKILL.md; `wait_for_pr_checks.sh` | Hard-codes CodeRabbit in place of Bugbot; a pre-PR CLI review; the wait script requires the vendor's check | already in template (#56, vendor-neutral: reviewer adapter in `.github/pr-reviewer.json`, `references/reviewers/coderabbit.md`, A's local review rounds, the required `review-gate`); vendor hard-coding not ported | — |
-| 2026-10-29 | B #40 | resolve-pr-concerns SKILL.md | HEAD-review evidence is a review on HEAD or HEAD in the summary's reviewed commits, never an inline thread; bot-login regex for both API spellings | already in template (#56, `reviewer_state.py` reads `commit_id` and the summary's reviewed SHA) | — |
 | 2026-10-19 | C #69 | clean-up-kanban SKILL.md; plan-issues SKILL.md | Same change as B #31 | already in template (#56) | — |
+| 2026-10-21 | B #31 | clean-up-kanban SKILL.md (§1a, epic template); plan-issues SKILL.md | No evergreen epics: prefer a new, drainable epic; split past ~60 children | already in template (#56) | — |
+| 2026-10-29 | B #36 | build-from-issue SKILL.md; resolve-pr-concerns SKILL.md; `wait_for_pr_checks.sh` | Hard-codes CodeRabbit in place of Bugbot; a pre-PR CLI review; the wait script requires the vendor's check | already in template (#56, vendor-neutral: reviewer adapter in `.github/pr-reviewer.json`, `references/reviewers/coderabbit.md`, A's local review rounds, the required `review-gate`); vendor hard-coding not ported. Re-checked in Task 11: B's pre-PR CLI review is covered by the local review rounds, which run the same local CLI review once the PR is open (so each round is recorded on the PR and `review-gate` can see it) and keep the paid PR review for the final full one | — |
+| 2026-10-29 | B #40 | resolve-pr-concerns SKILL.md | HEAD-review evidence is a review on HEAD or HEAD in the summary's reviewed commits, never an inline thread; bot-login regex for both API spellings | already in template (#56, `reviewer_state.py` reads `commit_id` and the summary's reviewed SHA) | — |
 
 B's `pr-check` had no commit in the window; Task 11 diffs it.
 
@@ -97,8 +98,10 @@ B's `pr-check` had no commit in the window; Task 11 diffs it.
 ## Not synced
 
 - **A #1851** is open, not merged. Not synced.
-- **A #2996** is in flight (it may retire A's per-test speed guard). Re-checked in
-  Task 11; until then the skills' `pr_check` prose stays gate-agnostic.
+- **A #2996** (retire A's per-test speed guard) is still open, and so is its PR
+  (#3081), at A's `main` 2026-11-17 (re-fetched in Task 11). Nothing to port: the
+  skills' `pr_check` prose is already gate-agnostic ("including the per-test speed
+  check where the repo has one"), and the template keeps its own speed guard.
 - `work-the-backlog` is deferred (follow-on card), though its seven review helpers
   are in this record. The 2026-11-11 amendment to #49 is not built.
 
@@ -117,6 +120,61 @@ B's `pr-check` had no commit in the window; Task 11 diffs it.
 
 ## Residual diff
 
-Filled by Task 11: each shared skill diffed against A's `main` (B's `pr-check` too;
-the seven helpers against A's `work-the-backlog/scripts/`), every remaining hunk
-labeled `template ahead (#PR)` or `product-specific`.
+Task 11, against A's `main` at `7a2ce99` (2026-11-17, re-fetched): the only commit
+since the record was taken (#3001) touches no skill path. Commits after 2026-11-10
+that changed A's `.agentrules/` only (#3018, #3038, #3039, #3041) are rule changes,
+outside this record; #3057 adds a product-specific skill (counted in the inventory).
+B and C have no new skill commits.
+
+Each shared skill diffed against A (B's `pr-check` too; the seven helpers against
+A's `work-the-backlog/scripts/`). Scripts were compared on their AST with docstrings
+and annotations stripped, so style and the docstring convention drop out; prose was
+compared paragraph by paragraph. Path rewrites (`.claude/skills/` and `.agentrules/`
+to `.agents/`) and the template's preflight paragraph are generalization, not drift,
+and are not repeated below. **No unexplained hunk remained, so Task 11 ported
+nothing.** "This PR" is the #66 PR (its task in brackets).
+
+**build-from-issue**
+- template ahead (#56): stacked delivery moved to `resolve-pr-concerns/references/stacked-prs.md` (offer, build, finalize, don't-stack list); Step 7 audits prose "done" criteria; the conflicting-PR exit of `wait_for_pr_checks.py`.
+- template ahead (initial template): the momentum hook's second Slack clause ("Other tracks ready next").
+- template ahead (#67): Step 1a resume and rename wording, fresh-workspace and open-PR-head guards.
+- template ahead (this PR, T5/T6): light check and single-flight gate wording, gate-agnostic `pr_check` prose, teaching notebook through `write-teaching-notebook`.
+- template ahead (#56): the E2E discovery list is per stack; staleness tells are generic.
+- product-specific: E2E make targets, the staleness tells naming A's removed modules, the observability check-in step, the connector-coverage and graph-diagram steps (9b), the team Slack channel and its rationale, A's issue numbers.
+
+**plan-issues**
+- template ahead (#56): a GraphQL-refused REST fallback for any harness (A: cloud sessions only); unlinking is not deleting; one card per mergeable PR in the scope question and the Why bullet; epic-narrative refresh.
+- product-specific: the second-tracker routing reference and every routing step, A's fixed board and its auto-add rule.
+
+**clean-up-kanban**
+- template ahead (#56): generic origin case study, branch-pattern-aware classifier, upstream-sync pointer to the shared rule; (initial template): Stage-field setup.
+- product-specific: the frontend/eval-app repo routing, data-layer labels on parity cards and the re-import rule (#2805), A's issue numbers.
+
+**resolve-pr-concerns** (SKILL.md, reviewer adapters)
+- template ahead (#56): parallel fixes in `references/parallel-fixes.md`, stacks in `references/stacked-prs.md`, `wait_for_pr_checks.py` (A: `.sh`), the up-to-date rule read from the branch rules, the reviewer-poll contract and between-rounds polling restated, the speed-guard coaching in 2g.
+- template ahead (#58): per-adapter repo-owned `notes` file instead of vendor facts in the adapter docs.
+- template ahead (this PR, T2/T5): opt-in docs-only lane, local-thread gate change, single-flight gate, light check, sweep pointer in 2e.
+- product-specific: vendor trial history, billing and pricing, the org's app id and usage JSON, the named bypass holder, A's required-check names and issue numbers.
+
+**Review helpers** (`resolve-pr-concerns/scripts/` vs A's `work-the-backlog/scripts/`)
+- `review_gate.py`: template ahead (#56: CODEOWNERS-only gate with no active reviewer, three CODEOWNERS locations, `incremental_review_on_head` guard; this PR T2: docs-only lane refuses a moved head instead of A's whole-pass retry).
+- `reviewer_state.py`: template ahead (#46: `NoActiveReviewer`; #56: `start_failure_pattern`, optional `min_remaining` default 1; #40: `_classify` raises on unset final-review patterns instead of asserting; #58: `notes` / `notes_file`).
+- `merge_gate.py`: template ahead (#56: required checks and thread resolution read from the branch rules, exit codes, paginated threads); product-specific: A's hard-coded required-check names.
+- `human_review.py`: template ahead (#56: config errors and `gh` failures exit with a message, `owner/repo` validation).
+- `path_owners.py`: template ahead (#56: unsupported CODEOWNERS lines are skipped, not fatal; three CODEOWNERS locations).
+- `local_review.py`, `review_preflight.py`: template ahead (#46: `not_configured` with no active reviewer; #56: configurable start-failure pattern, `min_remaining`); product-specific: A's issue number in the round record.
+
+**review-skill**
+- template ahead (#56): canonical `.agents/skills/` lookup, `--json` report path instead of writing into the skill folder, executable-bit check only for scripts with a shebang, script-path checks.
+
+**explain-diff, explain-diff-merge-review**
+- Scripts identical on the AST; SKILL.md bodies identical. Nothing beyond the record's #2012 row.
+
+**pr-check** (B; A has none)
+- template ahead (#56, #58, this PR T4/T5): stack-neutral (B: React-only), single-flight lock, gate-agnostic speed check, light-check note, report adds speed offenders.
+
+**write-teaching-notebook, update-project-memory, daily-update** (ported in this PR, T6/T8/T9)
+- generalized per §3, §5, §6: bundled starter and check script, tooling from skill-config or the `notebook` group, `main` as "before"; caps as CLI args with a soft cap; repo and board from `gh` or skill-config, injected `gh` runner, per-repo state path.
+- product-specific: A's local-stack JupyterLab, seed and data endpoints; A's AGENTS.md caps and test path; A's repo, board, user map, default channel and permission-error wording tied to its board name.
+
+**upgrade-deps** (A's `cleanup-update-prs`, folded in T7): no file-level diff; the record's #2903, #2969 and #3053 rows cover it.

@@ -238,21 +238,66 @@ SYNC_RULE = (
     REPO_ROOT / ".agents" / "rules" / "shared" / "sync-core-dev-skills-upstream.md"
 )
 README_SECTION = "## Customizing the skills in your repo"
+README_SKILLS_SECTION = "## The skills"
 
 
-def _readme_section() -> str:
+def _readme_section(heading: str = README_SECTION) -> str:
+    """Return the README text under ``heading``, up to the next H2 outside a fence.
+
+    Parameters
+    ----------
+    heading : str
+        The section's exact H2 line.
+
+    Returns
+    -------
+    str
+        The section body, without the heading line.
+    """
     text = README.read_text(encoding="utf-8")
-    assert README_SECTION in text, f"README.md needs a '{README_SECTION}' section"
+    assert heading in text, f"README.md needs a '{heading}' section"
     section: list[str] = []
     in_fence = False
     # The section ends at the next H2 outside a code fence (its examples hold H2s).
-    for line in text.split(README_SECTION, 1)[1].splitlines():
+    for line in text.split(heading, 1)[1].splitlines():
         if line.startswith("```"):
             in_fence = not in_fence
         elif line.startswith("## ") and not in_fence:
             break
         section.append(line)
     return "\n".join(section)
+
+
+@pytest.mark.parametrize("skill_md", SKILL_FILES, ids=_ids(SKILL_FILES))
+def test_readme_lists_every_shipped_skill(skill_md: Path) -> None:
+    assert f"`{skill_md.parent.name}`" in _readme_section(README_SKILLS_SECTION)
+
+
+@pytest.mark.parametrize(
+    ("skill", "needles"),
+    [
+        (
+            "write-teaching-notebook",
+            ("Python", ".agents/skill-config/write-teaching-notebook.md"),
+        ),
+        ("update-project-memory", (".agents/skill-config/update-project-memory.md",)),
+        ("daily-update", (".agents/skill-config/daily-update.md",)),
+        ("upgrade-deps", ("sweep", ".github/dependabot.yml")),
+    ],
+)
+def test_readme_skill_entry_names_its_config(
+    skill: str, needles: tuple[str, ...]
+) -> None:
+    entries = [
+        line
+        for line in _readme_section(README_SKILLS_SECTION).splitlines()
+        if line.startswith(f"| `{skill}`")
+    ]
+    assert len(entries) == 1, f"one table row for `{skill}`"
+    for needle in needles:
+        assert (
+            needle.lower() in entries[0].lower()
+        ), f"`{skill}` row should mention {needle}"
 
 
 @pytest.mark.parametrize(

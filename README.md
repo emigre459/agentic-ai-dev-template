@@ -132,6 +132,28 @@ settings, skip confirmation prompts, or continue after a preflight failure.
   with `make finalize_repo_settings`, which also turns on a merge queue where
   GitHub offers one.
 
+## The skills
+
+Each skill reads `.agents/skill-config/<skill>.md` when the repo has one (see
+"Customizing the skills in your repo"); the last column names what else it reads.
+
+| Skill | What it does | Repo-owned config |
+|---|---|---|
+| `build-from-issue` | Issue to merge-ready PR: brainstorm, spec and plan, TDD, E2E, acceptance audit, PR, follow-up | Branch pattern in its skill-config |
+| `plan-issues` | Decompose an idea or epic into issue cards on the board | — |
+| `clean-up-kanban` | Board review, epic template and hygiene rules | — |
+| `resolve-pr-concerns` | Drive an open PR to merge-ready: reviewer rounds, CI, human reviews | `.github/pr-reviewer.json`; `.github/docs-only-paths.json` (opt-in) |
+| `pr-check` | `make pr_check` under the single-flight lock | — |
+| `run-tests` | `make tests`, the fast iteration target | — |
+| `review-skill` | Validate a skill's structure and quality | — |
+| `explain-diff` | HTML explanation of any diff, branch or PR, with a quiz | — |
+| `explain-diff-merge-review` | Pre-merge review of a PR this session wrote | — |
+| `release` | Publish the release release-drafter drafted, on your OK | `.github/release-drafter.yml` |
+| `upgrade-deps` | Sweep mode: fold security fixes and a clean skills refresh into one PR, close routine and superseded update PRs. Refresh mode: bring every dependency current | `.github/dependabot.yml` (projects and grouping policy); the `skills-update` action's `branch` input |
+| `update-project-memory` | Gate edits to `AGENTS.md` behind its line and character budget | Caps in `.agents/skill-config/update-project-memory.md` (default soft 120 lines, hard 150 lines / 9,000 chars) |
+| `daily-update` | Your standup: merged, in flight, next up, cards that need an owner; Slack only when asked | Board and Slack channel in `.agents/skill-config/daily-update.md` (default: the repo's linked board, no channel) |
+| `write-teaching-notebook` | The notebook a live test kit ships: before and after on the same input. Python only (`make init STACK=react` drops it) | Check and open commands, and a read-only "before" source, in `.agents/skill-config/write-teaching-notebook.md`, or the stack's `notebook` dependency group |
+
 ## Customizing the skills in your repo
 
 The dev-workflow skills in `.agents/skills/` are **vendored**: a repo gets them from
