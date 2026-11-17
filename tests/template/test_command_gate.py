@@ -363,3 +363,60 @@ def test_invalid_regex_entry_is_skipped() -> None:
     assert GATE.BannedPattern.from_dict({"pattern": "("}) is None
     assert GATE.BannedPattern.from_dict({"message": "x"}) is None
     assert GATE.BannedPattern.from_dict({"pattern": 3}) is None
+
+
+def test_read_only_forgiveness_withdrawn_for_file_writes() -> None:
+    policy = _banned_policy(allow=("cat *", "grep *", "rg *"))
+    for cmd in (
+        "cat <<< 'old_api()' > src/a.py",
+        "grep -h . <<< 'old_api()' >> src/a.py",
+        "rg 'old_api(' > out.txt",
+        "rg 'old_api(' &> out.txt",
+        "rg 'old_api(' 1>out.txt",
+    ):
+        assert _shell(cmd, policy).decision == GATE.DENY, cmd
+
+
+def test_read_only_forgiveness_kept_for_devnull_and_fd_dups() -> None:
+    for cmd in ("rg 'old_api(' 2>&1", "rg 'old_api(' 2>/dev/null", "rg 'old_api(' >&2"):
+        assert _shell(cmd, _banned_policy()).decision != GATE.DENY, cmd
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"pattern": r"old_api\(", "exempt_paths": "docs/**"},
+        {"pattern": r"old_api\(", "exempt_paths": 5},
+        {"pattern": r"old_api\(", "exempt_paths": [1]},
+        {"pattern": r"old_api\(", "message": 3},
+        {"pattern": r"old_api\(", "replacement": ["x"]},
+        "old_api(",
+        None,
+        ["pattern"],
+    ],
+)
+def test_malformed_entries_are_skipped(entry: Any) -> None:
+    assert GATE.BannedPattern.from_dict(entry) is None
+
+
+def test_withhold_catches_respellings() -> None:
+    policy = GATE.Policy(allow=("git *",), withhold=("git push *",))
+    for cmd in (
+        "git  push origin x",
+        "git -C . push origin",
+        "git -c user.name=x --no-pager push origin",
+        "git --git-dir=.git push origin",
+        "git --work-tree . push origin",
+    ):
+        assert _shell(cmd, policy).decision == GATE.NO_OPINION, cmd
+    assert _shell("git status", policy).decision == GATE.ALLOW
+
+
+def test_read_only_forgiveness_withdrawn_for_program_running_options() -> None:
+    for cmd in (
+        "git grep -O'sh -c \"old_api()\"' x",
+        "git grep --open-files-in-pager='sh -c old_api(' x",
+        "rg --pre 'sh' 'old_api(' .",
+        "rg --pre=sh 'old_api(' .",
+    ):
+        assert _shell(cmd, _banned_policy()).decision == GATE.DENY, cmd

@@ -1009,8 +1009,11 @@ class BannedPattern:
         Returns
         -------
         BannedPattern | None
-            None when ``pattern`` is missing, not a string, or not a valid regex.
+            None when the entry is not a mapping, ``pattern`` is missing or not a
+            valid regex, or another field has the wrong type.
         """
+        if not isinstance(d, Mapping):
+            return None
         pattern = d.get("pattern")
         if not isinstance(pattern, str):
             return None
@@ -1018,13 +1021,21 @@ class BannedPattern:
             regex = re.compile(pattern)
         except re.error:
             return None
-        exempt = d.get("exempt_paths") or ()
+        message = d.get("message", "")
+        replacement = d.get("replacement", "")
+        exempt = d.get("exempt_paths", ())
+        if not isinstance(message, str) or not isinstance(replacement, str):
+            return None
+        if not isinstance(exempt, (list, tuple)):
+            return None
+        if not all(isinstance(g, str) for g in exempt):
+            return None
         return cls(
             regex=regex,
             pattern=pattern,
-            message=str(d.get("message") or ""),
-            replacement=str(d.get("replacement") or ""),
-            exempt_paths=tuple(str(g) for g in exempt),
+            message=message,
+            replacement=replacement,
+            exempt_paths=tuple(exempt),
         )
 
 
@@ -1054,7 +1065,82 @@ def _is_read_only(simple: str) -> bool:
     words = simple.split()
     if not words:
         return False
-    return words[0] in READ_ONLY_COMMANDS or " ".join(words[:2]) in READ_ONLY_COMMANDS
+    two = " ".join(words[:2])
+    if words[0] not in READ_ONLY_COMMANDS and two not in READ_ONLY_COMMANDS:
+        return False
+    # Options that make a "search" run an arbitrary program.
+    args = [w.lstrip("\"'") for w in words[1:]]
+    if words[0] == "rg":
+        return not any(w == "--pre" or w.startswith("--pre=") for w in args)
+    if two == "git grep":
+        return not any(
+            w.startswith("--open")
+            or (w.startswith("-") and not w.startswith("--") and "O" in w)
+            for w in args
+        )
+    return True
+
+
+def _writes_file(command: str) -> bool:
+    """Return True if the raw command redirects output to anything but /dev/null."""
+    targets, _, ok = extract_redirect_targets(command)
+    return not ok or any(t != "/dev/null" for t in targets)
+
+
+GIT_FLAG_OPTIONS = frozenset(
+    {"--no-pager", "-p", "--paginate", "--bare", "--no-replace-objects"}
+    | {"--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs"}
+    | {"--icase-pathspecs"}
+)
+GIT_ARG_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+GIT_EQ_OPTIONS = ("--git-dir=", "--work-tree=", "--namespace=")
+
+
+def _collapse_space(simple: str) -> str:
+    """Collapse runs of unquoted whitespace to one space and trim the ends."""
+    out: list[str] = []
+    quote = None
+    i = 0
+    while i < len(simple):
+        c = simple[i]
+        if quote:
+            out.append(c)
+            if c == "\\" and quote == '"' and i + 1 < len(simple):
+                out.append(simple[i + 1])
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c == "\\" and i + 1 < len(simple):
+            out.append(simple[i : i + 2])
+            i += 1
+        elif c in ("'", '"'):
+            quote = c
+            out.append(c)
+        elif c.isspace():
+            if out and out[-1] != " ":
+                out.append(" ")
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out).strip()
+
+
+def _normalize_for_withhold(simple: str) -> str:
+    """Respell a simple command to its canonical form for withhold matching."""
+    text = _collapse_space(simple)
+    words = text.split(" ")
+    if words[0] != "git":
+        return text
+    i = 1
+    while i < len(words):
+        w = words[i]
+        if w in GIT_ARG_OPTIONS:
+            i += 2
+        elif w in GIT_FLAG_OPTIONS or w.startswith(GIT_EQ_OPTIONS):
+            i += 1
+        else:
+            break
+    return " ".join(["git"] + words[i:])
 
 
 def shell_verdict(
@@ -1074,11 +1160,17 @@ def shell_verdict(
     for banned in policy.banned:
         if not banned.regex.search(command):
             continue
-        if simple is None or not all(_is_read_only(c) for c in simple):
+        forgiven = (
+            simple is not None
+            and all(_is_read_only(c) for c in simple)
+            and not _writes_file(command)
+        )
+        if not forgiven:
             return _blocked("this command", banned)
     if simple is None:
         return Verdict(NO_OPINION)
-    if any(pattern_matches(w, c, home) for w in policy.withhold for c in simple):
+    forms = simple + [_normalize_for_withhold(c) for c in simple]
+    if any(pattern_matches(w, c, home) for w in policy.withhold for c in forms):
         return Verdict(NO_OPINION)
     if is_fully_allowed(command, policy.allow, roots, cwd, home, policy.safe_env):
         return Verdict(ALLOW)
