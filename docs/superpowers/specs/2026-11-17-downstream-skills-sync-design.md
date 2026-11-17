@@ -214,6 +214,11 @@ target):
   (`fcntl.flock`; where `fcntl` is missing, it runs unlocked and warns). While
   waiting it prints who holds the lock (a sidecar holder file) and propagates the
   command's exit status.
+- **Stack-neutral.** It runs on plain `python3` (stdlib, no project env, no uv) and
+  wraps whatever command it's given, so it works the same on a React repo. Both
+  stacks already require `python3`: `scripts/preflight_init.py:112`, the React
+  `pr_check`'s speed check (`stacks/react/Makefile:30`), and every
+  `resolve-pr-concerns` helper. A test runs it around a non-Python command.
 - `CI=true` or `SINGLE_FLIGHT=0` bypasses it. A nested call on a lock its parent
   already holds runs directly (an env marker). The lock lives in a fixed directory,
   not `$TMPDIR`, because sandboxed sessions get their own `$TMPDIR`.
