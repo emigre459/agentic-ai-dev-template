@@ -20,7 +20,10 @@ allowed just because it starts with `uv run`. The parser handles compound comman
 (`&&`, `||`, `;`, `|`, `&`, newlines), `cd <dir> && ...`, `$(...)`, backticks,
 `<(...)`, `for`/`while`/`if` bodies, leading `NAME=value` assignments, and the
 wrappers `timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin` and
-`env`. Anything it cannot parse is no opinion.
+`env`. Anything it cannot parse is no opinion, including heredocs (`<<`),
+subshells and other bare parentheses, `${...}` other than a plain `${NAME}` or
+`${1}`, and `$[...]`. Redirect targets are resolved through symlinks before the
+root check.
 
 It never allows or denies on uncertainty. A bad payload, an unreadable policy, a
 missing file or any exception ends in exit 0 with empty stdout. A deny is the
@@ -33,7 +36,8 @@ harness's JSON on stdout plus the reason on stderr, always with exit 0.
   read-only set is `grep`, `egrep`, `fgrep`, `rg`, `ag`, `ack`, `cat`, `head`,
   `tail`, `less`, `wc`, `ls`, `git grep`, `git log`, `git show`, `git diff` and
   `git blame`. `rg old_call` passes; `rg old_call | sh`, `rg old_call > out.txt`,
-  `rg --pre ...` and `git grep -O` are denied, because those run a program or
+  `rg --pre ...` and `git grep -O` / `--open-files-in-pager` (or any abbreviation
+  of it) are denied, because those run a program or
   write a file.
 - **Edits:** only what the edit adds counts. An edit is denied when the new text
   has more matches than the old text, so touching a file that already contains a
@@ -72,16 +76,19 @@ Each `banned` entry:
       "pattern": "old_api\\(",
       "message": "old_api was removed in v2",
       "replacement": "new_api()",
-      "exempt_paths": ["CHANGELOG.md", "**/CHANGELOG.md", "docs/**"]
+      "exempt_paths": ["MIGRATING.md", "**/MIGRATING.md", "docs/**"]
     }
   ]
 }
 ```
 
 Failure handling: a `policy.json` that is not valid JSON, is not an object, or has a
-key of the wrong type makes the gate give no opinion everywhere. A single malformed
-`banned` entry (bad regex, missing `pattern`, wrong field type) is skipped; the rest
-still apply. The shipped file is empty (`{"allow": [], "safe_env": [], "write_roots": [], "banned": []}`),
+section (`allow`, `safe_env`, `write_roots`, `banned`) that is not a list makes the
+gate give no opinion everywhere. Non-string items inside `allow`, `safe_env` or
+`write_roots` are skipped. A single malformed `banned` entry (bad regex, missing
+`pattern`, wrong field type) is skipped; the rest still apply. A root `policy.json`
+that exists but cannot be read (including a dangling symlink) never falls back to the
+copy next to `hook.py`. The shipped file is empty (`{"allow": [], "safe_env": [], "write_roots": [], "banned": []}`),
 so out of the box the gate allows only what Claude settings already allow.
 
 ## Claude allows: shared and personal
@@ -93,7 +100,7 @@ allow list to every harness:
 |--------|------------|
 | `.claude/settings.json` (tracked) | Every harness |
 | `policy.json` `allow` (tracked) | Every harness |
-| `~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude/settings.local.json` | Claude Code only (the gate knows it is Claude Code when `CLAUDE_PROJECT_DIR` is set) |
+| `~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude/settings.local.json` | Claude Code only: the payload is in Claude format, `CLAUDE_PROJECT_DIR` and `CLAUDECODE` are set, and neither `CURSOR_PROJECT_DIR` nor `CURSOR_VERSION` is set. Cursor also sets `CLAUDE_PROJECT_DIR` (a compatibility alias), so that variable alone does not count. |
 
 Only `Bash(...)` rules are read from `allow`. Claude `ask` and `deny` rules
 (including a bare `Bash`) always withhold: a command matching one is never allowed
@@ -144,9 +151,13 @@ Notes:
   checked there.
 - Codex loads project hooks only in trusted projects, and each hook must be reviewed
   once with `/hooks` before it runs.
-- Claude Code registers with `$CLAUDE_PROJECT_DIR`; every other harness resolves the
-  root with `git rev-parse --show-toplevel`, falling back to the current directory.
-  Outside a git checkout the gate finds no policy and gives no opinion.
+- Claude Code registers with `$CLAUDE_PROJECT_DIR`; every other harness locates
+  `gate.sh` with `git rev-parse --show-toplevel`, falling back to the current
+  directory. If `gate.sh` cannot be found from there, nothing runs and the harness
+  prompts as usual.
+- The policy root itself is chosen by `CLAUDE_PROJECT_DIR`, then the payload's
+  `workspace_roots`, then the nearest `.git` ancestor of the payload's `cwd`, then
+  that `cwd`.
 - Every command ends in `|| true`, so a crash can never block a tool call.
 
 ### Cursor

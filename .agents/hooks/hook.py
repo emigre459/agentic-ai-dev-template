@@ -37,6 +37,11 @@ PATH_KEYS = ("file_path", "path", "target_file")
 CONTENT_KEYS = ("content", "contents", "file_text")
 NEW_KEYS = ("new_string", "newText")
 OLD_KEYS = ("old_string", "oldText")
+# Larger files are treated as unreadable (the edit falls back to its own text).
+MAX_READ_BYTES = 2 * 1024 * 1024
+# Set in every hook process Cursor runs (Cursor hooks docs, "Environment
+# Variables"); Cursor ALSO sets CLAUDE_PROJECT_DIR as a compatibility alias.
+CURSOR_ENV_MARKERS = ("CURSOR_PROJECT_DIR", "CURSOR_VERSION")
 
 
 @dataclass(frozen=True)
@@ -69,13 +74,20 @@ def _first_str(data: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
 
 
 def _read_file(path: str, cwd: str) -> str | None:
-    """Return the file's text, or ``None`` when it is unreadable."""
+    """Return the file's text, or ``None`` when it is unreadable.
+
+    Only a regular file of at most ``MAX_READ_BYTES`` is read, so an edit aimed
+    at ``/dev/zero``, a FIFO or a huge file cannot hang the hook.
+    """
     full = os.path.join(cwd, path) if cwd else path
     try:
+        if not os.path.isfile(full) or os.path.getsize(full) > MAX_READ_BYTES:
+            return None
         with open(full, encoding="utf-8") as handle:
-            return handle.read()
+            text = handle.read(MAX_READ_BYTES + 1)
     except (OSError, UnicodeDecodeError, ValueError):
         return None
+    return None if len(text) > MAX_READ_BYTES else text
 
 
 def _replacement_edit(
@@ -326,8 +338,9 @@ def load_policy(
     """
     root_policy = os.path.join(root, ".agents", "hooks", "policy.json")
     # Fall back to the hook's own copy only when the root has none; a present
-    # but unreadable root file is uncertainty, not an invitation to use another.
-    path = root_policy if os.path.exists(root_policy) else None
+    # but unreadable root file (including a dangling symlink, hence lexists) is
+    # uncertainty, not an invitation to use another.
+    path = root_policy if os.path.lexists(root_policy) else None
     data = _read_json(path or os.path.join(hook_dir, "policy.json"))
     if not isinstance(data, dict):
         return None
@@ -428,6 +441,22 @@ def _decide(
     return Verdict(NO_OPINION)
 
 
+def is_claude_code(call: ToolCall, env: Mapping[str, str]) -> bool:
+    """Return True only when Claude Code itself sent this Claude-format payload.
+
+    ``CLAUDE_PROJECT_DIR`` alone is not proof: Cursor sets it too, as a "Claude
+    compatibility" alias, and runs the Claude registration. Claude Code sets
+    ``CLAUDECODE=1`` in every hook command's environment (Claude Code docs,
+    "Recommend your plugin from your CLI"); Cursor sets its own markers.
+    """
+    return (
+        call.fmt == "claude"
+        and bool(env.get("CLAUDE_PROJECT_DIR"))
+        and bool(env.get("CLAUDECODE"))
+        and not any(env.get(name) for name in CURSOR_ENV_MARKERS)
+    )
+
+
 def main(argv: Sequence[str], stdin: TextIO, env: Mapping[str, str]) -> int:
     """Run one hook invocation. Always returns 0: no output means no opinion."""
     try:
@@ -442,7 +471,7 @@ def main(argv: Sequence[str], stdin: TextIO, env: Mapping[str, str]) -> int:
     home = env.get("HOME") or os.path.expanduser("~")
     root = find_project_root(call, env)
     hook_dir = os.path.dirname(os.path.abspath(__file__))
-    loaded = load_policy(root, hook_dir, home, bool(env.get("CLAUDE_PROJECT_DIR")))
+    loaded = load_policy(root, hook_dir, home, is_claude_code(call, env))
     if loaded is None:
         return 0
     policy, extra = loaded

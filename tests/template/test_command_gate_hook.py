@@ -436,13 +436,17 @@ def _run(
     claude_code: bool = True,
     entry: str = "hook.py",
     stdin: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {
         "PATH": os.environ["PATH"],
         "HOME": str(root.parent / "home"),
     }
     if claude_code:
+        # What Claude Code sets in every hook command's environment.
         env["CLAUDE_PROJECT_DIR"] = str(root)
+        env["CLAUDECODE"] = "1"
+    env.update(extra_env or {})
     script = [
         ("python3" if entry.endswith(".py") else "sh"),
         str(root / ".agents" / "hooks" / entry),
@@ -711,3 +715,121 @@ def test_bare_bash_withholds_everything(tmp_path: Path, key: str, rule: str) -> 
 def test_bare_bash_in_allow_is_ignored(tmp_path: Path) -> None:
     root = _project(tmp_path, {}, {"permissions": {"allow": ["Bash"]}})
     assert _decision(_run(root, _bash("make x"))) is None
+
+
+# --- Final-review regressions ----------------------------------------------------
+
+HEREDOC_SMUGGLE = (
+    "git commit -m x <<'git add x'\n"
+    "git add '\n"
+    "git add x\n"
+    "touch /tmp/PWN\n"
+    "git add <<'git add x'\n"
+    "'\n"
+    "git add x"
+)
+
+
+def test_gate_sh_heredoc_smuggle_is_no_opinion(tmp_path: Path) -> None:
+    root = _project(tmp_path, {"allow": ["git add *", "git commit *"]})
+    proc = _run(root, _bash(HEREDOC_SMUGGLE), entry="gate.sh")
+    assert (proc.returncode, proc.stdout) == (0, "")
+    assert _decision(_run(root, _bash("git add x"), entry="gate.sh")) == "allow"
+
+
+CURSOR_ENV = {"CURSOR_PROJECT_DIR": "/somewhere", "CURSOR_VERSION": "1.0.0"}
+
+
+def _personal_rule(tmp_path: Path, rule: str) -> None:
+    home_claude = tmp_path / "home" / ".claude"
+    home_claude.mkdir()
+    (home_claude / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": [rule]}})
+    )
+
+
+def test_cursor_shell_ignores_personal_claude_settings(tmp_path: Path) -> None:
+    root = _project(tmp_path, {}, {})
+    _personal_rule(tmp_path, "Bash(rm *)")
+    payload = {
+        "hook_event_name": "preToolUse",
+        "tool_name": "Shell",
+        "tool_input": {"command": "rm -rf build"},
+        "cwd": str(root),
+    }
+    for env in (CURSOR_ENV, {"CURSOR_PROJECT_DIR": "/x"}, {"CURSOR_VERSION": "1"}):
+        proc = _run(
+            root,
+            payload,
+            claude_code=False,
+            extra_env={"CLAUDE_PROJECT_DIR": str(root), **env},
+        )
+        assert (proc.returncode, proc.stdout) == (0, ""), env
+
+
+def test_claude_payload_under_cursor_ignores_personal_settings(
+    tmp_path: Path,
+) -> None:
+    root = _project(tmp_path, {}, {})
+    _personal_rule(tmp_path, "Bash(rm *)")
+    proc = _run(root, _bash("rm -rf build"), extra_env=CURSOR_ENV)
+    assert (proc.returncode, proc.stdout) == (0, "")
+
+
+def test_personal_settings_need_claudecode_marker(tmp_path: Path) -> None:
+    root = _project(tmp_path, {}, {})
+    _personal_rule(tmp_path, "Bash(rm *)")
+    only_dir = {"CLAUDE_PROJECT_DIR": str(root)}
+    proc = _run(root, _bash("rm -rf build"), claude_code=False, extra_env=only_dir)
+    assert (proc.returncode, proc.stdout) == (0, "")
+    assert _decision(_run(root, _bash("rm -rf build"))) == "allow"
+
+
+def test_read_file_dev_zero_is_unreadable() -> None:
+    if not os.path.exists("/dev/zero"):
+        pytest.skip("no /dev/zero")
+    assert HOOK._read_file("/dev/zero", "") is None
+    call = HOOK.parse_payload(
+        _claude("Write", {"file_path": "/dev/zero", "content": "x"})
+    )
+    assert call is not None
+    assert call.edits == (HOOK.Edit("/dev/zero", "", "x"),)
+
+
+def test_read_file_fifo_is_unreadable(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no mkfifo")
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    # A plain open() of a FIFO with no writer blocks forever; run it in a
+    # child so a regression fails on the timeout instead of hanging the suite.
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); import hook; "
+        "print(hook._read_file(sys.argv[2], ''))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code, str(HOOKS_DIR), str(fifo)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert proc.stdout.strip() == "None"
+
+
+def test_read_file_over_size_cap_is_unreadable(tmp_path: Path) -> None:
+    big = tmp_path / "big.txt"
+    big.write_text("a" * (2 * 1024 * 1024 + 1))
+    assert HOOK._read_file(str(big), "") is None
+    small = tmp_path / "small.txt"
+    small.write_text("a" * (2 * 1024 * 1024))
+    assert HOOK._read_file(str(small), "") == "a" * (2 * 1024 * 1024)
+
+
+def test_dangling_root_policy_symlink_does_not_fall_back(tmp_path: Path) -> None:
+    root = _project(tmp_path, {})
+    policy = root / ".agents" / "hooks" / "policy.json"
+    policy.unlink()
+    policy.symlink_to(tmp_path / "does-not-exist.json")
+    proc = _run_from_other_dir(tmp_path, root, '{"allow": ["make *"]}')
+    assert (proc.returncode, proc.stdout) == (0, "")

@@ -22,6 +22,9 @@ It understands the command shapes agents really emit:
   the command changes directory
 - ``#`` comments (ANSI-C ``$'...'`` strings are not modelled and fail closed)
 
+Heredocs, subshells, non-trivial ``${...}`` expansions and ``$[...]`` are not
+modelled either; they fail closed (see ``scan_substitutions``).
+
 SAFETY INVARIANT: this is a security boundary, so it defaults to "no". It
 answers ``True`` from ``is_fully_allowed`` only when the command was fully
 parsed AND every executed subcommand (including those inside substitutions)
@@ -99,6 +102,10 @@ _COMMENT_PRECEDERS = frozenset(" \t\n;&|")
 # After these, whether `#` starts a comment depends on context we do not model
 # (e.g. `$(x)#y` is mid-word, `(x)#y` is not) -> fail closed.
 _AMBIGUOUS_HASH_PRECEDERS = frozenset("()<>")
+# The only `${...}` bodies treated as inert: a plain variable name or a single
+# positional digit. Anything else (`${x[i]}`, `${x:o}`, `${x@P}`, zsh `${(e)x}`,
+# defaults holding `$(...)`) can evaluate code, so it fails closed.
+_PLAIN_PARAM = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9])$")
 
 
 def _hash_kind(s: str, i: int) -> str:
@@ -226,6 +233,12 @@ def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
     ``$'...'`` strings (where a backslash-escaped ``'`` does not close the
     string) are not modelled, so they fail closed.
 
+    Also fail closed, because they hide a body or can run code: an unquoted
+    heredoc ``<<`` (a ``<<<`` here-string is fine), ``${...}`` unless its body
+    is a plain name or a single digit, ``$[...]``, and any unquoted ``(`` or
+    ``)`` that is not part of ``$(``, ``<(`` or ``>(``. Both the allow view and
+    the banned/withhold view go through this scanner, so they cannot drift.
+
     Parameters
     ----------
     s : str
@@ -285,6 +298,21 @@ def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
             out.append(s[i + 1])
             i += 2
             continue
+        if quote is None and s.startswith("<<<", i):
+            out.append("<<<")  # here-string: one word of input, no body
+            i += 3
+            continue
+        if quote is None and s.startswith("<<", i):
+            return inners, "", False  # heredoc body is not modelled
+        if active and s.startswith("${", i):
+            end = s.find("}", i + 2)
+            if end == -1 or not _PLAIN_PARAM.match(s[i + 2 : end]):
+                return inners, "", False
+            out.append(s[i : end + 1])
+            i = end + 1
+            continue
+        if active and s.startswith("$[", i):
+            return inners, "", False  # legacy arithmetic expansion
         if active and s.startswith("$(", i):
             inner, j, ok = _read_paren(s, i + 2)
             if not ok:
@@ -313,6 +341,11 @@ def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
             out.append(SUBST_PLACEHOLDER)
             i = j
             continue
+        if quote is None and c in "()":
+            # Not `$(`/`<(`/`>(` (consumed above): a subshell, function
+            # definition, arithmetic `$((`'s inner paren, zsh `=(...)` or glob
+            # qualifier, or a `case` arm. None is modelled -> fail closed.
+            return inners, "", False
         out.append(c)
         i += 1
     if quote is not None:
@@ -594,8 +627,11 @@ def redirect_target_ok(
         return False  # `~user/...` -> another home directory -> defer
     if not t.startswith("/") and dir_changed:
         return False
-    p = os.path.normpath(t if t.startswith("/") else os.path.join(cwd, t))
-    return any(p == r or p.startswith(r + "/") for r in roots)
+    # realpath, not normpath: an in-root symlink that points outside every root
+    # (`link -> /etc`) must not count as an in-root write.
+    p = os.path.realpath(t if t.startswith("/") else os.path.join(cwd, t))
+    real_roots = [os.path.realpath(r) for r in roots]
+    return any(p == r or p.startswith(r.rstrip("/") + "/") for r in real_roots)
 
 
 def dequote_leading(cmd: str) -> str:
@@ -1073,8 +1109,9 @@ def _is_read_only(simple: str) -> bool:
     if words[0] == "rg":
         return not any(w == "--pre" or w.startswith("--pre=") for w in args)
     if two == "git grep":
+        # git accepts any unambiguous abbreviation of --open-files-in-pager.
         return not any(
-            w.startswith("--open")
+            w.startswith("--op")
             or (w.startswith("-") and not w.startswith("--") and "O" in w)
             for w in args
         )
@@ -1087,13 +1124,13 @@ def _writes_file(command: str) -> bool:
     return not ok or any(t != "/dev/null" for t in targets)
 
 
-GIT_FLAG_OPTIONS = frozenset(
-    {"--no-pager", "-p", "--paginate", "--bare", "--no-replace-objects"}
-    | {"--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs"}
-    | {"--icase-pathspecs"}
+# Git global options that take a separate value when written without `=`.
+GIT_ARG_OPTIONS = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+    | {"--exec-path"}
 )
-GIT_ARG_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
-GIT_EQ_OPTIONS = ("--git-dir=", "--work-tree=", "--namespace=")
+# Single-letter git global flags that take no value.
+GIT_SHORT_FLAGS = frozenset({"-p", "-P"})
 
 
 def _collapse_space(simple: str) -> str:
@@ -1126,7 +1163,11 @@ def _collapse_space(simple: str) -> str:
 
 
 def _normalize_for_withhold(simple: str) -> str:
-    """Respell a simple command to its canonical form for withhold matching."""
+    """Respell a simple command to its canonical form for withhold matching.
+
+    For ``git``, every leading global option is dropped, so ``git -C . push``
+    and ``git --exec-path=/x push`` both read as ``git push``.
+    """
     text = _collapse_space(simple)
     words = text.split(" ")
     if words[0] != "git":
@@ -1136,8 +1177,8 @@ def _normalize_for_withhold(simple: str) -> str:
         w = words[i]
         if w in GIT_ARG_OPTIONS:
             i += 2
-        elif w in GIT_FLAG_OPTIONS or w.startswith(GIT_EQ_OPTIONS):
-            i += 1
+        elif w.startswith("--") or w in GIT_SHORT_FLAGS:
+            i += 1  # any long option (`=value` attached) or a bare short flag
         else:
             break
     return " ".join(["git"] + words[i:])

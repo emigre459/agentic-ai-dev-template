@@ -420,3 +420,112 @@ def test_read_only_forgiveness_withdrawn_for_program_running_options() -> None:
         "rg --pre=sh 'old_api(' .",
     ):
         assert _shell(cmd, _banned_policy()).decision == GATE.DENY, cmd
+
+
+# --- Final-review regressions ----------------------------------------------------
+
+# A heredoc body is not modelled: its `'` would open a fake quote that swallows
+# the real command lines after it, so any unquoted `<<` (not `<<<`) defers.
+HEREDOC_SMUGGLE = (
+    "git commit -m x <<'git add x'\n"
+    "git add '\n"
+    "git add x\n"
+    "touch /tmp/PWN\n"
+    "git add <<'git add x'\n"
+    "'\n"
+    "git add x"
+)
+HEREDOC_SMUGGLE_ECHO = (
+    "echo x <<'echo x'\n"
+    "echo '\n"
+    "echo x\n"
+    "touch /tmp/PWN\n"
+    "echo <<'echo x'\n"
+    "'\n"
+    "echo x"
+)
+
+# Expansions that run code (or whose shape we do not model) defer.
+ADVERSARIAL_DEFER_CASES = [
+    HEREDOC_SMUGGLE,
+    HEREDOC_SMUGGLE_ECHO,
+    "cat <<EOF\nhi\nEOF",
+    "y='a[$(touch /tmp/P)]'; git add ${x[y]}",
+    "y='a[$(touch /tmp/P)]'; echo ${x:y}",
+    "y='a[$(touch /tmp/P)]'; echo $[y]",
+    "x='$(touch /tmp/P)'; echo ${x@P}",
+    "echo ${(e)x}",
+    "echo *(e:'touch /tmp/P':)",
+    "echo =(touch /tmp/P)",
+    'echo "$[1+1]"',
+    'echo "${x:-$(touch /tmp/P)}"',
+    "echo $((1+2))",
+    "(touch /tmp/P)",
+    "echo x; f() { touch /tmp/P; }",
+]
+
+
+@pytest.mark.parametrize("cmd", ADVERSARIAL_DEFER_CASES)
+def test_adversarial_deferred(cmd: str) -> None:
+    assert GATE.is_fully_allowed(cmd, PATTERNS, ROOTS, CWD, HOME) is False
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "echo ${HOME} $1 ${1}",
+        'echo "${HOME}/x"',
+        "git commit -m 'fix (scope): x'",
+        'git commit -m "feat(api): add (thing)"',
+        "echo x <<< 'here string'",
+    ],
+)
+def test_plain_expansions_and_quoted_parens_still_allowed(cmd: str) -> None:
+    assert allowed(cmd) is True
+
+
+def test_heredoc_with_banned_hit_still_denies() -> None:
+    cmd = "cat <<'EOF'\nold_api()\nEOF"
+    assert _shell(cmd, _banned_policy(allow=("cat *",))).decision == GATE.DENY
+
+
+def test_heredoc_simple_commands_is_none() -> None:
+    assert GATE.simple_commands(HEREDOC_SMUGGLE) is None
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "git --exec-path=/x push origin main",
+        "git --config-env=a=b push origin main",
+        "git --exec-path /x push origin main",
+        "git --config-env a=b push origin main",
+        "git -P push origin main",
+        "git --no-optional-locks push origin main",
+    ],
+)
+def test_withhold_skips_any_git_global_option(cmd: str) -> None:
+    policy = GATE.Policy(allow=("git *",), withhold=("git push *",))
+    assert _shell(cmd, policy).decision == GATE.NO_OPINION
+
+
+def test_redirect_through_in_root_symlink_to_outside_defers(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (root / "link").symlink_to(outside)
+    (root / "file_link").symlink_to(outside / "f")
+    roots = [str(root)]
+    home = str(tmp_path / "home")
+    assert GATE.redirect_target_ok("link/x", roots, str(root), home) is False
+    assert GATE.redirect_target_ok("file_link", roots, str(root), home) is False
+    assert GATE.redirect_target_ok(f"{root}/link/x", roots, str(root), home) is False
+    assert GATE.redirect_target_ok("real/x", roots, str(root), home) is True
+
+
+def test_git_grep_abbreviated_pager_option_denies() -> None:
+    cmd = "git grep -e 'old_api(' --ope=sh"
+    verdict = _shell(cmd, _banned_policy())
+    assert verdict.decision == GATE.DENY
+    assert r"old_api\(" in verdict.reason
