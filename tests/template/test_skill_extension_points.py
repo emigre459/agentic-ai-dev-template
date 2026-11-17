@@ -278,3 +278,46 @@ def test_sync_rule_says_vendored_skills_are_read_only() -> None:
     text = SYNC_RULE.read_text(encoding="utf-8")
     assert "read-only" in text and "upstream" in text
     assert "may carry repo-specific wording" not in text
+
+
+VENDORED_RULE = (
+    REPO_ROOT / ".agents" / "rules" / "shared" / "sync-core-dev-skills-upstream.md"
+)
+
+
+def _applies_to_globs(rule_text: str) -> list[str]:
+    """Return the ``appliesTo`` globs from a rule's frontmatter (scalar or list).
+
+    Parameters
+    ----------
+    rule_text : str
+        Full text of a rule file that opens with ``---`` frontmatter.
+
+    Returns
+    -------
+    list[str]
+        The glob strings, unquoted, in file order.
+    """
+    frontmatter = rule_text.split("---", 2)[1]
+    lines = frontmatter.splitlines()
+    globs: list[str] = []
+    for index, line in enumerate(lines):
+        if not line.startswith("appliesTo:"):
+            continue
+        scalar = line.split(":", 1)[1].strip()
+        if scalar:
+            globs.append(scalar.strip("\"'"))
+            break
+        for item in lines[index + 1 :]:
+            if not item.lstrip().startswith("- "):
+                break
+            globs.append(item.lstrip()[2:].strip().strip("\"'"))
+        break
+    return globs
+
+
+def test_vendored_rule_applies_to_both_skill_paths() -> None:
+    """Agents on Claude Code read ``.claude/skills`` (a symlink), so cover both paths."""
+    globs = _applies_to_globs(VENDORED_RULE.read_text(encoding="utf-8"))
+    assert ".agents/skills/**" in globs
+    assert ".claude/skills/**" in globs
