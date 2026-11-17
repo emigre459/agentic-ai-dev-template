@@ -89,8 +89,9 @@ bump (no label means patch).
 ## Hooks
 
 `.claude/hooks/run-tests-on-stop.sh` formats and runs tests when source files change
-in a turn. `.claude/hooks/claude_permission_hook.sh` forwards pre-approved Bash
-permissions to subagents.
+in a turn. `.agents/hooks/` holds the harness-neutral command gate: it forwards
+allow-listed shell commands, defers everything else, and denies a repo-owned list of
+banned patterns in shell commands and file edits.
 
 ## PR & Commit Guidelines
 

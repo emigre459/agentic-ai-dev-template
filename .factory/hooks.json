@@ -1,0 +1,10 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "Execute|Edit|Create|ApplyPatch",
+      "hooks": [
+        { "type": "command", "command": "sh \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.agents/hooks/gate.sh\" || true", "timeout": 30 }
+      ]
+    }
+  ]
+}
