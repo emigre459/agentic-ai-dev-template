@@ -17,7 +17,7 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/daily-update/SKILL.md",
-      "computedHash": "9a2fe09da8a2eb538bb1ca6eb98864103684e1d77a750061f41bae666d16e7c1"
+      "computedHash": "3fe0b433d4c656957e889ce0f710c70c305f70d2f77694843eca205af7b7c367"
     },
     "explain-diff": {
       "source": "emigre459/agentic-ai-dev-template",
@@ -71,7 +71,7 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/update-project-memory/SKILL.md",
-      "computedHash": "cb9379079f17a0f96be6ca15eaf57d4c1b5e5868214c3c9a307c557e586b3427"
+      "computedHash": "c36c03c36012e1c1dfb03308070e946e7f49444cac47304e6b90dc1fcc77bdcb"
     },
     "upgrade-deps": {
       "source": "emigre459/agentic-ai-dev-template",

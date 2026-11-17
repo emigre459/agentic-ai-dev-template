@@ -2,6 +2,7 @@
 name: daily-update
 description: Generate a standup-style daily update for the GitHub user running the skill — what they merged since their last run, what's in flight (open PRs, active board items, pushed branches with no PR yet), a suggestion for the next thing to work on when the repo has a project board, and newly created issues or epics that still need an owner. Optionally post the report to Slack, only when the user asks this session. Triggers on `/daily-update`, "give me my daily update", "what did I do yesterday", "what's my standup", "what should I work on next", "what PRs do I have open", "post my standup to slack", or any session where the user wants their own activity report on the current repo. Always identifies the invoking user via `gh api user`, so each teammate gets their own view.
 allowed-tools: Bash AskUserQuestion Read
+compatibility: Requires gh and uv (the script runs under `uv run python`, so a React-only repo needs uv installed too)
 ---
 
 # Daily Update

@@ -1,7 +1,7 @@
 # Does this belong in AGENTS.md?
 
-Default answer: **No.** AGENTS.md is always-on context (the main loop times every
-subagent). Add a line only if BOTH are true:
+Default answer: **No.** AGENTS.md is always-on context (loaded by the main loop and
+every subagent). Add a line only if BOTH are true:
 1. It is universal and always-on (applies to essentially every task), AND
 2. It is a command/imperative OR a routing pointer.
 
