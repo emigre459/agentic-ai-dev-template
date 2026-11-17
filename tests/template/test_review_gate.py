@@ -513,10 +513,12 @@ def test_a_head_with_no_local_review_still_passes_but_says_so() -> None:
     assert "no local review on 0123456" in description
 
 
-def test_an_open_reviewer_thread_holds_the_gate() -> None:
+def test_local_reviewer_open_threads_do_not_block_gate() -> None:
+    """The ruleset's conversation resolution blocks the merge; the gate must not lag."""
     state, description = gate_status(_local(open_findings=[{"path": "a.py"}] * 2))
-    assert state == "failure"
-    assert "2 CodeRabbit thread(s) still open" in description
+    assert state == "success"
+    assert "full review finished" in description
+    assert "thread" not in description
 
 
 def test_a_locally_reviewed_pr_is_asked_for_the_full_review_not_a_trigger() -> None:
@@ -679,3 +681,203 @@ def test_an_all_team_codeowners_leaves_the_reviewer_status_unchanged(
     )
     review_gate.post_for_pr(REPO, 7, reviewer_state.load_reviewer(key="coderabbit"))
     assert head.posts == [gate_status(_state(verdict="none"))]
+
+
+# --- the opt-in docs-only lane ---------------------------------------------------
+
+EXAMPLE = (
+    _SCRIPTS.parent / "references" / "docs-only-paths.example.json"
+)  # the skill ships it; a repo copies it to .github/docs-only-paths.json to opt in
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _allowlist() -> Any:
+    allowlist = review_gate.load_docs_allowlist(EXAMPLE)
+    assert allowlist is not None
+    return allowlist
+
+
+def _files(*names: str, **renamed: str) -> list[dict[str, str]]:
+    listed = [{"filename": name} for name in names]
+    listed += [
+        {"filename": new, "previous_filename": old} for new, old in renamed.items()
+    ]
+    return listed
+
+
+def test_docs_only_pr_passes_without_review() -> None:
+    files = _files("docs/guide.md", "docs/img/a.PNG", "README.md")
+    status = review_gate.docs_only_status(files, len(files), _allowlist())
+    assert (
+        status
+        == review_gate.DOCS_ONLY_STATUS
+        == (
+            "success",
+            "docs-only: no review required",
+        )
+    )
+
+
+def test_absent_allowlist_makes_nothing_docs_only(tmp_path: Path) -> None:
+    assert review_gate.load_docs_allowlist(tmp_path / "docs-only-paths.json") is None
+    files = _files("docs/guide.md")
+    assert review_gate.docs_only_status(files, 1, None) is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[]",
+        "not json",
+        json.dumps(
+            {
+                "dir_suffixes": [".md"],
+                "top_level_suffix": ".md",
+                "excluded_names": ["AGENTS.md"],
+            }
+        ),
+        json.dumps(
+            {
+                "dirs": [],
+                "dir_suffixes": [".md"],
+                "top_level_suffix": ".md",
+                "excluded_names": ["AGENTS.md"],
+            }
+        ),
+        json.dumps(
+            {
+                "dirs": "docs/",
+                "dir_suffixes": [".md"],
+                "top_level_suffix": ".md",
+                "excluded_names": ["AGENTS.md"],
+            }
+        ),
+        json.dumps(
+            {
+                "dirs": ["docs/"],
+                "dir_suffixes": [".md"],
+                "top_level_suffix": 1,
+                "excluded_names": ["AGENTS.md"],
+            }
+        ),
+    ],
+    ids=[
+        "non-object",
+        "unparseable",
+        "missing-key",
+        "empty-list",
+        "wrong-type",
+        "wrong-suffix-type",
+    ],
+)
+def test_malformed_allowlist_fails_closed(tmp_path: Path, content: str) -> None:
+    path = tmp_path / "docs-only-paths.json"
+    path.write_text(content)
+    assert review_gate.load_docs_allowlist(path) is None
+
+
+def test_capped_file_list_is_never_docs_only() -> None:
+    files = _files("docs/guide.md")
+    assert review_gate.docs_only_status(files, len(files) + 1, _allowlist()) is None
+
+
+def test_a_pr_with_no_listed_files_is_never_docs_only() -> None:
+    assert review_gate.docs_only_status([], 0, _allowlist()) is None
+
+
+def test_one_file_outside_the_list_needs_review() -> None:
+    files = _files("docs/guide.md", "src/app.py", "docs/data.json")
+    assert review_gate.docs_only_status(files, len(files), _allowlist()) is None
+
+
+def test_renamed_from_outside_list_needs_review() -> None:
+    files = _files(**{"docs/moved.md": "src/app.py"})
+    assert review_gate.docs_only_status(files, 1, _allowlist()) is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "docs/AGENTS.md",
+        "docs/deep/er/CLAUDE.md",
+        "sub/AGENTS.md",
+    ],
+)
+def test_agents_and_claude_md_at_any_depth_need_review(path: str) -> None:
+    files = _files("docs/guide.md", path)
+    assert review_gate.docs_only_status(files, len(files), _allowlist()) is None
+
+
+def _docs_only_run(monkeypatch: Any, head: _Head, owners: Any, tmp_path: Path) -> _Head:
+    allow = tmp_path / "docs-only-paths.json"
+    allow.write_text(EXAMPLE.read_text())
+    monkeypatch.setattr(review_gate, "DOCS_ONLY_PATHS_FILE", allow)
+    answers = {
+        f"repos/{REPO}/pulls/7": {
+            "head": {"sha": _state()["head_sha"]},
+            "changed_files": 1,
+        },
+        f"repos/{REPO}/pulls/7/files?per_page=100": [{"filename": "docs/a.md"}],
+    }
+    monkeypatch.setattr(
+        review_gate.reviewer_state, "_gh_json", lambda args: answers[args[-1]]
+    )
+    return _run(monkeypatch, head, owners=owners)
+
+
+def test_docs_only_pr_posts_the_pass_instead_of_the_reviewer_verdict(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    head = _docs_only_run(monkeypatch, _Head([_state(verdict="none")]), None, tmp_path)
+    assert head.posts == [review_gate.DOCS_ONLY_STATUS]
+
+
+def test_path_owner_approval_still_comes_first(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    head = _docs_only_run(
+        monkeypatch, _Head([_state(verdict="none")]), OWNER_NEEDED, tmp_path
+    )
+    assert head.posts == [OWNER_NEEDED]
+
+
+def test_a_head_that_moved_under_the_file_read_is_not_docs_only(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    allow = tmp_path / "docs-only-paths.json"
+    allow.write_text(EXAMPLE.read_text())
+    monkeypatch.setattr(review_gate, "DOCS_ONLY_PATHS_FILE", allow)
+    monkeypatch.setattr(
+        review_gate.reviewer_state,
+        "_gh_json",
+        lambda args: {"head": {"sha": "9" * 40}, "changed_files": 1},
+    )
+    assert review_gate._docs_only(REPO, 7, "a" * 40) is None
+
+
+def test_without_an_allowlist_a_docs_only_pr_still_needs_the_reviewer(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A repo that never opted in: the PR is not even read for docs-only."""
+    monkeypatch.setattr(review_gate, "DOCS_ONLY_PATHS_FILE", tmp_path / "absent.json")
+
+    def _boom(args: list[str]) -> Any:
+        raise AssertionError("PR files read without an allowlist")
+
+    monkeypatch.setattr(review_gate.reviewer_state, "_gh_json", _boom)
+    head = _run(monkeypatch, _Head([_state(verdict="none")]))
+    assert head.posts == [gate_status(_state(verdict="none"))]
+
+
+def test_template_ships_no_docs_only_file() -> None:
+    assert not (REPO_ROOT / ".github" / "docs-only-paths.json").exists()
+    assert review_gate.DOCS_ONLY_PATHS_FILE == (
+        REPO_ROOT / ".github" / "docs-only-paths.json"
+    )
+
+
+def test_example_allowlist_parses() -> None:
+    assert review_gate.load_docs_allowlist(EXAMPLE) is not None
+    assert "private" not in EXAMPLE.read_text().lower()

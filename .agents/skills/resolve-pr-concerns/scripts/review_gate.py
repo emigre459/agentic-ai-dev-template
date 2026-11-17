@@ -7,15 +7,21 @@ only when the configured reviewer (``.github/pr-reviewer.json``) has a verdict o
 current head AND its final full review finished -- the state ``reviewer_state``
 reports. A verdict carried onto a rebase-only head (``verdict_carried_from``) counts
 like one on the head itself. A reviewer with a local review runs its fix rounds off
-the PR, so its gate is the final full review finished with every reviewer thread
-resolved, whatever the head.
+the PR, so its gate is the final full review finished, whatever the head; its open
+threads block the merge through the ruleset's required conversation resolution, not
+here (resolving a thread fires no Actions event, so a status would lag).
 
 With a CODEOWNERS file (see ``path_owners``), a PR touching a path its author
 doesn't own also needs that path's owner to approve the head; that half is reported
-first. CODEOWNERS alone turns the status on: with no reviewer configured
-(``"active": null``) the status is the ownership half only. A CODEOWNERS file that
-names no user owner (empty, or only team, email or unsupported-syntax lines, which
-``path_owners`` skips) counts as no file. With neither, nothing is posted. Run by
+first. Once no owner's approval is missing, a docs-only PR (every changed and
+renamed-from path in the repo's opt-in ``.github/docs-only-paths.json`` allowlist)
+passes as "docs-only: no review required" without a reviewer verdict. The template
+ships no such file, so with it absent no PR is docs-only; a malformed file or a
+capped file list fails closed the same way. CODEOWNERS alone turns the status on:
+with no reviewer configured (``"active": null``) the status is the ownership half
+only. A CODEOWNERS file that names no user owner (empty, or only team, email or
+unsupported-syntax lines, which ``path_owners`` skips) counts as no file. With
+neither, nothing is posted. Run by
 ``.github/workflows/review-gate.yml`` from the default branch's checkout, never from
 PR code, so a PR can't loosen the CODEOWNERS that gates it.
 """
@@ -23,6 +29,7 @@ PR code, so a PR can't loosen the CODEOWNERS that gates it.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import subprocess  # nosec B404 -- fixed gh argv, no shell
@@ -39,9 +46,130 @@ STATUS_CONTEXT = "review-gate"
 # checks out the default branch, so the CODEOWNERS read here is the default branch's.
 REPO_ROOT = Path(__file__).resolve().parents[4]
 OWNERSHIP_CLEAR = "no changed path needs another owner's approval"
+# Opt-in: the template ships no such file (an example lives in the skill's
+# references/). Read from the default-branch checkout, like CODEOWNERS.
+DOCS_ONLY_PATHS_FILE = REPO_ROOT / ".github" / "docs-only-paths.json"
+DOCS_ONLY_STATUS = ("success", "docs-only: no review required")
 _MAX_DESCRIPTION = 140  # GitHub rejects longer status descriptions
 # Posts per run before giving up on a state that keeps changing (the sweep retries).
 _MAX_POSTS = 5
+
+
+class DocsAllowlist(NamedTuple):
+    """Which paths a docs-only PR may touch.
+
+    Attributes
+    ----------
+    dirs : tuple[str, ...]
+        Directory prefixes whose files may be docs.
+    dir_suffixes : tuple[str, ...]
+        File suffixes (lowercased match) allowed under ``dirs``.
+    top_level_suffix : str
+        Suffix allowed for files at the repository root.
+    excluded_names : tuple[str, ...]
+        Base names that are never docs, at any depth.
+    """
+
+    dirs: tuple[str, ...]
+    dir_suffixes: tuple[str, ...]
+    top_level_suffix: str
+    excluded_names: tuple[str, ...]
+
+
+def _string_tuple(value: object) -> tuple[str, ...] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    if not all(isinstance(item, str) and item for item in value):
+        return None
+    return tuple(value)
+
+
+def load_docs_allowlist(path: Path) -> DocsAllowlist | None:
+    """Read the docs-only allowlist, failing closed on any problem.
+
+    Parameters
+    ----------
+    path : Path
+        The ``docs-only-paths.json`` file to read.
+
+    Returns
+    -------
+    DocsAllowlist or None
+        The allowlist, or None (no PR is docs-only) when the file is missing,
+        isn't a JSON object, or any of ``dirs``, ``dir_suffixes``,
+        ``excluded_names`` (non-empty string lists) and ``top_level_suffix`` (a
+        non-empty string) is missing or mistyped. Other keys are ignored.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        print(f"{path}: unreadable docs-only allowlist: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(data, dict):
+        data = {}
+    dirs = _string_tuple(data.get("dirs"))
+    dir_suffixes = _string_tuple(data.get("dir_suffixes"))
+    excluded_names = _string_tuple(data.get("excluded_names"))
+    top_level_suffix = data.get("top_level_suffix")
+    if (
+        dirs is None
+        or dir_suffixes is None
+        or excluded_names is None
+        or not isinstance(top_level_suffix, str)
+        or not top_level_suffix
+    ):
+        print(f"{path}: malformed docs-only allowlist", file=sys.stderr)
+        return None
+    return DocsAllowlist(dirs, dir_suffixes, top_level_suffix, excluded_names)
+
+
+@functools.cache
+def _cached_docs_allowlist(path: Path) -> DocsAllowlist | None:
+    """Load the allowlist once per path per process, so a sweep reads it once."""
+    return load_docs_allowlist(path)
+
+
+def _is_docs_path(path: str, allowlist: DocsAllowlist) -> bool:
+    if path.rsplit("/", 1)[-1] in allowlist.excluded_names:
+        return False
+    if path.startswith(allowlist.dirs):
+        return path.lower().endswith(allowlist.dir_suffixes)
+    return "/" not in path and path.endswith(allowlist.top_level_suffix)
+
+
+def docs_only_status(
+    files: Sequence[Mapping[str, Any]],
+    changed_files: int,
+    allowlist: DocsAllowlist | None,
+) -> tuple[str, str] | None:
+    """Return a passing status when a PR touches only docs, else None.
+
+    Parameters
+    ----------
+    files : Sequence[Mapping[str, Any]]
+        The PR's files as the REST API lists them: ``filename`` and, for a
+        rename, ``previous_filename``.
+    changed_files : int
+        GitHub's count of changed files; more than ``len(files)`` means the list
+        was capped, so the PR is never docs-only.
+    allowlist : DocsAllowlist or None
+        The docs-only paths; None (no file, or a malformed one) makes no PR
+        docs-only.
+
+    Returns
+    -------
+    tuple[str, str] or None
+        ``DOCS_ONLY_STATUS``, or None when a review is needed.
+    """
+    if allowlist is None or not files or changed_files != len(files):
+        return None
+    paths = [f["filename"] for f in files]
+    paths += [f["previous_filename"] for f in files if f.get("previous_filename")]
+    if all(_is_docs_path(path, allowlist) for path in paths):
+        return DOCS_ONLY_STATUS
+    return None
 
 
 def _clip(text: str) -> str:
@@ -110,9 +238,11 @@ def _local_gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
     """Gate a PR whose fix rounds ran locally on its one final full review.
 
     Fixes pushed after the full review move the head, and are re-checked locally
-    and on the reviewer's threads rather than by another PR review (which would
-    spend the scarce PR quota). So the gate needs the full review finished and every
-    reviewer thread resolved, not a verdict on the current head.
+    rather than by another PR review (which would spend the scarce PR quota). So
+    the gate needs the full review finished, not a verdict on the current head. The
+    reviewer's open threads block the merge through the ruleset's required
+    conversation resolution, not here: resolving a thread fires no Actions event,
+    so a status computed from them would lag.
 
     Parameters
     ----------
@@ -137,17 +267,12 @@ def _local_gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
         )
     if final not in ("finished", "not_required"):
         return "failure", _clip(f"unrecognized final-review outcome: {final}")
-    open_threads = len(state.get("open_findings") or [])
-    if open_threads:
-        return "failure", _clip(f"{open_threads} {name} thread(s) still open")
     local = (
         "local review"
         if state["local_review"].get("reviewed_head")
         else "no local review"
     )
-    return "success", _clip(
-        f"{name}'s full review finished, threads resolved; {local} on {sha7}"
-    )
+    return "success", _clip(f"{name}'s full review finished; {local} on {sha7}")
 
 
 def _gh(args: Sequence[str]) -> None:
@@ -274,6 +399,28 @@ def _ownership(
     return head, status or ("success", OWNERSHIP_CLEAR)
 
 
+def _docs_only(repo: str, pr: int, head_sha: str) -> tuple[str, str] | None:
+    """Return the docs-only pass for ``pr``, or None when it needs a review.
+
+    Reads nothing from the PR unless the repo opted in with an allowlist. A push
+    between the reviewer-state read and this one moves the head, so the files would
+    belong to a different head: fail closed (the push triggers its own run).
+    """
+    allowlist = _cached_docs_allowlist(DOCS_ONLY_PATHS_FILE)
+    if allowlist is None:
+        return None
+    pull = reviewer_state._gh_json(["api", f"repos/{repo}/pulls/{pr}"])
+    if str(pull["head"]["sha"]) != head_sha:
+        return None
+    listed = (
+        reviewer_state._gh_json(
+            ["api", "--paginate", f"repos/{repo}/pulls/{pr}/files?per_page=100"]
+        )
+        or []
+    )
+    return docs_only_status(listed, int(pull["changed_files"]), allowlist)
+
+
 def _current_gate_status(repo: str, sha: str) -> tuple[str, str] | None:
     """Return the newest ``review-gate`` (state, description) on ``sha``, if any.
 
@@ -327,8 +474,9 @@ def _want(
 ) -> tuple[str, tuple[str, str] | None]:
     """Return (head SHA, status to post) for ``pr``; no status when nothing gates it.
 
-    A missing owner's approval wins (it is the slower, human half); otherwise the
-    reviewer's gate decides, or the ownership half alone when there is no reviewer.
+    A missing owner's approval wins (it is the slower, human half); then a docs-only
+    PR (opt-in) passes; otherwise the reviewer's gate decides, or the ownership half
+    alone when there is no reviewer.
     """
     if adapter is None:
         return _ownership(repo, pr, None)
@@ -337,7 +485,7 @@ def _want(
     owners = ownership_gate_status(repo, pr, head_sha)
     if owners is not None and owners[0] == "failure":
         return head_sha, owners
-    return head_sha, gate_status(state)
+    return head_sha, _docs_only(repo, pr, head_sha) or gate_status(state)
 
 
 def post_for_pr(
@@ -346,7 +494,8 @@ def post_for_pr(
     """Compute the gate for ``pr`` and post it on the head it was computed for.
 
     The gate fails while a path owner's approval is missing, whatever the reviewer's
-    state; otherwise it is the reviewer's gate (``gate_status``). With no reviewer
+    state; once none is missing a docs-only PR passes (``docs_only_status``, opt-in);
+    any other PR gets the reviewer's gate (``gate_status``). With no reviewer
     (``adapter`` None) it is the ownership half alone, and nothing is posted when
     there is no CODEOWNERS file naming a user owner either.
 
