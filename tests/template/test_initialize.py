@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 import pytest
+import yaml
 
 from scripts.init_template import (
     _python_skill_hash,
@@ -14,6 +15,18 @@ from scripts.init_template import (
     initialize,
     main,
 )
+
+# Mirrors tests/template/test_dependabot_policy.py (tests/ is not a package).
+_MAJOR_RULE = {
+    "dependency-name": "*",
+    "update-types": ["version-update:semver-major"],
+}
+_UV_MAJOR_RULE = {**_MAJOR_RULE, "dependency-type": "direct"}
+_UV_BUILD_MINOR_RULE = {
+    "dependency-name": "uv-build",
+    "dependency-type": "direct",
+    "update-types": ["version-update:semver-minor"],
+}
 
 
 def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
@@ -59,6 +72,15 @@ def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
     assert dependabot.count('package-ecosystem: "uv"') == 1
     assert 'directory: "/"' in dependabot
     assert "stacks/" not in dependabot
+    # the template-only guard test is gone post-init; don't point at it
+    assert "test_dependabot_policy" not in dependabot
+    # major-only policy survives init; the promoted uv entry keeps the
+    # uv-build minor exception (tests/template/test_dependabot_policy.py)
+    for entry in yaml.safe_load(dependabot)["updates"]:
+        if entry["package-ecosystem"] == "uv":
+            assert entry["allow"] == [_UV_MAJOR_RULE, _UV_BUILD_MINOR_RULE]
+        else:
+            assert entry["allow"] == [_MAJOR_RULE]
     # README interview stripped
     readme = (template_tree / "README.md").read_text()
     assert "INTERVIEW:start" not in readme
@@ -112,6 +134,10 @@ def test_initialize_react_removes_root_python_tooling(template_tree: Path) -> No
     dependabot = (template_tree / ".github" / "dependabot.yml").read_text()
     assert 'package-ecosystem: "uv"' not in dependabot
     assert 'package-ecosystem: "bun"' in dependabot
+    assert "test_dependabot_policy" not in dependabot
+    # major-only policy survives init on every remaining entry
+    for entry in yaml.safe_load(dependabot)["updates"]:
+        assert entry["allow"] == [_MAJOR_RULE]
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]

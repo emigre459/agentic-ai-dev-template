@@ -340,7 +340,11 @@ def test_no_skills_cli_call_is_unpinned() -> None:
 
 def test_dependabot_bumps_the_cli_pin_in_the_template_only() -> None:
     text = (_REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
-    block = text.split("# >>> STACK:template", 1)[1].split("# <<< STACK:template", 1)[0]
+    # dependabot.yml has more than one template block; check them all.
+    block = "".join(
+        part.split("# <<< STACK:template", 1)[0]
+        for part in text.split("# >>> STACK:template")[1:]
+    )
     assert 'package-ecosystem: "npm"' in block
     assert 'directory: "/.github/actions/skills-cli"' in block
 
