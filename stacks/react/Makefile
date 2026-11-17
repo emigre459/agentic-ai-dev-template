@@ -29,9 +29,14 @@ coverage: ## Vitest with istanbul coverage + 80% gate; writes test-results.xml (
 test_speed_check: ## Per-test speed guard over the last coverage run
 	@python3 $(REPO_ROOT)/scripts/check_test_speed.py --junit test-results.xml --allowlist slow_test_allowlist.txt --config $(REPO_ROOT)/.github/pr-reviewer.json --rerun 'bunx vitest run {test} --reporter=junit --outputFile.junit={junit}'
 
+# Ignored advisories (each one weakens this gate; keep the list short):
+# - GHSA-fc5q-39xc-vjpf: picomatch <=4.0.7 ReDoS. No patched release exists
+#   (4.0.7 is the latest), and it reaches this stack only through dev tooling
+#   (vite, vitest via tinyglobby/fdir). Remove the ignore once a fixed
+#   picomatch ships and `bun update picomatch` picks it up.
 .PHONY: security
 security: ## Dependency CVE audit
-	@bun audit
+	@bun audit --ignore=GHSA-fc5q-39xc-vjpf
 
 .PHONY: pr_check
 # Coverage, THEN the speed check, in the recipe: the check reads the JUnit file
