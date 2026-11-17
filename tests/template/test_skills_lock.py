@@ -26,6 +26,7 @@ import subprocess  # nosec B404 -- fixed argv, in-repo script, no shell
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is not on PATH"
@@ -703,3 +704,21 @@ def test_make_skills_lock_target_forwards_tag() -> None:
     )
     assert plain.returncode == 0, plain.stderr
     assert "--tag" not in plain.stdout
+
+
+def test_template_machinery_job_fetches_tags() -> None:
+    """test_shipped_lock_is_current verifies the lock's release tag locally.
+
+    A pinned lock needs the tag in the checkout, so the job that runs the
+    machinery tests must fetch full history and tags, like `skills drift`.
+    """
+    ci = yaml.safe_load(
+        (_REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    )
+    checkout = next(
+        step
+        for step in ci["jobs"]["template"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/checkout")
+    )
+    assert checkout.get("with", {}).get("fetch-depth") == 0
+    assert checkout.get("with", {}).get("fetch-tags") is True
