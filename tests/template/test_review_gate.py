@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -35,6 +36,8 @@ def _load(name: str) -> ModuleType:
 
 reviewer_state = _load("reviewer_state")
 path_owners = _load("path_owners")
+human_review = _load("human_review")
+merge_gate = _load("merge_gate")
 review_gate = _load("review_gate")
 gate_status = review_gate.gate_status
 
@@ -515,10 +518,88 @@ def test_a_head_with_no_local_review_still_passes_but_says_so() -> None:
 
 def test_local_reviewer_open_threads_do_not_block_gate() -> None:
     """The ruleset's conversation resolution blocks the merge; the gate must not lag."""
-    state, description = gate_status(_local(open_findings=[{"path": "a.py"}] * 2))
+    state, description = gate_status(
+        _local(open_findings=[{"path": "a.py"}] * 2), threads_enforced=True
+    )
     assert state == "success"
     assert "full review finished" in description
     assert "thread" not in description
+
+
+def test_local_reviewer_open_threads_hold_the_gate_without_the_rule() -> None:
+    """No rule requires conversation resolution: the gate itself waits on threads."""
+    state, description = gate_status(_local(open_findings=[{"path": "a.py"}] * 2))
+    assert state == "failure"
+    assert description == "2 CodeRabbit thread(s) still open"
+
+
+_THREAD_RULE = {
+    "type": "pull_request",
+    "parameters": {"required_review_thread_resolution": True},
+}
+
+
+def _rules_run(
+    monkeypatch: Any, rules: Any, reads: list[tuple[str, str]] | None = None
+) -> _Head:
+    """Run a locally reviewed PR with two open threads against ``rules``."""
+
+    def _branch_rules(repo: str, base: str) -> Any:
+        if reads is not None:
+            reads.append((repo, base))
+        if isinstance(rules, BaseException):
+            raise rules
+        return rules
+
+    monkeypatch.setattr(review_gate.merge_gate, "branch_rules", _branch_rules)
+    monkeypatch.setattr(
+        review_gate.reviewer_state,
+        "_gh_json",
+        lambda args: (
+            {"default_branch": "trunk"}
+            if args == ["api", f"repos/{REPO}"]
+            else pytest.fail(f"unexpected gh read {args}")
+        ),
+    )
+    monkeypatch.setattr(review_gate, "DOCS_ONLY_PATHS_FILE", Path("/nonexistent.json"))
+    state = _local(open_findings=[{"path": "a.py"}] * 2)
+    return _run(monkeypatch, _Head([state]))
+
+
+def test_open_threads_pass_when_the_default_branch_rules_resolve_them(
+    monkeypatch: Any,
+) -> None:
+    reads: list[tuple[str, str]] = []
+    head = _rules_run(monkeypatch, [_THREAD_RULE], reads)
+    assert set(reads) == {(REPO, "trunk")}  # the default branch, once per pass
+    assert head.posts[0][0] == "success"
+    assert "thread" not in head.posts[0][1]
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        None,
+        [],
+        [{"type": "pull_request", "parameters": {}}],
+        subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 500"),
+    ],
+    ids=["404", "no-rules", "rule-off", "read-failed"],
+)
+def test_open_threads_fail_when_no_default_branch_rule_resolves_them(
+    monkeypatch: Any, rules: Any
+) -> None:
+    head = _rules_run(monkeypatch, rules)
+    assert head.posts == [("failure", "2 CodeRabbit thread(s) still open")]
+
+
+def test_no_open_threads_reads_no_rules(monkeypatch: Any) -> None:
+    def _boom(repo: str, base: str) -> Any:
+        raise AssertionError("rules read with no open thread")
+
+    monkeypatch.setattr(review_gate.merge_gate, "branch_rules", _boom)
+    head = _run(monkeypatch, _Head([_local()]))
+    assert head.posts[0][0] == "success"
 
 
 def test_a_locally_reviewed_pr_is_asked_for_the_full_review_not_a_trigger() -> None:
@@ -803,6 +884,10 @@ def test_renamed_from_outside_list_needs_review() -> None:
         "docs/AGENTS.md",
         "docs/deep/er/CLAUDE.md",
         "sub/AGENTS.md",
+        "agents.md",
+        "docs/claude.md",
+        "GEMINI.md",
+        "docs/Gemini.md",
     ],
 )
 def test_agents_and_claude_md_at_any_depth_need_review(path: str) -> None:

@@ -666,16 +666,22 @@ def test_step_5b_documents_the_opt_in_docs_only_lane() -> None:
 
 @pytest.mark.parametrize("path", [_SKILL, _RULE, _CODERABBIT], ids=lambda p: p.name)
 def test_review_gate_leaves_reviewer_threads_to_the_ruleset(path: Path) -> None:
-    """review-gate no longer counts a local reviewer's threads; the ruleset does."""
+    """The ruleset holds a local reviewer's threads when its rules require it.
+
+    Otherwise review-gate itself waits for them, so a repo without the rule still
+    can't merge past an open reviewer thread.
+    """
     text = _flat(path)
     assert "thread is resolved" not in text
     assert "thread resolved" not in text
-    assert "required conversation resolution" in text
+    assert "required conversation resolution when the default branch's" in text
+    assert "`review-gate` itself waits for them" in text
 
 
 def test_local_rounds_name_the_ruleset_as_the_thread_gate() -> None:
     section = _section(_flat(_SKILL), "### Local review rounds")
-    assert "required conversation resolution" in section
+    assert "when the default branch's rules require conversation resolution" in section
+    assert "`review-gate` itself waits for them" in section
 
 
 def test_step_2e_points_at_the_upgrade_deps_sweep() -> None:

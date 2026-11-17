@@ -233,9 +233,11 @@ prose names no vendor; read this file before interpreting a review when
   adapter declares a local review, that status is green once the final full review
   finished (later fix commits are re-checked locally and on the threads); with
   `local_review` null it also needs a verdict on the current head. Open CodeRabbit
-  threads block the merge through the ruleset's required conversation resolution,
-  not through `review-gate` (resolving a thread fires no Actions event, so a gate
-  counting them lagged).
+  threads block the merge through the ruleset's required conversation resolution
+  when the default branch's rules require it, not through `review-gate` (resolving
+  a thread fires no Actions event, so a gate counting them lags); otherwise
+  `review-gate` itself waits for them, and its periodic sweep clears it once they
+  are resolved.
 - **(observed)** Logins: `coderabbitai[bot]` on REST reviews/comments,
   `coderabbitai` as the GraphQL thread author — both listed in `bot_logins`.
 - **(observed)** Findings: a review whose body starts

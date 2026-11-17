@@ -79,5 +79,7 @@ it can pass on a head it skipped or was rate-limited on. The vendor-neutral
 when the reviewer has reviewed the current head **and** finished its final full
 review (for a reviewer with a local review: when its final full review finished,
 since later fixes are re-checked locally). Open reviewer threads block the merge
-through the ruleset's required conversation resolution, not through `review-gate`. Require `review-gate` in the `main` ruleset once a reviewer is installed —
-never the vendor's check.
+through the ruleset's required conversation resolution when the default branch's
+rules require it; otherwise `review-gate` itself waits for them (a local reviewer's
+gate stays red while any is open). Require `review-gate` in the `main` ruleset once
+a reviewer is installed — never the vendor's check.

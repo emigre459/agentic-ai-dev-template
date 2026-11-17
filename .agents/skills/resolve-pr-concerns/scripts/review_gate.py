@@ -7,9 +7,11 @@ only when the configured reviewer (``.github/pr-reviewer.json``) has a verdict o
 current head AND its final full review finished -- the state ``reviewer_state``
 reports. A verdict carried onto a rebase-only head (``verdict_carried_from``) counts
 like one on the head itself. A reviewer with a local review runs its fix rounds off
-the PR, so its gate is the final full review finished, whatever the head; its open
-threads block the merge through the ruleset's required conversation resolution, not
-here (resolving a thread fires no Actions event, so a status would lag).
+the PR, so its gate is the final full review finished, whatever the head. Its open
+threads block the merge through the ruleset's required conversation resolution when
+the default branch's rules require it (resolving a thread fires no Actions event, so
+a status would lag); otherwise the gate itself fails while any is open, and the
+periodic sweep picks up the resolution.
 
 With a CODEOWNERS file (see ``path_owners``), a PR touching a path its author
 doesn't own also needs that path's owner to approve the head; that half is reported
@@ -38,6 +40,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import merge_gate
 import path_owners
 import reviewer_state
 
@@ -67,7 +70,7 @@ class DocsAllowlist(NamedTuple):
     top_level_suffix : str
         Suffix allowed for files at the repository root.
     excluded_names : tuple[str, ...]
-        Base names that are never docs, at any depth.
+        Base names that are never docs, at any depth (case-insensitive).
     """
 
     dirs: tuple[str, ...]
@@ -132,7 +135,8 @@ def _cached_docs_allowlist(path: Path) -> DocsAllowlist | None:
 
 
 def _is_docs_path(path: str, allowlist: DocsAllowlist) -> bool:
-    if path.rsplit("/", 1)[-1] in allowlist.excluded_names:
+    excluded = {name.lower() for name in allowlist.excluded_names}
+    if path.rsplit("/", 1)[-1].lower() in excluded:
         return False
     if path.startswith(allowlist.dirs):
         return path.lower().endswith(allowlist.dir_suffixes)
@@ -176,13 +180,18 @@ def _clip(text: str) -> str:
     return text if len(text) <= _MAX_DESCRIPTION else text[: _MAX_DESCRIPTION - 1] + "…"
 
 
-def gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
+def gate_status(
+    state: Mapping[str, Any], *, threads_enforced: bool = False
+) -> tuple[str, str]:
     """Return (status state, description) for one PR's ``collect_state`` output.
 
     Parameters
     ----------
     state : Mapping[str, Any]
         Reviewer state as returned by ``reviewer_state.collect_state``.
+    threads_enforced : bool, default False
+        Whether the default branch's rules require review threads resolved; only a
+        locally reviewed PR reads it (``_local_gate_status``).
 
     Returns
     -------
@@ -191,7 +200,7 @@ def gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
         clipped description.
     """
     if (state.get("local_review") or {}).get("configured"):
-        return _local_gate_status(state)
+        return _local_gate_status(state, threads_enforced=threads_enforced)
     name, sha7 = state["reviewer_name"], state["head_sha"][:7]
     trigger = state["trigger_comment"]
     if state["verdict"] not in ("pass", "findings"):
@@ -234,20 +243,26 @@ def gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
     return "failure", _clip(f"unrecognized final-review outcome: {final}")
 
 
-def _local_gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
+def _local_gate_status(
+    state: Mapping[str, Any], *, threads_enforced: bool
+) -> tuple[str, str]:
     """Gate a PR whose fix rounds ran locally on its one final full review.
 
     Fixes pushed after the full review move the head, and are re-checked locally
     rather than by another PR review (which would spend the scarce PR quota). So
-    the gate needs the full review finished, not a verdict on the current head. The
-    reviewer's open threads block the merge through the ruleset's required
-    conversation resolution, not here: resolving a thread fires no Actions event,
-    so a status computed from them would lag.
+    the gate needs the full review finished, not a verdict on the current head.
+    When the default branch's rules require conversation resolution, the
+    reviewer's open threads block the merge there, not here: resolving a thread
+    fires no Actions event, so a status computed from them would lag. Without
+    that rule nothing else holds them, so the gate fails while any is open (the
+    periodic sweep clears it once they're resolved).
 
     Parameters
     ----------
     state : Mapping[str, Any]
         Reviewer state as returned by ``reviewer_state.collect_state``.
+    threads_enforced : bool
+        Whether the default branch's rules require review threads resolved.
 
     Returns
     -------
@@ -267,6 +282,9 @@ def _local_gate_status(state: Mapping[str, Any]) -> tuple[str, str]:
         )
     if final not in ("finished", "not_required"):
         return "failure", _clip(f"unrecognized final-review outcome: {final}")
+    open_threads = len(state.get("open_findings") or [])
+    if open_threads and not threads_enforced:
+        return "failure", _clip(f"{open_threads} {name} thread(s) still open")
     local = (
         "local review"
         if state["local_review"].get("reviewed_head")
@@ -421,6 +439,22 @@ def _docs_only(repo: str, pr: int, head_sha: str) -> tuple[str, str] | None:
     return docs_only_status(listed, int(pull["changed_files"]), allowlist)
 
 
+def _threads_enforced(repo: str) -> bool:
+    """Return whether the default branch's rules require review threads resolved.
+
+    Reads the rules through ``merge_gate`` (one rules reader for both gates). A 404
+    or a failed read counts as not enforced, so the gate waits on the threads itself
+    rather than passing a PR nothing would hold.
+    """
+    try:
+        repository = reviewer_state._gh_json(["api", f"repos/{repo}"])
+        rules = merge_gate.branch_rules(repo, str(repository["default_branch"]))
+    except (subprocess.CalledProcessError, KeyError, TypeError, ValueError) as exc:
+        print(f"{repo}: rules unreadable, gating on threads: {exc}", file=sys.stderr)
+        return False
+    return merge_gate.threads_must_resolve(rules)
+
+
 def _current_gate_status(repo: str, sha: str) -> tuple[str, str] | None:
     """Return the newest ``review-gate`` (state, description) on ``sha``, if any.
 
@@ -485,7 +519,17 @@ def _want(
     owners = ownership_gate_status(repo, pr, head_sha)
     if owners is not None and owners[0] == "failure":
         return head_sha, owners
-    return head_sha, _docs_only(repo, pr, head_sha) or gate_status(state)
+    docs_only = _docs_only(repo, pr, head_sha)
+    if docs_only is not None:
+        return head_sha, docs_only
+    # Rules are read only when they decide something: a locally reviewed PR with an
+    # open reviewer thread.
+    enforced = bool(
+        (state.get("local_review") or {}).get("configured")
+        and state.get("open_findings")
+        and _threads_enforced(repo)
+    )
+    return head_sha, gate_status(state, threads_enforced=enforced)
 
 
 def post_for_pr(
