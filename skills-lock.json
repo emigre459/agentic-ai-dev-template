@@ -5,67 +5,67 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/build-from-issue/SKILL.md",
-      "computedHash": "67e30b3eaa26af98b9333935b7559e7051b84ff197a294b1af018b4e54e3bf3e"
+      "computedHash": "1b2655de4134909bfe8fc7afbfe1dc2e684d12639eafbf51b919c796e72383f8"
     },
     "clean-up-kanban": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/clean-up-kanban/SKILL.md",
-      "computedHash": "228d94c71199a3944b440f932d70529b0042d1a2570e8ff32470d1fe18a4070d"
+      "computedHash": "dc9c09bf84df126bb25ab7fcec5f75d55de079839c350e282e0c741cf692c3cd"
     },
     "explain-diff": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/explain-diff/SKILL.md",
-      "computedHash": "00ba74cee01d4e96dd76dbd5222e1af790c466f2fff7d6f0f9847ba819a14d79"
+      "computedHash": "d9ee6fdbfee6d019a81e9e0759baff544e96f7a979794cfb8550c6630a742cb7"
     },
     "explain-diff-merge-review": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/explain-diff-merge-review/SKILL.md",
-      "computedHash": "0cf9a9fd6d181f9ca15cfbbcef31bc0b6728110b172c5397b83d16527502ac7b"
+      "computedHash": "2e411a8f17919c7e4827a65a061012a903bbea9a74d5d8cbd0d37597d0d7a517"
     },
     "plan-issues": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/plan-issues/SKILL.md",
-      "computedHash": "f21b8088a4dc78154adf8d6b4b7016a0910cdf34222e323b1424892dfc6d93de"
+      "computedHash": "149f0c4dcd83fd807ff7ea3524be8e566890a1141b8571a8a53f7a1a389ebe5c"
     },
     "pr-check": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/pr-check/SKILL.md",
-      "computedHash": "331c410320bb5a8f59cfd7379682d245a3f667eda10cdebc16cc6a73910b3ab0"
+      "computedHash": "74ea4bb2a5e5fbb9aa6f7601b414f49605b7504661fb51edfc9a7938bc60582b"
     },
     "release": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/release/SKILL.md",
-      "computedHash": "4b9f61df88b8f39e13b087334f3f96266f19cb14c52b0623e21fc6d69fa2d051"
+      "computedHash": "00dfe8fc02d7978a0cbe87f6c51e42030bcd4db24eadc15ec0b70ecef9a1f728"
     },
     "resolve-pr-concerns": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/resolve-pr-concerns/SKILL.md",
-      "computedHash": "c6f9478231d21d63c59cdebf8d0b9eeb427c30eb64373ea448fec57f9b3399ae"
+      "computedHash": "91f63fc6def9e46bf0dcde00d8cb0186e2b01be8288ad58a4a2f2ea8b2275911"
     },
     "review-skill": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/review-skill/SKILL.md",
-      "computedHash": "cc932308eee67728e018de5efb3ad41dab78b1f50b5d69fc29d4c297b2237de0"
+      "computedHash": "9a8fb661ff8edbac0852d959d2e1c8a2d353e8fcf88bf79f405962a0d4bd1ead"
     },
     "run-tests": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/run-tests/SKILL.md",
-      "computedHash": "b2d3cd9ec80fbf6855c49499c81e1e727d6b7843bed72969caf7e47e19bc4057"
+      "computedHash": "5a903dfcdbf443d11f6cbc1f88863cbcccb81ac4ad6fb3ff12e482e605c53fc9"
     },
     "upgrade-deps": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/upgrade-deps/SKILL.md",
-      "computedHash": "addacf7b29b628ce1eacbdd77456a7ef8ecd9b62384324e1dbbffee50b197624"
+      "computedHash": "3c3cde9c5d5e1f83f3b09d7a63fed56876e078afe725993c04cfc6d38492b4ad"
     }
   }
 }

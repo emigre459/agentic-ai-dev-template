@@ -143,7 +143,7 @@ rules:
 - **Hard stops no file can lift.** Only you can, explicitly, in the session:
   - merging without your one-off OK;
   - resolving review threads;
-  - opening or calling ready a PR without a green `make pr_check` and CI;
+  - opening or calling ready a PR without the pre-PR check `pr-check-scope` requires (the full `make pr_check` unless the diff qualifies for the light check) and green CI;
   - weakening a gate;
   - deleting issues;
   - skipping a confirmation;

@@ -22,6 +22,7 @@ Each rule is a Markdown file with frontmatter:
 |------|-----------|---------|
 | `.agents/rules/shared/push-every-commit.md` | always | Push to origin after EVERY commit (`-u` on the first) — the remote branch is the in-flight signal build-from-issue Step 0/11b and parallel sessions read |
 | `.agents/rules/shared/no-hardcoded-waits.md` | always | Wait on the real event/state, not a fixed sleep; raw time only as the timeout, pacing through one named helper |
+| `.agents/rules/shared/pr-check-scope.md` | always | Full `make pr_check` only when the diff can break the suite; otherwise the light check (lint + covering tests) and CI as the gate |
 | `.agents/rules/shared/*.md` | always / varies | Git, commit, issue-workflow, and meta conventions — read the directory |
 <!-- STACK:python -->
 | `.agents/rules/python/uv-python.md` | always | Use `uv` for all Python execution and dependency management |
@@ -53,7 +54,7 @@ This is a **React + TypeScript frontend** project built with Vite and managed wi
 ## Quality Gates
 
 Every change must pass `make pr_check` (lint + security + coverage + the per-test
-speed check) before a PR is opened.
+speed check) before a PR is opened, or the light check `pr-check-scope` allows.
 
 | Command | What it runs |
 |---------|--------------|

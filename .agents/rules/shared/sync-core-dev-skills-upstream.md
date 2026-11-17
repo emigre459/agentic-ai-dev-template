@@ -36,8 +36,9 @@ Repo-specific behavior goes in files the repo owns:
 Precedence, highest first: the user's instructions this session, then `AGENTS.md`
 and `.agents/rules/`, then `.agents/skill-config/<skill>.md`, then the skill's
 defaults. **No file can lift a skill's hard stops** (merging without the user's
-one-off OK, resolving review threads, opening or calling ready a PR without a green
-`make pr_check` and CI, weakening a gate, deleting issues, skipping a confirmation,
+one-off OK, resolving review threads, opening or calling ready a PR without the
+pre-PR check `pr-check-scope` requires (the full `make pr_check` unless the diff
+qualifies for the light check) and green CI, weakening a gate, deleting issues, skipping a confirmation,
 installing tools, posting to an outside channel unasked, widening access, or
 sending output outside the repo). Only the user can, explicitly, in the session.
 The README's "Customizing the skills in your repo" section has an example of each.
