@@ -582,6 +582,7 @@ def test_init_without_ref_keeps_tree_and_local_actions(template_tree: Path) -> N
     workflow.write_text(
         "jobs:\n  drift:\n    steps:\n      - uses: ./.github/actions/skills-drift\n"
     )
+    _unpin_lock(template_tree)
     assert '"ref"' not in (template_tree / "skills-lock.json").read_text()
     skill = template_tree / ".agents" / "skills" / "run-tests"
     hash_before = _python_skill_hash(skill)
@@ -706,6 +707,21 @@ def test_init_keeps_unlocked_skills_when_not_pinned(template_tree: Path) -> None
     assert (template_tree / ".agents" / "skills" / "pr-check").is_dir()
 
 
+def _unpin_lock(root: Path) -> None:
+    """Drop every ``ref`` from the copied lock: the state before the first release.
+
+    The shipped lock is pinned once a release exists, so tests of the
+    before-first-release path build that state themselves.
+    """
+    path = root / "skills-lock.json"
+    lock: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    for entry in lock["skills"].values():
+        entry.pop("ref", None)
+    path.write_text(
+        json.dumps(lock, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
 def _lock_skills(root: Path) -> dict[str, Any]:
     text = (root / "skills-lock.json").read_text(encoding="utf-8")
     lock: dict[str, Any] = json.loads(text)
@@ -739,7 +755,8 @@ def test_react_init_drops_python_only_skill_and_lock_entry(
 def test_react_init_drops_notebook_skill_before_first_release(
     template_tree: Path,
 ) -> None:
-    # The shipped lock (no `ref` yet) lists the skill too.
+    _unpin_lock(template_tree)
+    # The lock before the first release (no `ref`) lists the skill too.
     assert "write-teaching-notebook" in _lock_skills(template_tree)
 
     initialize(template_tree, "react", "acme-web", "web", runner=_no_commands)
