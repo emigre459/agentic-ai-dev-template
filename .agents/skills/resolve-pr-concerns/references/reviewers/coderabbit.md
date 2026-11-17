@@ -231,9 +231,11 @@ prose names no vendor; read this file before interpreting a review when
   gets a passing "Review rate limited" check on purpose. So never require the
   `CodeRabbit` check: require the vendor-neutral `review-gate` status. Because this
   adapter declares a local review, that status is green once the final full review
-  finished and every CodeRabbit thread is resolved (later fix commits are re-checked
-  locally and on the threads); with `local_review` null it also needs a verdict on
-  the current head.
+  finished (later fix commits are re-checked locally and on the threads); with
+  `local_review` null it also needs a verdict on the current head. Open CodeRabbit
+  threads block the merge through the ruleset's required conversation resolution,
+  not through `review-gate` (resolving a thread fires no Actions event, so a gate
+  counting them lagged).
 - **(observed)** Logins: `coderabbitai[bot]` on REST reviews/comments,
   `coderabbitai` as the GraphQL thread author — both listed in `bot_logins`.
 - **(observed)** Findings: a review whose body starts

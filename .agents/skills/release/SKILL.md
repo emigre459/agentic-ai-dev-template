@@ -103,7 +103,7 @@ Offer it to the user with `AskUserQuestion`; do it only on their OK, never autom
 
 1. `git fetch origin --tags`, then branch off the latest `main`: `git switch -c release-pin-vX.Y.Z origin/main`.
 2. `make skills_lock TAG=vX.Y.Z`, which records the tag and its hash for every skill in `skills-lock.json`.
-3. Commit and push (the `push-every-commit` rule), then open a PR that names the release it pins. It follows this repo's normal PR rules: a green `make pr_check` and CI first, then `resolve-pr-concerns`. The user merges it.
+3. Commit and push (the `push-every-commit` rule), then open a PR that names the release it pins. It follows this repo's normal PR rules: the pre-PR check `pr-check-scope` requires (the full `make pr_check` unless the diff qualifies for the light check; if the repo has no `pr-check-scope` rule, run the full `make pr_check`) and green CI first, then `resolve-pr-concerns`. The user merges it.
 
 ## Red flags
 

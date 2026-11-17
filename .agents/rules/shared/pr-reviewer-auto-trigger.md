@@ -77,6 +77,7 @@ more, then escalate. `reviewer_state.py` reports `final_review_outcome`;
 it can pass on a head it skipped or was rate-limited on. The vendor-neutral
 `review-gate` status (posted by `.github/workflows/review-gate.yml`) is green only
 when the reviewer has reviewed the current head **and** finished its final full
-review (for a reviewer with a local review: when its final full review finished and
-every reviewer thread is resolved, since later fixes are re-checked locally). Require `review-gate` in the `main` ruleset once a reviewer is installed —
+review (for a reviewer with a local review: when its final full review finished,
+since later fixes are re-checked locally). Open reviewer threads block the merge
+through the ruleset's required conversation resolution, not through `review-gate`. Require `review-gate` in the `main` ruleset once a reviewer is installed —
 never the vendor's check.

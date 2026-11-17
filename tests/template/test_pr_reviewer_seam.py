@@ -648,3 +648,42 @@ def test_build_from_issue_stack_reference_keeps_the_policy() -> None:
         "resolve-pr-concerns",
     ):
         assert phrase in text, phrase
+
+
+# --- Wiring: docs-only lane, thread resolution, single-flight full check ---
+
+_CODERABBIT = _NOTES_DIR / "coderabbit.md"
+_FULL_CHECK = "single_flight.py suite -- make pr_check"
+
+
+def test_step_5b_documents_the_opt_in_docs_only_lane() -> None:
+    step5b = _section(_flat(_SKILL), "## Step 5b:")
+    assert "when the repo has opted in" in step5b
+    assert ".github/docs-only-paths.json" in step5b
+    assert "docs-only: no review required" in step5b
+    assert "the maintainer's ruleset bypass" in step5b
+
+
+@pytest.mark.parametrize("path", [_SKILL, _RULE, _CODERABBIT], ids=lambda p: p.name)
+def test_review_gate_leaves_reviewer_threads_to_the_ruleset(path: Path) -> None:
+    """review-gate no longer counts a local reviewer's threads; the ruleset does."""
+    text = _flat(path)
+    assert "thread is resolved" not in text
+    assert "thread resolved" not in text
+    assert "required conversation resolution" in text
+
+
+def test_local_rounds_name_the_ruleset_as_the_thread_gate() -> None:
+    section = _section(_flat(_SKILL), "### Local review rounds")
+    assert "required conversation resolution" in section
+
+
+def test_step_2e_points_at_the_upgrade_deps_sweep() -> None:
+    step2e = _section(_flat(_SKILL), "### 2e.")
+    assert "upgrade-deps" in step2e
+    assert "sweep" in step2e
+
+
+@pytest.mark.parametrize("path", [_SKILL, _BUILD], ids=lambda p: p.parent.name)
+def test_full_check_runs_through_the_single_flight_lock(path: Path) -> None:
+    assert _FULL_CHECK in _flat(path)
