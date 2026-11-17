@@ -59,7 +59,7 @@ All mechanics are in `update_prs.py` (`S=<skill-dir>/scripts/update_prs.py` belo
 | `CLOSE_ROUTINE` | minor/patch bump(s) with no open advisory, or a major of an indirect dependency | closed now |
 | `REVIEW` | the script can't prove it safe: alerts unreadable, a conflict, a major with no advisory, an alert with no patch, skills paths outside the tree | you decide with the user |
 
-**Both Dependabot policies.** With grouped weekly minor/patch PRs (this template's default `.github/dependabot.yml`), a group with no open advisory on any member is `CLOSE_ROUTINE`; a member with an advisory is `FOLD`ed alone as a targeted upgrade (never closed with its routine siblings); a group carrying a major is `REVIEW`. With a security-plus-majors policy (`allow` only `semver-major`), a minor/patch PR is a leftover from before the change (`CLOSE_ROUTINE`), each major arrives on its own PR and is `REVIEW` unless it fixes an advisory, and since majors come for direct dependencies only, an indirect major is a leftover (`CLOSE_ROUTINE`). A deliberate minor/patch upgrade goes in a normal PR, not here.
+**Both Dependabot policies.** With security updates plus majors only (this template's default `.github/dependabot.yml`: `allow` only `version-update:semver-major`, uv entries limited to `dependency-type: "direct"`, plus a `uv-build` minor exception), a minor/patch PR is a leftover from before the change (`CLOSE_ROUTINE`), each major arrives on its own PR and is `REVIEW` unless it fixes an advisory (a `uv-build` minor is a `0.x` minor, semver's major, so it is `REVIEW` too), and since majors come for direct dependencies only, an indirect major is a leftover (`CLOSE_ROUTINE`). With the alternative, grouped weekly minor/patch PRs, a group with no open advisory on any member is `CLOSE_ROUTINE`; a member with an advisory is `FOLD`ed alone as a targeted upgrade (never closed with its routine siblings); a group carrying a major is `REVIEW`. A deliberate minor/patch upgrade goes in a normal PR, not here.
 
 1. **Fresh base.** With an issue card, run inside `build-from-issue`; otherwise `git fetch origin main && git switch -c deps-sweep-<YYYY-MM-DD> origin/main`. Push after every commit.
 2. **Plan.** `uv run python $S plan --snapshot-out <scratch-dir>/update-prs-snapshot.json` (a scratch path outside the repo) and show the user the table it prints.
@@ -73,7 +73,7 @@ All mechanics are in `update_prs.py` (`S=<skill-dir>/scripts/update_prs.py` belo
    - run each fold command the plan printed: `uv lock --upgrade-package <pkg>==<ver>` or `bun update <pkg>@<ver>` in that project's directory (the tool regenerates the lockfile; never merge a Dependabot branch), and `gh pr diff <n> | git apply --3way --index` for an Actions bump;
    - apply each floor note: when the lock alone can't hold the fix because the manifest still allows a vulnerable version, raise the manifest floor to the fixed version (Refresh Step 2.2);
    - apply the skills refresh with the printed `git diff … | git apply --3way --index` command; never merge the update branch whole, since it can revert newer `main` work;
-   - run the plan's lock checks, re-run `alert_status.py` (every folded alert must read `cleared`), then the full `make pr_check` (lockfile changes always get it); commit, push, open the PR. Body: one bullet per fold (package, from → to, advisory GHSA and severity, floor raised?), the skills refresh, and "Closes after merge: #a, #b (via the upgrade-deps sweep recheck)". Then `resolve-pr-concerns`.
+   - run the plan's lock checks, re-run `alert_status.py` (every folded alert must read `cleared`), then the full `make pr_check` through the single-flight lock, `python3 <resolve-pr-concerns skill dir>/scripts/single_flight.py suite -- make pr_check` (lockfile changes always get it); commit, push, open the PR. Body: one bullet per fold (package, from → to, advisory GHSA and severity, floor raised?), the skills refresh, and "Closes after merge: #a, #b (via the upgrade-deps sweep recheck)". Then `resolve-pr-concerns`.
 7. **Arm the post-merge recheck** right after the fold PR opens, unless every `FOLD` is an `(alert)` row (no PR numbers to pass). Squash merges close nothing by "Supersedes #N", and Dependabot closes its PRs late or never, so this step does it. Run it as a **background** command so your harness wakes you when it exits (in Claude Code, a Bash call with `run_in_background: true` and `timeout: 7200000`); never a foreground sleep, never repeated polls:
    ```bash
    uv run python $S recheck --fold-pr <fold PR> --prs <close-after-merge list> --execute
@@ -142,7 +142,7 @@ Commit ("deps: routine bumps") and push. Note every major version crossed — St
 ### Step 5: Fix what broke
 
 ```bash
-make pr_check
+python3 <resolve-pr-concerns skill dir>/scripts/single_flight.py suite -- make pr_check
 ```
 
 Read the failures, not just the exit codes. Typical, mechanical breakage:
@@ -161,7 +161,7 @@ Fresh, in this order, and read the output:
 
 ```bash
 make deps
-make pr_check
+python3 <resolve-pr-concerns skill dir>/scripts/single_flight.py suite -- make pr_check
 uv run python <skill-dir>/scripts/alert_status.py --repo <owner>/<repo>   # must exit 0
 ```
 

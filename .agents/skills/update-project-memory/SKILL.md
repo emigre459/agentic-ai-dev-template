@@ -11,8 +11,9 @@ AGENTS.md is always-on context, re-loaded by the main loop and every interactive
 subagent. Keep it a lean command-first router. Follow these steps exactly.
 
 **Caps.** Defaults: soft 120 lines, hard 150 lines / 9,000 chars. A repo sets its
-own in `.agents/skill-config/update-project-memory.md`; read the caps there and pass
-them as CLI args in step 3 (`--soft-lines`, `--max-lines`, `--max-chars`).
+own in `.agents/skill-config/update-project-memory.md` under the keys `soft-lines`,
+`max-lines` and `max-chars`; read them there and pass each as the CLI arg of the
+same name in step 3 (`--soft-lines`, `--max-lines`, `--max-chars`).
 
 1. **Re-verify the standard (required).** Fetch `https://agents.md/` and confirm
    current best practices; the standard may have changed since this skill was written.

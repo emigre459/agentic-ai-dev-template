@@ -29,9 +29,9 @@ canonically):
 Use the first that applies:
 
 1. **Skill-config.** `.agents/skill-config/write-teaching-notebook.md` names a
-   `check command` and an `open command` (`<path>` stands for the notebook). Use
+   `check-command` and an `open-command` (`<path>` stands for the notebook). Use
    them as written: a repo with its own notebook runner or a long-running
-   JupyterLab keeps it this way. It may also name a `before source` (see "Before is
+   JupyterLab keeps it this way. It may also name a `before-source` (see "Before is
    `main`'s behavior").
 2. **A `notebook` dependency group.** The root `pyproject.toml` has
    `[dependency-groups] notebook` (the template's Python stack ships one, with
@@ -40,7 +40,7 @@ Use the first that applies:
    - open: `uv run --group notebook jupyter lab <path>`
 
 With neither, **stop** and tell the user: "This repo has no notebook tooling: no
-check and open command in `.agents/skill-config/write-teaching-notebook.md`, and no
+`check-command` and `open-command` in `.agents/skill-config/write-teaching-notebook.md`, and no
 `notebook` dependency group in the root `pyproject.toml`." Don't add a group or
 install anything to get past it; adding the group is the user's call.
 
@@ -97,7 +97,7 @@ asked, what changed, the calls made, what isn't covered. Read that skill for the
 "Before" is what `main` does with the same input, from the first that applies:
 
 1. **The repo's read-only source.** `.agents/skill-config/write-teaching-notebook.md`
-   names a `before source`: a read-only path you can call yourself that runs
+   names a `before-source`: a read-only path you can call yourself that runs
    `main`'s code, such as a dev API or stored outputs. Show the call (URL, tool or
    query, and arguments) in the cell.
 2. **`main`'s code from a temporary worktree.** A cell runs
@@ -174,7 +174,7 @@ real values:
 
 ## Before handover
 
-1. Run the notebook top to bottom with the **check command** from Step 1, and
+1. Run the notebook top to bottom with the `check-command` from Step 1, and
    confirm every self-check passes. With the template default:
 
    ```bash
@@ -183,12 +183,12 @@ real values:
 
    The executed copy lives in a temp dir and is a throwaway. Commit the notebook
    without outputs.
-2. In the kit, the notebook step is the **open command** from Step 1. With the
+2. In the kit, the notebook step is the `open-command` from Step 1. With the
    template default:
 
    ```bash
    uv run --group notebook jupyter lab notebooks/functionality_tests/<issue>_<topic>.ipynb
    ```
 
-   When skill-config names an open command (say, a JupyterLab the repo's stack
+   When skill-config names an `open-command` (say, a JupyterLab the repo's stack
    already runs), use that and don't start a second JupyterLab.

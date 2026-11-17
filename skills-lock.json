@@ -5,7 +5,7 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/build-from-issue/SKILL.md",
-      "computedHash": "e6fc346d2f0d300c9f867c62dd453dff581443343f062771a79a601baaf18293"
+      "computedHash": "3728f91a4e4350f62dd9815ba07c887fa4735415eaae8b130df0db06e1c4d492"
     },
     "clean-up-kanban": {
       "source": "emigre459/agentic-ai-dev-template",
@@ -53,7 +53,7 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/resolve-pr-concerns/SKILL.md",
-      "computedHash": "74ab74e1e4dcae9360fa44adadb5cedbef806c49f3ae7d017e5b97892733d19b"
+      "computedHash": "3c967261ea674cf0adfd07e8b0dcf2d6d972c5b35ee150862d3f27cc65be15cb"
     },
     "review-skill": {
       "source": "emigre459/agentic-ai-dev-template",
@@ -71,19 +71,19 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/update-project-memory/SKILL.md",
-      "computedHash": "4219a342bbf3a0cb239c070e828653167e7fdf3fea69da8febd46307188738e1"
+      "computedHash": "fff336e09b3f02dad1d9577af7223509529ba4150b1846ef3de7ac602baebbd1"
     },
     "upgrade-deps": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/upgrade-deps/SKILL.md",
-      "computedHash": "43aebc27336e2895dfc2feb91addf4bfe6917c377fcc7a13b96512eb67056357"
+      "computedHash": "537fdbf8567364a181dd145bce926a53533bae2c61e914ba3e949320087b3f03"
     },
     "write-teaching-notebook": {
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/write-teaching-notebook/SKILL.md",
-      "computedHash": "e6b46baef2354d2d73d47fb13d76165002598b181be6f6a49d2dedfdd92ddf29"
+      "computedHash": "07e273796f7e9ed65e28af35d80b82ecaa10ba70686e632c985f92c50e9a5451"
     }
   }
 }

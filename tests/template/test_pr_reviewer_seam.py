@@ -690,6 +690,19 @@ def test_step_2e_points_at_the_upgrade_deps_sweep() -> None:
     assert "sweep" in step2e
 
 
-@pytest.mark.parametrize("path", [_SKILL, _BUILD], ids=lambda p: p.parent.name)
+_FULL_CHECK_DOCS = (
+    _SKILL,
+    _BUILD,
+    _SKILLS / "upgrade-deps" / "SKILL.md",
+    _STACK_REF,
+    _BUILD_STACK_REF,
+    _SKILLS / "resolve-pr-concerns" / "references" / "parallel-fixes.md",
+)
+
+
+@pytest.mark.parametrize(
+    "path", _FULL_CHECK_DOCS, ids=lambda p: f"{p.parts[-3]}/{p.parts[-2]}/{p.name}"
+)
 def test_full_check_runs_through_the_single_flight_lock(path: Path) -> None:
+    """Every doc that runs the full check runs it through the single-flight lock."""
     assert _FULL_CHECK in _flat(path)

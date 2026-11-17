@@ -366,3 +366,22 @@ def test_vendored_rule_applies_to_both_skill_paths() -> None:
     globs = _applies_to_globs(VENDORED_RULE.read_text(encoding="utf-8"))
     assert ".agents/skills/**" in globs
     assert ".claude/skills/**" in globs
+
+
+# Skill-config keys a skill names are kebab-case, like the skill names they sit
+# beside, so a repo's config file reads one way across skills.
+CONFIG_KEYS = {
+    "write-teaching-notebook": ("check-command", "open-command", "before-source"),
+    "update-project-memory": ("soft-lines", "max-lines", "max-chars"),
+}
+
+
+@pytest.mark.parametrize("skill", sorted(CONFIG_KEYS))
+def test_skill_config_keys_are_kebab_case(skill: str) -> None:
+    text = (SKILLS_DIR / skill / "SKILL.md").read_text(encoding="utf-8")
+    flat = " ".join(text.split())
+    for key in CONFIG_KEYS[skill]:
+        assert f"`{key}`" in flat, key
+        spaced = key.replace("-", " ")
+        assert f"`{spaced}`" not in flat, spaced
+        assert f"**{spaced}**" not in flat, spaced

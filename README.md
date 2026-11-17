@@ -152,7 +152,7 @@ Each skill reads `.agents/skill-config/<skill>.md` when the repo has one (see
 | `upgrade-deps` | Sweep mode: fold security fixes and a clean skills refresh into one PR, close routine and superseded update PRs. Refresh mode: bring every dependency current | `.github/dependabot.yml` (projects and grouping policy); the `skills-update` action's `branch` input |
 | `update-project-memory` | Gate edits to `AGENTS.md` behind its line and character budget | Caps in `.agents/skill-config/update-project-memory.md` (default soft 120 lines, hard 150 lines / 9,000 chars) |
 | `daily-update` | Your standup: merged, in flight, next up, cards that need an owner; Slack only when asked | Board and Slack channel in `.agents/skill-config/daily-update.md` (default: the repo's linked board, no channel) |
-| `write-teaching-notebook` | The notebook a live test kit ships: before and after on the same input. Python only (`make init STACK=react` drops it) | Check and open commands, and a read-only "before" source, in `.agents/skill-config/write-teaching-notebook.md`, or the stack's `notebook` dependency group |
+| `write-teaching-notebook` | The notebook a live test kit ships: before and after on the same input. Python only (`make init STACK=react` drops it) | `check-command` and `open-command`, and a read-only `before-source`, in `.agents/skill-config/write-teaching-notebook.md`, or the stack's `notebook` dependency group |
 
 ## Customizing the skills in your repo
 

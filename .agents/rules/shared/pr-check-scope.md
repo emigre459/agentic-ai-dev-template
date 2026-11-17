@@ -37,8 +37,9 @@ or script changes that nothing else imports:
 
 ```bash
 make lint
-# the test files covering the change, for example:
-uv run pytest -n0 <the test files covering the change>
+# the stack's test runner on the test files covering the change:
+uv run pytest -n0 <the test files covering the change>   # Python
+bun run vitest run <the test files covering the change>  # React
 ```
 
 Add `make security` when the diff changes Python under `scripts/` or a skill's
