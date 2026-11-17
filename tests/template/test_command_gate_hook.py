@@ -651,3 +651,63 @@ def test_shipped_policy_is_empty() -> None:
         "write_roots": [],
         "banned": [],
     }
+
+
+def _run_from_other_dir(
+    tmp_path: Path, root: Path, policy: str
+) -> subprocess.CompletedProcess[str]:
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    shutil.copy(HOOKS_DIR / "hook.py", other / "hook.py")
+    shutil.copy(HOOKS_DIR / "command_gate.py", other / "command_gate.py")
+    (other / "policy.json").write_text(policy)
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path / "home"),
+        "CLAUDE_PROJECT_DIR": str(root),
+    }
+    return subprocess.run(
+        ["python3", str(other / "hook.py")],
+        input=json.dumps(_bash("make x")),
+        capture_output=True,
+        text=True,
+        cwd=other,
+        env=env,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("raw", ["{", "null", "[]"])
+def test_unreadable_root_policy_does_not_fall_back_to_hook_dir(
+    tmp_path: Path, raw: str
+) -> None:
+    root = _project(tmp_path, raw_policy=raw, settings={})
+    proc = _run_from_other_dir(tmp_path, root, '{"allow": ["make *"]}')
+    assert (proc.returncode, proc.stdout) == (0, "")
+
+
+def test_malformed_policy_ignores_tracked_settings_allow(tmp_path: Path) -> None:
+    settings = {"permissions": {"allow": ["Bash(make x)"]}}
+    root = _project(tmp_path, raw_policy="{", settings=settings)
+    assert _decision(_run(root, _bash("make x"))) is None
+
+
+def test_missing_root_policy_falls_back_to_hook_dir(tmp_path: Path) -> None:
+    root = _project(tmp_path, {})
+    (root / ".agents" / "hooks" / "policy.json").unlink()
+    proc = _run_from_other_dir(tmp_path, root, '{"allow": ["make *"]}')
+    assert (
+        json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
+    )
+
+
+@pytest.mark.parametrize("key", ["deny", "ask"])
+@pytest.mark.parametrize("rule", ["Bash", "Bash(*)"])
+def test_bare_bash_withholds_everything(tmp_path: Path, key: str, rule: str) -> None:
+    root = _project(tmp_path, {"allow": ["make *"]}, {"permissions": {key: [rule]}})
+    assert _decision(_run(root, _bash("make x"))) is None
+
+
+def test_bare_bash_in_allow_is_ignored(tmp_path: Path) -> None:
+    root = _project(tmp_path, {}, {"permissions": {"allow": ["Bash"]}})
+    assert _decision(_run(root, _bash("make x"))) is None

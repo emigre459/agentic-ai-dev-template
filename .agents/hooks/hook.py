@@ -299,12 +299,19 @@ def _str_list(value: Any) -> list[str] | None:
     return [item for item in value if isinstance(item, str)]
 
 
-def _bash_rules(value: Any) -> list[str]:
+def _bash_rules(value: Any, *, bare_matches_all: bool = False) -> list[str]:
+    """Return ``Bash(...)`` contents; a bare ``Bash`` becomes ``*`` if asked.
+
+    Only withholding rules (ask/deny) turn a bare ``Bash`` into match-all: an
+    ambiguous rule may narrow what is allowed, never widen it.
+    """
     rules = []
     for item in _str_list(value) or []:
         match = BASH_RULE.match(item)
         if match:
             rules.append(match.group(1))
+        elif bare_matches_all and item == "Bash":
+            rules.append("*")
     return rules
 
 
@@ -317,9 +324,11 @@ def load_policy(
     ``additionalDirectories``). Personal Claude settings count only when the
     caller is Claude Code itself.
     """
-    data = _read_json(os.path.join(root, ".agents", "hooks", "policy.json"))
-    if data is None:
-        data = _read_json(os.path.join(hook_dir, "policy.json"))
+    root_policy = os.path.join(root, ".agents", "hooks", "policy.json")
+    # Fall back to the hook's own copy only when the root has none; a present
+    # but unreadable root file is uncertainty, not an invitation to use another.
+    path = root_policy if os.path.exists(root_policy) else None
+    data = _read_json(path or os.path.join(hook_dir, "policy.json"))
     if not isinstance(data, dict):
         return None
     sections = {}
@@ -347,8 +356,8 @@ def load_policy(
         if not isinstance(permissions, dict):
             continue
         allow += _bash_rules(permissions.get("allow"))
-        withhold += _bash_rules(permissions.get("ask"))
-        withhold += _bash_rules(permissions.get("deny"))
+        withhold += _bash_rules(permissions.get("ask"), bare_matches_all=True)
+        withhold += _bash_rules(permissions.get("deny"), bare_matches_all=True)
         write_roots += _str_list(permissions.get("additionalDirectories")) or []
 
     banned = tuple(
