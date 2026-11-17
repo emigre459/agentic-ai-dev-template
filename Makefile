@@ -23,12 +23,12 @@ tooling_deps: ## Install the template-tooling env (machinery only)
 
 .PHONY: machinery_format
 machinery_format: ## Auto-format the template machinery (black)
-	@uv run black scripts/ tests/
+	@uv run black scripts/ tests/ .agents/hooks/
 
 .PHONY: machinery_lint
 machinery_lint: ## Lint the template machinery (black --check + ruff + mypy)
-	@uv run black --check scripts/ tests/
-	@uv run ruff check scripts/ tests/
+	@uv run black --check scripts/ tests/ .agents/hooks/
+	@uv run ruff check scripts/ tests/ .agents/hooks/
 	@uv run mypy
 
 .PHONY: machinery_tests
