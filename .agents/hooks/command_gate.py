@@ -633,9 +633,24 @@ def _glob_match(core: str, command: str, prefix: bool) -> bool:
     bool
         True when the command matches.
     """
-    regex = ".*".join(re.escape(piece) for piece in core.split("*"))
-    matcher = re.match if prefix else re.fullmatch
-    return matcher(regex, command, re.DOTALL) is not None
+    pat = core + "*" if prefix else core
+    p = t = 0
+    star = mark = -1
+    while t < len(command):
+        if p < len(pat) and pat[p] == "*":
+            star, mark = p, t
+            p += 1
+        elif p < len(pat) and pat[p] == command[t]:
+            p += 1
+            t += 1
+        elif star != -1:
+            mark += 1
+            p, t = star + 1, mark
+        else:
+            return False
+    while p < len(pat) and pat[p] == "*":
+        p += 1
+    return p == len(pat)
 
 
 def pattern_matches(pattern: str, command: str, home: str) -> bool:
@@ -827,7 +842,13 @@ def is_fully_allowed(
     bool
         True when every executed command matches the allow-list.
     """
-    dir_changed = dir_changed or bool(DIR_CHANGE.search(cmd))
+    # Also scan a quote/backslash-free copy: bash runs `"cd"` / `'cd'` as the
+    # builtin, and dequote_leading lets such a word match a `cd` pattern.
+    dir_changed = (
+        dir_changed
+        or bool(DIR_CHANGE.search(cmd))
+        or bool(DIR_CHANGE.search(re.sub(r"[\"'\\]", "", cmd)))
+    )
     inners, blanked, ok = scan_substitutions(cmd)
     if not ok:
         return False
