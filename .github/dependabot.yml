@@ -1,8 +1,9 @@
 # Security updates always; version updates for MAJOR versions only.
 #
-# Every entry has an `allow` rule on `version-update:semver-major`, so routine
-# minor/patch bumps no longer open weekly PRs, while each major lands on its own
-# PR where someone will notice it (a major left unnoticed is how a project ends
+# Every entry (but the template's own skills CLI pin, below) has an `allow`
+# rule on `version-update:semver-major`, so routine minor/patch bumps no longer
+# open weekly PRs, while each major lands on its own PR where someone will
+# notice it (a major left unnoticed is how a project ends
 # up a whole SDK version behind when the vendor removes APIs). `update-types`
 # limits version updates only: Dependabot security updates are still created
 # for every update type, with each entry's labels and commit prefix.
@@ -78,6 +79,19 @@ updates:
       - dependency-name: "*"
         dependency-type: "direct"
         update-types: ["version-update:semver-major"]
+  # The skills CLI version every skills-* action runs (npx -y skills@<pin>). A
+  # bump must come with golden.json regenerated from the new CLI (see
+  # tests/template/test_skills_lock.py); the hash tests fail until it does.
+  # The one exception to majors-only: no `allow` rule, so every CLI release is
+  # proposed, one PR at a time.
+  - package-ecosystem: "npm"
+    directory: "/.github/actions/skills-cli"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "javascript"]
+    commit-message:
+      prefix: "deps"
 # <<< STACK:template
   - package-ecosystem: "github-actions"
     directory: "/"

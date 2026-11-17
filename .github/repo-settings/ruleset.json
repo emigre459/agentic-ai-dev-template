@@ -36,7 +36,8 @@
           { "context": "react-lint", "integration_id": 15368 },
           { "context": "react-tests", "integration_id": 15368 },
           { "context": "react-security", "integration_id": 15368 },
-          { "context": "template machinery (lint + tests)", "integration_id": 15368 }
+          { "context": "template machinery (lint + tests)", "integration_id": 15368 },
+          { "context": "skills drift", "integration_id": 15368 }
         ]
       }
     },

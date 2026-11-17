@@ -65,6 +65,11 @@ The template, and every repo seeded from it, adopts the same policy.
   `security_updates_only`. The bun and github-actions entries stay as above
   (GitHub's options reference lists `indirect` support for uv but not bun, and
   workflow actions are all direct).
+- **Amended 2026-11-17 (merging main):** #59 added an npm entry for the
+  template's pinned skills CLI (`/.github/actions/skills-cli`, template block
+  only). The user chose to make it the one exception: no `allow` rule, so every
+  CLI release is proposed, with `open-pull-requests-limit: 1` since each bump
+  regenerates `golden.json` by hand. The guard test names this exception.
 - The uv `/stacks/python` entry gets a second allow rule (rules are OR'd):
   `{dependency-name: "uv-build", update-types: ["version-update:semver-minor"]}`.
   Dependabot stores Python names in normalized form (`uv-build`).

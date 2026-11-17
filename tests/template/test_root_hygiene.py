@@ -28,12 +28,12 @@ ALLOWED_ROOT_FILES = frozenset(
         ".mcp.json",
         ".python-version",
         "AGENTS.md",
-        "CHANGELOG.md",
         "CLAUDE.md",
         "LICENSE",  # GitHub license detection requires it at the root
         "Makefile",
         "README.md",
         "pyproject.toml",
+        "skills-lock.json",  # the skills CLI and the skills-drift action read it at the root
         "uv.lock",
     }
 )

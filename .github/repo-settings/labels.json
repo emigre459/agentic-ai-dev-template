@@ -1,0 +1,17 @@
+[
+  {
+    "name": "patch",
+    "color": "1d76db",
+    "description": "Release: bump the patch version (the default; label optional)"
+  },
+  {
+    "name": "minor",
+    "color": "0e8a16",
+    "description": "Release: bump the minor version (new functionality)"
+  },
+  {
+    "name": "major",
+    "color": "b60205",
+    "description": "Release: bump the major version (breaking change)"
+  }
+]

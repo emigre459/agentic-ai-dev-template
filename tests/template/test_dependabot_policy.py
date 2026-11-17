@@ -41,8 +41,15 @@ def _label(entry: dict[str, Any]) -> str:
     return f"{entry['package-ecosystem']} {entry['directory']}"
 
 
+# The one entry that takes every release: the template's pinned skills CLI. Each
+# bump regenerates golden.json by hand, so one PR at a time.
+SKILLS_CLI = "npm /.github/actions/skills-cli"
+
+
 def test_every_entry_allows_only_majors() -> None:
     for entry in load_updates(DEPENDABOT):
+        if _label(entry) == SKILLS_CLI:
+            continue
         allow = entry.get("allow", [])
         major = UV_MAJOR_RULE if entry["package-ecosystem"] == "uv" else MAJOR_RULE
         assert major in allow, f"{_label(entry)}: missing the semver-major rule"
@@ -50,6 +57,12 @@ def test_every_entry_allows_only_majors() -> None:
         assert all(
             rule == UV_BUILD_MINOR_RULE for rule in extra
         ), f"{_label(entry)}: unexpected allow rules {extra}"
+
+
+def test_skills_cli_takes_every_release_one_pr_at_a_time() -> None:
+    (entry,) = [e for e in load_updates(DEPENDABOT) if _label(e) == SKILLS_CLI]
+    assert "allow" not in entry, "skills CLI: every release, so no allow rule"
+    assert entry.get("open-pull-requests-limit") == 1
 
 
 def test_uv_build_minor_exception_only_on_python_stack() -> None:
