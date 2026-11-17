@@ -5,7 +5,7 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/build-from-issue/SKILL.md",
-      "computedHash": "0c3f1f9c741f92f81ed092493f40ecb91010799acb8045f182f991127e9cce59"
+      "computedHash": "e6fc346d2f0d300c9f867c62dd453dff581443343f062771a79a601baaf18293"
     },
     "clean-up-kanban": {
       "source": "emigre459/agentic-ai-dev-template",
@@ -60,6 +60,12 @@
       "sourceType": "github",
       "skillPath": ".agents/skills/run-tests/SKILL.md",
       "computedHash": "5a903dfcdbf443d11f6cbc1f88863cbcccb81ac4ad6fb3ff12e482e605c53fc9"
+    },
+    "update-project-memory": {
+      "source": "emigre459/agentic-ai-dev-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/update-project-memory/SKILL.md",
+      "computedHash": "4219a342bbf3a0cb239c070e828653167e7fdf3fea69da8febd46307188738e1"
     },
     "upgrade-deps": {
       "source": "emigre459/agentic-ai-dev-template",
