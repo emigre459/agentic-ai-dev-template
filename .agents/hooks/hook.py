@@ -60,31 +60,37 @@ def _read_file(path: str, cwd: str) -> str | None:
     try:
         with open(full, encoding="utf-8") as handle:
             return handle.read()
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError, ValueError):
         return None
-
-
-def _replace(text: str, old: str, new: str, replace_all: bool) -> str:
-    return text.replace(old, new) if replace_all else text.replace(old, new, 1)
 
 
 def _replacement_edit(
     path: str,
-    pairs: list[tuple[str, str]],
-    replace_all: bool,
+    pairs: list[tuple[str, str, bool]],
     cwd: str,
+    *,
+    well_formed: bool = True,
 ) -> Edit:
-    """Apply replacements to the current file text, or fall back to the strings."""
+    """Apply replacements to the current file text.
+
+    Falls back to the joined old/new strings when the file is unreadable, when
+    an item was malformed, or when a replacement does not apply (harnesses
+    normalize quotes, so a real edit may land where ours misses): the new text
+    must stay visible to the policy.
+    """
+    fallback = Edit(
+        path,
+        "\n".join(old for old, _, _ in pairs),
+        "\n".join(new for _, new, _ in pairs),
+    )
     current = _read_file(path, cwd)
-    if current is None:
-        return Edit(
-            path,
-            "\n".join(old for old, _ in pairs),
-            "\n".join(new for _, new in pairs),
-        )
+    if current is None or not well_formed:
+        return fallback
     after = current
-    for old, new in pairs:
-        after = _replace(after, old, new, replace_all)
+    for old, new, replace_all in pairs:
+        if not old or old not in after:
+            return fallback
+        after = after.replace(old, new) if replace_all else after.replace(old, new, 1)
     return Edit(path, current, after)
 
 
@@ -148,20 +154,28 @@ def _edits_from_input(
     replace_all = tool_input.get("replace_all") is True
     items = tool_input.get("edits")
     if isinstance(items, list):
-        pairs = []
+        pairs: list[tuple[str, str, bool]] = []
+        well_formed = True
         for item in items:
-            if isinstance(item, Mapping):
-                old, new = _first_str(item, OLD_KEYS), _first_str(item, NEW_KEYS)
-                if old is not None and new is not None:
-                    pairs.append((old, new))
-        return (_replacement_edit(path, pairs, replace_all, cwd),) if pairs else None
+            old = _first_str(item, OLD_KEYS) if isinstance(item, Mapping) else None
+            new = _first_str(item, NEW_KEYS) if isinstance(item, Mapping) else None
+            if isinstance(item, Mapping) and old is not None and new is not None:
+                flag = item.get("replace_all")
+                pairs.append(
+                    (old, new, flag if isinstance(flag, bool) else replace_all)
+                )
+            else:
+                well_formed = False
+        if not pairs:
+            return None
+        return (_replacement_edit(path, pairs, cwd, well_formed=well_formed),)
     content = _first_str(tool_input, CONTENT_KEYS)
     if content is not None:
         return (Edit(path, _read_file(path, cwd) or "", content),)
     new = _first_str(tool_input, NEW_KEYS)
     if new is not None:
         old = _first_str(tool_input, OLD_KEYS) or ""
-        return (_replacement_edit(path, [(old, new)], replace_all, cwd),)
+        return (_replacement_edit(path, [(old, new, replace_all)], cwd),)
     return None
 
 
@@ -206,7 +220,7 @@ def parse_payload(payload: Mapping[str, Any]) -> ToolCall | None:
         if isinstance(args, str):
             try:
                 args = json.loads(args)
-            except ValueError:
+            except (ValueError, RecursionError):
                 return None
         if not isinstance(args, Mapping) or not isinstance(payload["toolName"], str):
             return None

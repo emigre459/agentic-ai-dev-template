@@ -318,6 +318,70 @@ def test_factory_apply_patch_field_names(field: str) -> None:
     assert len(call.edits) == 2
 
 
+def test_null_byte_path_is_unreadable_not_a_crash() -> None:
+    call = HOOK.parse_payload(
+        _claude("Write", {"file_path": "a\0b", "content": "x"}, cwd="/r\0")
+    )
+    assert call is not None
+    assert call.edits == (HOOK.Edit("a\0b", "", "x"),)
+
+
+def test_deeply_nested_tool_args_is_none() -> None:
+    args = "[" * 200000
+    assert HOOK.parse_payload({"toolName": "bash", "toolArgs": args}) is None
+
+
+def test_edit_old_string_absent_keeps_new_text_visible(tmp_path: Path) -> None:
+    target = tmp_path / "f.txt"
+    target.write_text("hello")
+    call = HOOK.parse_payload(
+        _claude(
+            "Edit",
+            {"file_path": str(target), "old_string": "nope", "new_string": "rm -rf"},
+        )
+    )
+    assert call is not None
+    assert call.edits == (HOOK.Edit(str(target), "nope", "rm -rf"),)
+
+
+def test_multi_edit_replace_all_is_per_item(tmp_path: Path) -> None:
+    target = tmp_path / "f.txt"
+    target.write_text("a a b b")
+    call = HOOK.parse_payload(
+        _claude(
+            "MultiEdit",
+            {
+                "file_path": str(target),
+                "edits": [
+                    {"old_string": "a", "new_string": "X", "replace_all": True},
+                    {"old_string": "b", "new_string": "Y"},
+                ],
+            },
+        )
+    )
+    assert call is not None
+    assert call.edits == (HOOK.Edit(str(target), "a a b b", "X X Y b"),)
+
+
+def test_multi_edit_malformed_item_uses_string_fallback(tmp_path: Path) -> None:
+    target = tmp_path / "f.txt"
+    target.write_text("one two")
+    call = HOOK.parse_payload(
+        _claude(
+            "MultiEdit",
+            {
+                "file_path": str(target),
+                "edits": [
+                    {"old_string": "one", "new_string": "1"},
+                    {"old_string": "two"},
+                ],
+            },
+        )
+    )
+    assert call is not None
+    assert call.edits == (HOOK.Edit(str(target), "one", "1"),)
+
+
 # --- Unrecognized --------------------------------------------------------------
 
 
