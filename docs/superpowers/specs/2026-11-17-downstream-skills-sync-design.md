@@ -204,6 +204,10 @@ list is complete):
   red flag, common-mistakes row) and resolve-pr-concerns' re-run step.
 - AGENTS.md: one Rules-table row, and the Quality Gates sentence names the light
   check.
+- **Fail closed when the rule is absent.** Rules aren't distributed by
+  `npx skills`, so a consumer that installed only the skills may not have
+  `pr-check-scope.md`. Every skill sentence that offers the light check says: "if
+  the repo has no `pr-check-scope` rule, run the full `make pr_check`".
 
 **Single-flight lock** — from downstream #2623, as a script bundled in
 `resolve-pr-concerns/scripts/single_flight.py` (stdlib; no Makefile change, no new
