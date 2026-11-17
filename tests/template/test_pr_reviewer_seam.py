@@ -706,3 +706,16 @@ _FULL_CHECK_DOCS = (
 def test_full_check_runs_through_the_single_flight_lock(path: Path) -> None:
     """Every doc that runs the full check runs it through the single-flight lock."""
     assert _FULL_CHECK in _flat(path)
+
+
+def test_single_flight_full_check_is_allow_listed() -> None:
+    """Skills run the full gate through the lock; agents must not hit a prompt."""
+    settings = json.loads((_REPO / ".claude" / "settings.json").read_text())
+    expected = (
+        "Bash(python3 .agents/skills/resolve-pr-concerns/scripts/single_flight.py "
+        "suite -- make pr_check)"
+    )
+    assert expected in settings["permissions"]["allow"], (
+        f"Add {expected!r} to .claude/settings.json permissions.allow so agents can "
+        "run the locked full check without a prompt."
+    )
