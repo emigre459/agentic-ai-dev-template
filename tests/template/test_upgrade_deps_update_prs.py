@@ -700,3 +700,41 @@ def test_recheck_stops_early_once_github_closes_everything(tmp_path: Path) -> No
 
 def test_default_waits_fit_a_two_hour_background_call() -> None:
     assert update_prs.DEFAULT_TIMEOUT_S + update_prs.DEFAULT_GRACE_S < 7200
+
+
+# --- fail closed: unmapped ecosystems and partly parsed groups --------------------
+
+
+def test_unmapped_ecosystem_is_review_not_routine() -> None:
+    """Cargo alerts say ``rust``: an unmapped segment can't see its advisories."""
+    pr = _pr(
+        50,
+        "deps: bump serde from 1.0.0 to 1.0.5",
+        ecosystem="cargo",
+        lockfile=None,
+        files=["Cargo.lock"],
+        changes_main=True,
+    )
+    alerts = _alerts(_alert("serde", "1.0.5", ecosystem="rust", lockfiles=()))
+    action, reason = update_prs.classify(pr, alerts, {})
+    assert action == "REVIEW"
+    assert "cargo" in reason
+
+
+def test_grouped_body_with_fewer_members_than_the_title_is_review() -> None:
+    """A member in another form (or a truncated body) must not close as routine."""
+    body = _grouped_body(("requests", "2.31.0", "2.32.0")) + (
+        "\nUpdates the requirements on [ruff](https://example.invalid) "
+        "to permit the latest version."
+    )
+    pr = _pr(51, GROUP_TITLE, body=body)
+    action, reason = update_prs.classify(pr, {}, {(PY_LOCK, "requests"): "2.31.0"})
+    assert action == "REVIEW"
+    assert "2" in reason and "1" in reason
+
+
+def test_grouped_title_without_a_count_is_review() -> None:
+    body = _grouped_body(("requests", "2.31.0", "2.32.0"))
+    pr = _pr(52, "deps: bump the python-dev group in /stacks/python", body=body)
+    action, _ = update_prs.classify(pr, {}, {(PY_LOCK, "requests"): "2.31.0"})
+    assert action == "REVIEW"

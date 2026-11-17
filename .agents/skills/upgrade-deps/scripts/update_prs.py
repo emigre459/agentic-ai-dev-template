@@ -103,6 +103,7 @@ _TITLE = re.compile(
 _MEMBER = re.compile(
     r"Updates `(?P<pkg>[^`]+)` from (?P<frm>[^\s`]+) to (?P<to>[^\s`]+)"
 )
+_GROUP_COUNT = re.compile(r"\bwith (\d+) updates?\b", re.IGNORECASE)
 _RELEASE = re.compile(r"^v?(\d+(?:\.\d+)*)")
 _ECO_LINE = re.compile(r"""^\s*-\s*package-ecosystem:\s*["']?([\w-]+)""")
 _DIR_LINE = re.compile(r"""^\s*directory:\s*["']?([^"'\s#]+)""")
@@ -499,6 +500,18 @@ def _judge(
             "grouped or unrecognized Dependabot PR: "
             "no package list in its title or body",
         )
+    if grouped:
+        # Fail closed: a member in another body form, or a truncated body, would
+        # otherwise drop out silently and let the group close as routine.
+        count = _GROUP_COUNT.search(pr.get("title") or "")
+        listed = len(_MEMBER.findall(pr.get("body") or ""))
+        if count is None or int(count.group(1)) != listed:
+            expected = count.group(1) if count else "an uncounted number of"
+            return _Verdict(
+                "REVIEW",
+                f"grouped PR: the title says {expected} update(s) but the body "
+                f"lists {listed} as `Updates <pkg> from X to Y`",
+            )
     lockfile = pr.get("lockfile")
     pending: list[tuple[Bump, Version | None]] = []
     if lockfile:
@@ -609,6 +622,14 @@ def _judge(
         return _Verdict(
             "REVIEW",
             "Dependabot alerts were unreadable: cannot tell security from routine",
+        )
+    if segment not in ALERT_ECOSYSTEM:
+        # Its alerts use another ecosystem name (cargo -> rust, ...), so the lookup
+        # above can't have seen them: never call it routine.
+        return _Verdict(
+            "REVIEW",
+            f"alerts for Dependabot ecosystem {segment!r} aren't mapped: "
+            "cannot tell security from routine",
         )
     if majors:
         if not grouped and lockfile and direct is not None and lockfile in direct:

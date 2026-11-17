@@ -65,7 +65,7 @@
       "source": "emigre459/agentic-ai-dev-template",
       "sourceType": "github",
       "skillPath": ".agents/skills/upgrade-deps/SKILL.md",
-      "computedHash": "a8bddfe64f5c8f0e375e5da512e0f932f27c94ba103abfd2c9b94f7367a120ea"
+      "computedHash": "43aebc27336e2895dfc2feb91addf4bfe6917c377fcc7a13b96512eb67056357"
     },
     "write-teaching-notebook": {
       "source": "emigre459/agentic-ai-dev-template",
