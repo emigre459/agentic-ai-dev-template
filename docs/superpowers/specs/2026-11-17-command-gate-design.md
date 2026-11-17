@@ -118,7 +118,7 @@ The user picked **A**.
 | Where the gate lives | `.agents/hooks/`, beside `.agents/skills/` and `.agents/rules/`. No cross-harness hooks standard exists. Each harness reads its own config, so each gets a small registration file pointing at the shared gate. |
 | Allow-list source | A neutral repo-owned list in `.agents/hooks/policy.json`, **merged** with Claude Code's `Bash(...)` entries when present. Repo-shared entries (`policy.json` and the tracked `.claude/settings.json`) apply in every harness. **Personal** entries (`~/.claude/settings.json`, `~/.claude/settings.local.json` and the gitignored `.claude/settings.local.json`) apply **only when Claude Code runs the hook**, detected by `$CLAUDE_PROJECT_DIR` being set, so a Claude-only personal allow never auto-approves in another harness. |
 | Codex | **Deny-only.** In Codex an approval usually means leaving its sandbox, and the allow-list (with code-running entries like `uv run *`) was written for Claude Code. The Codex registration blocks banned patterns only, and there is no `PermissionRequest` hook. |
-| Which registrations ship | Only harnesses whose vendor docs confirm the format: Claude Code, Cursor, Codex, Copilot (shell only), Gemini CLI, Factory, Augment. The README table lists all surveyed harnesses with status. |
+| Which registrations ship | Only harnesses whose vendor docs confirm the format: Claude Code, Codex, Copilot (shell only), Gemini CLI, Factory, Augment. Cursor rides on the Claude registration, with no `.cursor/` folder, to stay vendor-neutral. The README table lists all surveyed harnesses with status. |
 | When a banned pattern blocks a shell command | Always, **except** when every command in the line is a read-only search/inspection tool (so `rg old_call \| head` works, `rg old_call \| sh` is blocked). |
 | Banned pattern in a file edit | Block only matches the edit **adds**, so a file that already holds one stays editable. Each entry can exempt paths. |
 | Uncertain input | No opinion (the harness's normal prompt), never deny. |
@@ -134,8 +134,7 @@ The user picked **A**.
   gate.sh           # POSIX sh shim: locate hook.py by own dirname, fail open
   policy.json       # repo-owned: allow, safe_env, write_roots, banned
   README.md         # how the gate works, policy schema, how to add a harness
-.claude/settings.json        # PreToolUse registration (replaces the old hook)
-.cursor/hooks.json           # beforeShellExecution + preToolUse(Write)
+.claude/settings.json        # PreToolUse registration (replaces the old hook); Cursor loads it too
 .codex/hooks.json            # PreToolUse (deny only)
 .github/hooks/command-gate.json   # Copilot CLI / cloud agent / VS Code: preToolUse (bash)
 .gemini/settings.json        # BeforeTool
@@ -309,7 +308,7 @@ otherwise `$(git rev-parse --show-toplevel)`.
 | Harness | File | Event / matcher | Flags |
 |---|---|---|---|
 | Claude Code | `.claude/settings.json` | `PreToolUse`, `Bash\|Write\|Edit\|MultiEdit\|NotebookEdit` | — |
-| Cursor | `.cursor/hooks.json` (version 1) | `beforeShellExecution`; `preToolUse` matcher `Write` | — |
+| Cursor | none shipped: loads `.claude/settings.json` (third-party hooks) | `preToolUse` via the Claude registration | — |
 | Codex | `.codex/hooks.json` | `PreToolUse` `Bash\|apply_patch` | `--deny-only` |
 | Copilot CLI / cloud / VS Code | `.github/hooks/command-gate.json` (version 1) | `preToolUse` | — |
 | Gemini CLI | `.gemini/settings.json` | `BeforeTool` `run_shell_command\|write_file\|replace` | — |
@@ -335,13 +334,16 @@ The `Bash(...)` entries stay in the tracked `.claude/settings.json`, and
 - **What `policy.allow` is for:** repos that want a home outside Claude Code's
   file.
 
-### Existing guard narrowed (builder-check call)
+### No `.cursor/` folder (user decision at spec review)
 
-`test_no_vendor_config_directory_ships` asserts that no tracked `.cursor/` exists.
-Its purpose is to keep reviewer-vendor *noise config* (`.cursor/BUGBOT.md`) out
-of the repo in favor of the vendor-neutral guidelines file. It is narrowed to "no
-tracked file under `.cursor/` except `hooks.json`", which keeps that intent while
-allowing the hook registration.
+`test_no_vendor_config_directory_ships` (no tracked `.cursor/`) stays unchanged.
+The user chose to stay vendor-neutral, reasoning that anyone who needs more can
+propose it by PR. Cursor is covered by its documented loading of Claude Code
+hooks ("third-party hooks", which maps `Bash`→`Shell` and `Write`/`Edit`→`Write`
+and accepts the nested `permissionDecision` response). The gate still recognizes
+Cursor's native payload shapes, and `.agents/hooks/README.md` gives the recipe
+for a native `.cursor/hooks.json` (`beforeShellExecution` + `preToolUse`
+`Write`) for repos where third-party hooks are off.
 
 ### Docs
 
@@ -350,8 +352,9 @@ allowing the hook registration.
   harness.
 - **Root README:** a short "Agent hooks" section with the coverage table for
   every surveyed harness.
-  - **Shipped:** the seven above.
-  - **Covered via `.claude` loading:** Devin CLI/Desktop new format.
+  - **Shipped:** Claude Code, Codex, Copilot, Gemini CLI, Factory, Augment.
+  - **Covered via `.claude` loading:** Cursor, and Devin CLI/Desktop new
+    format. The README gives a recipe for a native Cursor registration.
   - **Recipe / follow-up:** Windsurf legacy, Cline, Antigravity, Kiro, Amp.
   - **Not possible:** OpenCode (JS plugins only).
 - **`AGENTS.md` "Hooks" section:** point at `.agents/hooks/` instead of the
@@ -390,8 +393,8 @@ All tests live in `tests/template/` and load the modules by file path
   - `gate.sh` exits 0 silently when `hook.py` is absent.
 - **`test_command_gate_registrations.py`:** every registration file parses, points
   at `.agents/hooks/gate.sh`, its matcher covers the documented tool names, the
-  Codex and Augment registrations pass `--deny-only`, the old hook script is
-  gone, and the narrowed `.cursor/` guard still rejects any other `.cursor/` file.
+  Codex and Augment registrations pass `--deny-only`, and the old hook script is
+  gone. The existing no-`.cursor/` guard is untouched and still passes.
 - **Python 3.9 syntax check:** `ast.parse(src, feature_version=(3, 9))` on both
   Python files.
 - **Lint scope:** add `.agents/hooks` to `machinery_lint`/`machinery_format`
