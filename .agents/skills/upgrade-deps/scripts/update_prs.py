@@ -42,10 +42,14 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any, Literal, NamedTuple
+
+# ``datetime.UTC`` is 3.11+; this alias keeps the module importable on older
+# interpreters, so the version check below can run and say so.
+UTC = timezone.utc  # noqa: UP017 -- datetime.UTC is 3.11+
 
 
 def _sibling(name: str) -> ModuleType:

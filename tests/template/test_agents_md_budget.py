@@ -67,3 +67,11 @@ def test_caps_override_from_args(tmp_path: Path) -> None:
     assert soft.returncode == 0 and "SOFT" in soft.stdout
     chars = _run(path, "--max-chars", "100")
     assert chars.returncode == 1
+
+
+def test_missing_path_is_a_one_line_error_exit_2(tmp_path: Path) -> None:
+    result = _run(tmp_path / "absent.md")
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1
+    assert "absent.md" in result.stderr

@@ -22,9 +22,13 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+# ``datetime.UTC`` is 3.11+; this alias keeps the script runnable on an older
+# ``python3``.
+UTC = timezone.utc  # noqa: UP017 -- datetime.UTC is 3.11+
 
 Gh = Callable[[list[str]], str]
 
@@ -985,9 +989,11 @@ def to_json_payload(
         "login": login,
         "display_name": display_name,
         "repo": repo,
-        "board": {"owner": board_ref.owner, "number": board_ref.number}
-        if board_ref
-        else None,
+        "board": (
+            {"owner": board_ref.owner, "number": board_ref.number}
+            if board_ref
+            else None
+        ),
         "window": {
             "since": window.since.isoformat(),
             "until": window.until.isoformat(),

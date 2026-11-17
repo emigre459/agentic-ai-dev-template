@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
@@ -738,3 +739,26 @@ def test_grouped_title_without_a_count_is_review() -> None:
     pr = _pr(52, "deps: bump the python-dev group in /stacks/python", body=body)
     action, _ = update_prs.classify(pr, {}, {(PY_LOCK, "requests"): "2.31.0"})
     assert action == "REVIEW"
+
+
+# Before 3.11 there is no ``datetime.UTC``; the script must still import there so its
+# own interpreter check can say "needs Python 3.11+" instead of a traceback.
+_PRE_311 = """
+import datetime, runpy, sys
+del datetime.UTC
+sys.modules["tomllib"] = None  # import tomllib fails, as before 3.11
+sys.argv = [sys.argv[1], "plan"]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
+def test_an_older_interpreter_gets_the_version_message_not_a_traceback() -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", _PRE_311, str(_SCRIPT)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 64, result.stderr
+    assert "needs Python 3.11+" in result.stderr
+    assert "Traceback" not in result.stderr

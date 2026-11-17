@@ -24,7 +24,8 @@ same name in step 3 (`--soft-lines`, `--max-lines`, `--max-chars`).
    ```bash
    python3 <skill-dir>/scripts/check_budget.py AGENTS.md [--soft-lines N] [--max-lines N] [--max-chars N]
    ```
-   Exit 1 means over a hard cap; `SOFT` in the output means past the soft cap.
+   Exit 1 means over a hard cap; `SOFT` in the output means past the soft cap; exit 2
+   means the file could not be read (wrong path).
 4. **If adding, stay under budget.** If the addition would pass the soft cap,
    summarize or relocate existing content first. Never exceed a hard cap.
 5. **Verify.** Re-run step 3 after the edit: it must exit 0 with no `SOFT` unless

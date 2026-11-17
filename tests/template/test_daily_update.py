@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -263,3 +264,20 @@ def test_no_linked_project_is_a_clean_no_board(
     assert code == 0
     assert "## In flight" in captured.out
     assert "Board:" not in captured.out
+
+
+def test_imports_without_datetime_utc() -> None:
+    """``datetime.UTC`` is 3.11+; the script must load on an older interpreter."""
+    code = (
+        "import datetime, runpy, sys\n"
+        "del datetime.UTC\n"
+        "sys.argv = [sys.argv[1], '--help']\n"
+        "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(_SCRIPT)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

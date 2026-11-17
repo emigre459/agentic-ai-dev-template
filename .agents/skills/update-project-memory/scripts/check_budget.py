@@ -21,7 +21,8 @@ def main() -> int:
     int
         ``1`` if the file exceeds ``--max-lines`` or ``--max-chars``, else ``0``.
         Past ``--soft-lines`` (but under the hard caps) the status is ``SOFT``
-        and the exit code stays ``0``.
+        and the exit code stays ``0``. ``2`` when the file can't be read (a
+        one-line error on stderr, not a traceback).
     """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("path", type=Path)
@@ -29,7 +30,11 @@ def main() -> int:
     ap.add_argument("--max-lines", type=int, default=DEFAULT_MAX_LINES)
     ap.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
     args = ap.parse_args()
-    text = args.path.read_text(encoding="utf-8")
+    try:
+        text = args.path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"{ap.prog}: cannot read {args.path}: {exc.strerror}", file=sys.stderr)
+        return 2
     lines, chars = len(text.splitlines()), len(text)
     over = lines > args.max_lines or chars > args.max_chars
     if over:
