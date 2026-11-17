@@ -258,3 +258,27 @@ def test_registration_command_denies_banned_in_repo(
     assert result.returncode == 0
     out = json.loads(result.stdout)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+HARNESS_GROUPS = {
+    "Shipped": ["Claude Code", "Codex", "Copilot", "Gemini CLI", "Factory", "Augment"],
+    "Via .claude loading": ["Cursor", "Devin"],
+    "Follow-up": ["Windsurf", "Cline", "Antigravity", "Kiro", "Amp"],
+    "Not possible": ["OpenCode"],
+}
+
+
+def _agent_hooks_section() -> str:
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    start = readme.index("## Agent hooks")
+    end = readme.find("\n## ", start + 1)
+    return readme[start:end] if end != -1 else readme[start:]
+
+
+def test_readme_lists_every_harness() -> None:
+    section = _agent_hooks_section()
+    for harnesses in HARNESS_GROUPS.values():
+        for harness in harnesses:
+            assert harness in section, harness
+    assert ".agents/hooks/README.md" in section
+    assert (REPO / ".agents" / "hooks" / "README.md").is_file()

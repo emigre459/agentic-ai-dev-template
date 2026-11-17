@@ -236,6 +236,29 @@ the same card. Say why in the file, so the next reader knows what breaks.
 A line like `Merge the PR yourself once CI is green.` would be skipped and reported:
 merging without your one-off OK is a hard stop.
 
+## Agent hooks
+
+`.agents/hooks/` holds one harness-neutral command gate. It auto-allows a shell
+command only when every command in it matches an allow list, denies a repo-owned list
+of banned patterns in shell commands and file edits, and gives no opinion on the rest.
+Any doubt or error means no opinion, never a block. Policy lives in
+`.agents/hooks/policy.json`; allow rules in the tracked `.claude/settings.json` apply in
+every harness. Details, the policy schema and the recipe for adding a harness are in
+[`.agents/hooks/README.md`](.agents/hooks/README.md).
+
+| Harness | Status | Registration |
+|---------|--------|--------------|
+| Claude Code | Shipped | `.claude/settings.json` |
+| Codex | Shipped (deny-only) | `.codex/hooks.json` |
+| Copilot | Shipped (shell only) | `.github/hooks/command-gate.json` |
+| Gemini CLI | Shipped | `.gemini/settings.json` |
+| Factory | Shipped | `.factory/hooks.json` |
+| Augment | Shipped (deny-only) | `.augment/settings.json` |
+| Cursor | Via `.claude` loading | `.claude/settings.json` |
+| Devin | Via `.claude` loading | `.claude/settings.json` |
+| Windsurf, Cline, Antigravity, Kiro, Amp | Follow-up | none yet |
+| OpenCode | Not possible: JS/TS plugins only, no command hooks | none |
+
 ## Installing the skills
 
 A repo created from this template already has the skills: `make init` installs the
