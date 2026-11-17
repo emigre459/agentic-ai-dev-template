@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -22,6 +24,8 @@ def _load_gate() -> ModuleType:
     spec = importlib.util.spec_from_file_location("command_gate", GATE_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    # dataclasses resolve string annotations through sys.modules.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -251,3 +255,111 @@ def test_base_safe_env_names() -> None:
 
 def test_py39_syntax() -> None:
     ast.parse(GATE_PATH.read_text(), feature_version=(3, 9))
+
+
+# --- Policy model and verdicts -------------------------------------------------
+
+BANNED = GATE.BannedPattern.from_dict(
+    {
+        "pattern": r"old_api\(",
+        "message": "deprecated",
+        "replacement": "new_api()",
+        "exempt_paths": ["docs/**"],
+    }
+)
+
+
+def _banned_policy(**kwargs: Any) -> Any:
+    return GATE.Policy(banned=(BANNED,), **kwargs)
+
+
+def _shell(cmd: str, policy: Any) -> Any:
+    return GATE.shell_verdict(cmd, policy, CWD, ROOTS, HOME)
+
+
+def test_banned_shell_denies() -> None:
+    verdict = _shell("uv run python -c 'old_api()'", _banned_policy())
+    assert verdict.decision == GATE.DENY
+    assert r"old_api\(" in verdict.reason
+    assert "deprecated" in verdict.reason
+    assert "new_api()" in verdict.reason
+    assert verdict.reason == (
+        r"Blocked: this command matches banned pattern old_api\(: deprecated. "
+        "Use instead: new_api()."
+    )
+
+
+def test_banned_read_only_search_is_not_denied() -> None:
+    cmd = "rg -F 'old_api(' src | head"
+    assert BANNED.regex.search(cmd)
+    assert _shell(cmd, _banned_policy()).decision != GATE.DENY
+
+
+def test_banned_read_only_piped_to_executor_denies() -> None:
+    assert _shell("rg -l 'old_api(' | sh", _banned_policy()).decision == GATE.DENY
+
+
+def test_banned_unparseable_denies() -> None:
+    assert _shell('echo "old_api( ', _banned_policy()).decision == GATE.DENY
+
+
+def test_allow_listed_gives_allow() -> None:
+    assert _shell("make lint", GATE.Policy(allow=("make lint",))).decision == GATE.ALLOW
+
+
+def test_unlisted_gives_no_opinion() -> None:
+    policy = GATE.Policy(allow=("make lint",))
+    assert _shell("make deploy", policy).decision == GATE.NO_OPINION
+
+
+def test_withhold_beats_allow() -> None:
+    policy = GATE.Policy(allow=("git *",), withhold=("git push *",))
+    verdict = _shell("git status && git push origin x", policy)
+    assert verdict.decision == GATE.NO_OPINION
+
+
+def test_drifted_cwd_is_not_a_write_root() -> None:
+    verdict = GATE.shell_verdict(
+        "echo x > passwd",
+        GATE.Policy(allow=("echo *",)),
+        cwd="/etc",
+        roots=["/repo", "/tmp"],
+        home=HOME,
+    )
+    assert verdict.decision == GATE.NO_OPINION
+
+
+def test_policy_safe_env_extends_base() -> None:
+    policy = GATE.Policy(
+        allow=("echo *",), safe_env=GATE.BASE_SAFE_ENV_NAMES | {"MY_TOGGLE"}
+    )
+    assert _shell("MY_TOGGLE=1 echo hi", policy).decision == GATE.ALLOW
+
+
+def _edit(path: str, before: str, after: str) -> Any:
+    return GATE.edit_verdict(path, before, after, _banned_policy(), "/repo")
+
+
+def test_edit_adding_banned_denies() -> None:
+    verdict = _edit("/repo/src/a.py", "", "old_api()")
+    assert verdict.decision == GATE.DENY
+    assert "this edit to /repo/src/a.py" in verdict.reason
+
+
+def test_edit_keeping_existing_hit_is_allowed() -> None:
+    verdict = _edit("/repo/src/a.py", "old_api()\n", "old_api()\nx = 1\n")
+    assert verdict.decision == GATE.NO_OPINION
+
+
+def test_edit_exempt_path() -> None:
+    assert _edit("/repo/docs/a.md", "", "old_api()").decision == GATE.NO_OPINION
+
+
+def test_edit_outside_root_is_never_exempt() -> None:
+    assert _edit("/elsewhere/docs/a.md", "", "old_api()").decision == GATE.DENY
+
+
+def test_invalid_regex_entry_is_skipped() -> None:
+    assert GATE.BannedPattern.from_dict({"pattern": "("}) is None
+    assert GATE.BannedPattern.from_dict({"message": "x"}) is None
+    assert GATE.BannedPattern.from_dict({"pattern": 3}) is None

@@ -34,9 +34,12 @@ string starts with ``uv run``.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 # Shell keywords that execute no external program on their own.
 SCAFFOLD = {"do", "done", "then", "fi", "else", "elif", "esac", "{", "}", "!", ";;"}
@@ -963,3 +966,141 @@ def simple_commands(
     """
     out: list[str] = []
     return out if _collect(cmd, safe_env, out) else None
+
+
+ALLOW = "allow"
+DENY = "deny"
+NO_OPINION = "no_opinion"
+
+READ_ONLY_COMMANDS = frozenset(
+    {"grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "head", "tail", "less"}
+    | {"wc", "ls", "git grep", "git log", "git show", "git diff", "git blame"}
+)
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A gate decision: one of ``ALLOW``, ``DENY`` or ``NO_OPINION``."""
+
+    decision: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class BannedPattern:
+    """A regex that must not appear in commands or newly written file text."""
+
+    regex: re.Pattern[str]
+    pattern: str
+    message: str
+    replacement: str
+    exempt_paths: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> BannedPattern | None:
+        """Build an entry from a policy dict, or None if it is unusable.
+
+        Parameters
+        ----------
+        d : Mapping[str, Any]
+            Raw entry with ``pattern`` and optional ``message``,
+            ``replacement`` and ``exempt_paths``.
+
+        Returns
+        -------
+        BannedPattern | None
+            None when ``pattern`` is missing, not a string, or not a valid regex.
+        """
+        pattern = d.get("pattern")
+        if not isinstance(pattern, str):
+            return None
+        try:
+            regex = re.compile(pattern)
+        except re.error:
+            return None
+        exempt = d.get("exempt_paths") or ()
+        return cls(
+            regex=regex,
+            pattern=pattern,
+            message=str(d.get("message") or ""),
+            replacement=str(d.get("replacement") or ""),
+            exempt_paths=tuple(str(g) for g in exempt),
+        )
+
+
+@dataclass(frozen=True)
+class Policy:
+    """Everything the verdict functions need to decide.
+
+    ``withhold`` holds the contents of ``ask`` and ``deny`` ``Bash(...)`` rules:
+    a command matching one is never auto-allowed.
+    """
+
+    allow: tuple[str, ...] = ()
+    withhold: tuple[str, ...] = ()
+    safe_env: frozenset[str] = BASE_SAFE_ENV_NAMES
+    banned: tuple[BannedPattern, ...] = ()
+
+
+def _blocked(subject: str, banned: BannedPattern) -> Verdict:
+    return Verdict(
+        DENY,
+        f"Blocked: {subject} matches banned pattern {banned.pattern}: "
+        f"{banned.message}. Use instead: {banned.replacement}.",
+    )
+
+
+def _is_read_only(simple: str) -> bool:
+    words = simple.split()
+    if not words:
+        return False
+    return words[0] in READ_ONLY_COMMANDS or " ".join(words[:2]) in READ_ONLY_COMMANDS
+
+
+def shell_verdict(
+    command: str,
+    policy: Policy,
+    cwd: str,
+    roots: Sequence[str],
+    home: str,
+) -> Verdict:
+    """Decide a shell command: deny a banned hit, allow a listed one, else defer.
+
+    A banned hit is forgiven only when every executed simple command is a
+    read-only search, so ``rg old_call`` passes but ``rg old_call | sh`` and an
+    unparseable command do not.
+    """
+    simple = simple_commands(command, policy.safe_env)
+    for banned in policy.banned:
+        if not banned.regex.search(command):
+            continue
+        if simple is None or not all(_is_read_only(c) for c in simple):
+            return _blocked("this command", banned)
+    if simple is None:
+        return Verdict(NO_OPINION)
+    if any(pattern_matches(w, c, home) for w in policy.withhold for c in simple):
+        return Verdict(NO_OPINION)
+    if is_fully_allowed(command, policy.allow, roots, cwd, home, policy.safe_env):
+        return Verdict(ALLOW)
+    return Verdict(NO_OPINION)
+
+
+def _is_exempt(path: str, banned: BannedPattern, project_root: str) -> bool:
+    rel = os.path.relpath(os.path.normpath(os.path.abspath(path)), project_root)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        return False
+    return any(
+        fnmatch.fnmatchcase(rel, g.replace("**", "*")) for g in banned.exempt_paths
+    )
+
+
+def edit_verdict(
+    path: str, before: str, after: str, policy: Policy, project_root: str
+) -> Verdict:
+    """Deny an edit that adds more banned hits than the file already had."""
+    for banned in policy.banned:
+        if _is_exempt(path, banned, project_root):
+            continue
+        if len(banned.regex.findall(after)) > len(banned.regex.findall(before)):
+            return _blocked(f"this edit to {path}", banned)
+    return Verdict(NO_OPINION)
