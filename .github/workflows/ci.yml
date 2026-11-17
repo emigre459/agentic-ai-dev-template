@@ -144,7 +144,12 @@ jobs:
     name: template machinery (lint + tests)
     runs-on: ubuntu-latest
     steps:
+      # Full history + tags: test_shipped_lock_is_current verifies a pinned
+      # lock's release tag locally, as the `skills drift` job does.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
       - name: Read Python version
         id: pyver
         run: echo "value=$(cat .python-version)" >> "$GITHUB_OUTPUT"
