@@ -1,0 +1,33 @@
+{
+  "skill_name": "daily-update",
+  "evals": [
+    {
+      "id": 0,
+      "name": "baseline-no-override",
+      "prompt": "/daily-update",
+      "expected_output": "Markdown standup report for the invoking GitHub user (name from the users API), with sections What I did, In flight and, where data exists, Next up and Needs an owner. In flight combines open PRs, active board items (only when the repo has a board) and pushed branches with commits in the window and no PR. Nothing is posted to Slack.",
+      "files": []
+    },
+    {
+      "id": 1,
+      "name": "with-next-override-freeform",
+      "prompt": "/daily-update I'm planning to work on the retry-loop fix today",
+      "expected_output": "Same report shape, but Next up says 'Per your input:' and quotes the override text verbatim instead of suggesting a board item.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "natural-language-trigger",
+      "prompt": "give me my standup — what did I do yesterday and what should I work on next?",
+      "expected_output": "Same report shape as baseline. Tests that the natural-language phrasing in the description triggers the skill without the slash command.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "slack-only-when-asked-no-default-channel",
+      "prompt": "give me my standup and post it to slack",
+      "expected_output": "The report is rendered first. No channel was named, so the skill uses the slack-channel from .agents/skill-config/daily-update.md if present, otherwise asks which channel. It never invents a default channel, shows the preview and channel and waits for approval before sending.",
+      "files": []
+    }
+  ]
+}

@@ -31,12 +31,15 @@ Interview:
    The two shipped stacks are the only supported choices today; other
    languages/frameworks are a future template extension.
 3. What is the project NAME (short, kebab-case) and a ONE-LINE description?
-4. Confirm the exact target GitHub repository in `owner/repository` form. First
+4. Should a PR that only touches docs (prose, tables and images under `docs/`,
+   top-level Markdown other than AGENTS.md/CLAUDE.md) pass review-gate without a
+   PR review? It still needs CI. Default: no.
+5. Confirm the exact target GitHub repository in `owner/repository` form. First
    show `git remote -v`, the current branch and its tracking branch, and
    `gh auth status`. Store the confirmed value as `TARGET_REPO`; never infer it
    again from the current branch. If this is a fork, use `origin` for the fork and
    `upstream` for the template source.
-5. For a backend, show the derived Python import package (`my-project` becomes
+6. For a backend, show the derived Python import package (`my-project` becomes
    `my_project`) and confirm it is acceptable.
 
 THEN run, in order:
@@ -63,6 +66,10 @@ THEN run, in order:
   to the user, confirm through the interview tool, then rerun as
   `python3 scripts/apply_repo_settings.py --repo "$TARGET_REPO" --phase bootstrap --yes`;
   never skip confirmation.
+- Only if the user answered yes to the docs-only question (4), opt in now so the
+  file lands in the initialization commit:
+  `cp .agents/skills/resolve-pr-concerns/references/docs-only-paths.example.json .github/docs-only-paths.json`.
+  On no, skip this: without that file every PR needs a review.
 - Review `git status`, `git diff --stat`, and `git diff --name-status`. Confirm the
   changes are only legitimate initialization output, then stage and commit:
   `git add -A && git commit -m "chore: initialize from agentic-ai-dev-template"`.
@@ -125,13 +132,35 @@ settings, skip confirmation prompts, or continue after a preflight failure.
   with `make finalize_repo_settings`, which also turns on a merge queue where
   GitHub offers one.
 
+## The skills
+
+Each skill reads `.agents/skill-config/<skill>.md` when the repo has one (see
+"Customizing the skills in your repo"); the last column names what else it reads.
+
+| Skill | What it does | Repo-owned config |
+|---|---|---|
+| `build-from-issue` | Issue to merge-ready PR: brainstorm, spec and plan, TDD, E2E, acceptance audit, PR, follow-up | Branch pattern in its skill-config |
+| `plan-issues` | Decompose an idea or epic into issue cards on the board | — |
+| `clean-up-kanban` | Board review, epic template and hygiene rules | — |
+| `resolve-pr-concerns` | Drive an open PR to merge-ready: reviewer rounds, CI, human reviews | `.github/pr-reviewer.json`; `.github/docs-only-paths.json` (opt-in) |
+| `pr-check` | `make pr_check` under the single-flight lock | — |
+| `run-tests` | `make tests`, the fast iteration target | — |
+| `review-skill` | Validate a skill's structure and quality | — |
+| `explain-diff` | HTML explanation of any diff, branch or PR, with a quiz | — |
+| `explain-diff-merge-review` | Pre-merge review of a PR this session wrote | — |
+| `release` | Publish the release release-drafter drafted, on your OK | `.github/release-drafter.yml` |
+| `upgrade-deps` | Sweep mode: fold security fixes and a clean skills refresh into one PR, close routine and superseded update PRs. Refresh mode: bring every dependency current | `.github/dependabot.yml` (projects and grouping policy); the `skills-update` action's `branch` input |
+| `update-project-memory` | Gate edits to `AGENTS.md` behind its line and character budget | Caps in `.agents/skill-config/update-project-memory.md` (default soft 120 lines, hard 150 lines / 9,000 chars) |
+| `daily-update` | Your standup: merged, in flight, next up, cards that need an owner; Slack only when asked | Board and Slack channel in `.agents/skill-config/daily-update.md` (default: the repo's linked board, no channel) |
+| `write-teaching-notebook` | The notebook a live test kit ships: before and after on the same input. Python only (`make init STACK=react` drops it) | `check-command` and `open-command`, and a read-only `before-source`, in `.agents/skill-config/write-teaching-notebook.md`, or the stack's `notebook` dependency group |
+
 ## Customizing the skills in your repo
 
 The dev-workflow skills in `.agents/skills/` are **vendored**: a repo gets them from
 this template, by creating the repo from it or with `npx skills add`. Updates replace
 each skill folder wholesale (`npx skills update` deletes it and copies it in again),
 so an edit inside a skill folder is silently lost. Outside this template, treat skill
-folders as **read-only**. Put repo-specific behavior in the four files below, which
+folders as **read-only**. Put repo-specific behavior in the five files below, which
 your repo owns, and send a fix to a skill itself upstream as a PR to this repo.
 
 Every skill's `SKILL.md` opens with a `**Repo config first:**` line that sets the
@@ -143,7 +172,7 @@ rules:
 - **Hard stops no file can lift.** Only you can, explicitly, in the session:
   - merging without your one-off OK;
   - resolving review threads;
-  - opening or calling ready a PR without a green `make pr_check` and CI;
+  - opening or calling ready a PR without the pre-PR check `pr-check-scope` requires (the full `make pr_check` unless the diff qualifies for the light check) and green CI;
   - weakening a gate;
   - deleting issues;
   - skipping a confirmation;
@@ -201,6 +230,22 @@ names no file is rejected.
 
 (An adapter needs every field the shipped `bugbot` and `coderabbit` entries have; the
 fragment shows only the new ones.)
+
+### `.github/docs-only-paths.json`: the opt-in docs-only lane
+
+Optional; the template ships none, so by default every PR needs a review. With it on
+the default branch, `review-gate` passes a PR whose every changed and renamed-from
+path is on the list as `docs-only: no review required` (CI still runs, and a path
+owner's approval is still required). To opt in, copy the shipped example, which
+allows prose, tables and raster images under `docs/` and top-level Markdown, never
+`AGENTS.md` or `CLAUDE.md`:
+
+```bash
+cp .agents/skills/resolve-pr-concerns/references/docs-only-paths.example.json .github/docs-only-paths.json
+```
+
+Edit its `dirs`, `dir_suffixes`, `top_level_suffix` and `excluded_names` to fit the
+repo. A malformed file opts out: no PR is docs-only.
 
 ### `.agents/skill-config/<skill>.md`: notes for one skill
 

@@ -668,6 +668,42 @@ def _install_pinned_skills(
             shutil.rmtree(folder)
 
 
+# Skills that only make sense on one stack: the stack each needs. On the other
+# stack, init removes the skill's folder and its lock entry.
+STACK_ONLY_SKILLS: dict[str, str] = {"write-teaching-notebook": "python"}
+
+
+def _drop_stack_only_skills(root: Path, stack: str) -> None:
+    """Remove every skill in ``STACK_ONLY_SKILLS`` whose stack is not ``stack``.
+
+    Deletes ``.agents/skills/<name>`` and the skill's ``skills-lock.json`` entry,
+    so the drift check does not report a locked skill missing from the tree. The
+    lock is rewritten the way the skills CLI writes it (2-space indent, final
+    newline), and only when an entry was removed.
+
+    Parameters
+    ----------
+    root : Path
+        Repository root being initialized.
+    stack : str
+        The stack being kept.
+    """
+    dropped = {name for name, needs in STACK_ONLY_SKILLS.items() if needs != stack}
+    for name in sorted(dropped):
+        folder = root / _SKILLS_DIR / name
+        if folder.is_dir() and not folder.is_symlink():
+            shutil.rmtree(folder)
+    lock = _read_skills_lock(root)
+    if lock is None or not dropped & set(lock.get("skills", {})):
+        return
+    lock["skills"] = {
+        name: entry for name, entry in lock["skills"].items() if name not in dropped
+    }
+    (root / _LOCK_FILE).write_text(
+        json.dumps(lock, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
 def _point_actions_at_release(root: Path, ref: str | None) -> None:
     """Make workflows use the released composite actions instead of local copies.
 
@@ -832,11 +868,14 @@ def _collapse_template(
     # 4b. Start on the template's pinned skills release (layer L1 of the consumer
     # kit): swap in the already-verified tagged skill folders, delete the skills the
     # pinned lock does not list (unreleased ones added on main after the tag, which
-    # would otherwise ship untracked), then point workflows at the released
-    # composite actions. All are no-ops before the first release (no `ref`). They
+    # would otherwise ship untracked), drop the other stack's stack-only skills
+    # (folder and lock entry), then point workflows at the released
+    # composite actions. All but the stack-only drop are no-ops before the first
+    # release (no `ref`). They
     # come before settings and self-destruct so the machinery is still present if
     # a later step fails.
     _install_pinned_skills(root, verified_skills, locked_skills)
+    _drop_stack_only_skills(root, stack)
     _point_actions_at_release(root, ref)
 
     # 5. Apply repo settings BEFORE self-destruct, so that if the apply step fails

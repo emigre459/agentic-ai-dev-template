@@ -648,3 +648,74 @@ def test_build_from_issue_stack_reference_keeps_the_policy() -> None:
         "resolve-pr-concerns",
     ):
         assert phrase in text, phrase
+
+
+# --- Wiring: docs-only lane, thread resolution, single-flight full check ---
+
+_CODERABBIT = _NOTES_DIR / "coderabbit.md"
+_FULL_CHECK = "single_flight.py suite -- make pr_check"
+
+
+def test_step_5b_documents_the_opt_in_docs_only_lane() -> None:
+    step5b = _section(_flat(_SKILL), "## Step 5b:")
+    assert "when the repo has opted in" in step5b
+    assert ".github/docs-only-paths.json" in step5b
+    assert "docs-only: no review required" in step5b
+    assert "the maintainer's ruleset bypass" in step5b
+
+
+@pytest.mark.parametrize("path", [_SKILL, _RULE, _CODERABBIT], ids=lambda p: p.name)
+def test_review_gate_leaves_reviewer_threads_to_the_ruleset(path: Path) -> None:
+    """The ruleset holds a local reviewer's threads when its rules require it.
+
+    Otherwise review-gate itself waits for them, so a repo without the rule still
+    can't merge past an open reviewer thread.
+    """
+    text = _flat(path)
+    assert "thread is resolved" not in text
+    assert "thread resolved" not in text
+    assert "required conversation resolution when the default branch's" in text
+    assert "`review-gate` itself waits for them" in text
+
+
+def test_local_rounds_name_the_ruleset_as_the_thread_gate() -> None:
+    section = _section(_flat(_SKILL), "### Local review rounds")
+    assert "when the default branch's rules require conversation resolution" in section
+    assert "`review-gate` itself waits for them" in section
+
+
+def test_step_2e_points_at_the_upgrade_deps_sweep() -> None:
+    step2e = _section(_flat(_SKILL), "### 2e.")
+    assert "upgrade-deps" in step2e
+    assert "sweep" in step2e
+
+
+_FULL_CHECK_DOCS = (
+    _SKILL,
+    _BUILD,
+    _SKILLS / "upgrade-deps" / "SKILL.md",
+    _STACK_REF,
+    _BUILD_STACK_REF,
+    _SKILLS / "resolve-pr-concerns" / "references" / "parallel-fixes.md",
+)
+
+
+@pytest.mark.parametrize(
+    "path", _FULL_CHECK_DOCS, ids=lambda p: f"{p.parts[-3]}/{p.parts[-2]}/{p.name}"
+)
+def test_full_check_runs_through_the_single_flight_lock(path: Path) -> None:
+    """Every doc that runs the full check runs it through the single-flight lock."""
+    assert _FULL_CHECK in _flat(path)
+
+
+def test_single_flight_full_check_is_allow_listed() -> None:
+    """Skills run the full gate through the lock; agents must not hit a prompt."""
+    settings = json.loads((_REPO / ".claude" / "settings.json").read_text())
+    expected = (
+        "Bash(python3 .agents/skills/resolve-pr-concerns/scripts/single_flight.py "
+        "suite -- make pr_check)"
+    )
+    assert expected in settings["permissions"]["allow"], (
+        f"Add {expected!r} to .claude/settings.json permissions.allow so agents can "
+        "run the locked full check without a prompt."
+    )

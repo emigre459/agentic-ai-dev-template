@@ -706,6 +706,81 @@ def test_init_keeps_unlocked_skills_when_not_pinned(template_tree: Path) -> None
     assert (template_tree / ".agents" / "skills" / "pr-check").is_dir()
 
 
+def _lock_skills(root: Path) -> dict[str, Any]:
+    text = (root / "skills-lock.json").read_text(encoding="utf-8")
+    lock: dict[str, Any] = json.loads(text)
+    # Rewritten the way the skills CLI writes it: 2-space indent, final newline.
+    assert text == json.dumps(lock, indent=2, ensure_ascii=False) + "\n"
+    skills: dict[str, Any] = lock["skills"]
+    return skills
+
+
+def test_react_init_drops_python_only_skill_and_lock_entry(
+    template_tree: Path, tmp_path: Path
+) -> None:
+    # A release that lists write-teaching-notebook, initialized as react: neither
+    # the folder nor the lock entry may survive, or `skills drift` reports a
+    # missing skill.
+    source = _make_source(
+        tmp_path, {"run-tests": "released\n", "write-teaching-notebook": "nb\n"}
+    )
+    _write_lock(
+        template_tree, _released(source, "run-tests", "write-teaching-notebook")
+    )
+
+    initialize(template_tree, "react", "acme-web", "web", runner=_FakeGit(source))
+
+    skills = template_tree / ".agents" / "skills"
+    assert not (skills / "write-teaching-notebook").exists()
+    assert (skills / "run-tests" / "SKILL.md").read_text() == "released\n"
+    assert sorted(_lock_skills(template_tree)) == ["run-tests"]
+
+
+def test_react_init_drops_notebook_skill_before_first_release(
+    template_tree: Path,
+) -> None:
+    # The shipped lock (no `ref` yet) lists the skill too.
+    assert "write-teaching-notebook" in _lock_skills(template_tree)
+
+    initialize(template_tree, "react", "acme-web", "web", runner=_no_commands)
+
+    assert not (
+        template_tree / ".agents" / "skills" / "write-teaching-notebook"
+    ).exists()
+    skills = _lock_skills(template_tree)
+    assert "write-teaching-notebook" not in skills
+    assert "run-tests" in skills
+
+
+def test_python_init_keeps_notebook_skill(template_tree: Path, tmp_path: Path) -> None:
+    source = _make_source(
+        tmp_path, {"run-tests": "released\n", "write-teaching-notebook": "nb\n"}
+    )
+    _write_lock(
+        template_tree, _released(source, "run-tests", "write-teaching-notebook")
+    )
+    before = (template_tree / "skills-lock.json").read_bytes()
+
+    initialize(template_tree, "python", "acme-svc", "svc", runner=_FakeGit(source))
+
+    skill = template_tree / ".agents" / "skills" / "write-teaching-notebook"
+    assert (skill / "SKILL.md").read_text() == "nb\n"
+    assert (template_tree / "skills-lock.json").read_bytes() == before
+
+
+def test_init_without_lock_file_still_drops_python_only_skill(
+    template_tree: Path,
+) -> None:
+    (template_tree / "skills-lock.json").unlink()
+
+    initialize(template_tree, "react", "acme-web", "web", runner=_no_commands)
+
+    assert not (
+        template_tree / ".agents" / "skills" / "write-teaching-notebook"
+    ).exists()
+    assert not (template_tree / "skills-lock.json").exists()
+
+
 def test_init_fails_when_a_local_action_reference_survives(
     template_tree: Path, tmp_path: Path
 ) -> None:

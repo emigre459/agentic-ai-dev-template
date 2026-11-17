@@ -1,0 +1,7 @@
+{
+  "description": "Opt-in docs-only lane for review-gate: a PR whose every changed and renamed-from path matches passes without a PR review. Copy to `.github/docs-only-paths.json` to opt in. dirs/dir_suffixes: files under those directories with those suffixes; top_level_suffix: repo-root files with that suffix; excluded_names: file names (any case) that are never docs, at any depth.",
+  "dirs": ["docs/"],
+  "dir_suffixes": [".md", ".txt", ".csv", ".png", ".jpg", ".jpeg", ".gif"],
+  "top_level_suffix": ".md",
+  "excluded_names": ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]
+}
