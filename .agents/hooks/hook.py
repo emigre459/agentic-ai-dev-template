@@ -42,6 +42,20 @@ MAX_READ_BYTES = 2 * 1024 * 1024
 # Set in every hook process Cursor runs (Cursor hooks docs, "Environment
 # Variables"); Cursor ALSO sets CLAUDE_PROJECT_DIR as a compatibility alias.
 CURSOR_ENV_MARKERS = ("CURSOR_PROJECT_DIR", "CURSOR_VERSION")
+# Project subtrees an allowed command may never redirect output into, even
+# though they sit inside the project root: the gate's own policy and every
+# harness's hook config, plus VCS internals (`.git/hooks` runs code).
+PROTECTED_DIRS = (
+    ".git",
+    ".claude",
+    ".agents",
+    ".codex",
+    ".cursor",
+    ".gemini",
+    ".factory",
+    ".augment",
+    os.path.join(".github", "hooks"),
+)
 
 
 @dataclass(frozen=True)
@@ -427,7 +441,10 @@ def _decide(
 ) -> Verdict:
     cwd = call.cwd or os.getcwd()
     if call.kind == "shell":
-        return command_gate.shell_verdict(call.command, policy, cwd, roots, home)
+        protected = [os.path.join(root, d) for d in PROTECTED_DIRS]
+        return command_gate.shell_verdict(
+            call.command, policy, cwd, roots, home, protected=protected
+        )
     if call.kind == "edit":
         for edit in call.edits:
             path = edit.path

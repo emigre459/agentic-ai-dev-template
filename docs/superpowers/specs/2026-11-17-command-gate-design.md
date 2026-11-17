@@ -423,3 +423,76 @@ Kiro (`.kiro/hooks/*.json`) and Amp (permissions `delegate`).
 - The internal structure of the ported parser. Keep the downstream logic intact
   where it is not changed above, because its behavior is what the tests pin.
 - Fixture JSON layout for the per-format payload tests.
+
+## Amendment — 2026-11-17 (pre-merge review: syntax allowlist)
+
+A pre-merge review of PR #81 found five more classes of wrong allow. Each ran a
+hidden command in real bash or zsh against this repo's own allow list:
+
+- escaped `\>&` / `\<&` read as a redirect, so the `&` after it did not split;
+- an escaped space merging words in env assignments and wrapper options;
+- `env -S` / `-P` / `-C` and other wrapper options stripped unchecked;
+- zsh math evaluation through `$#x[y]`-style subscripts and integer specials
+  such as `SECONDS` and `COLUMNS`;
+- a denylist of unsafe assignments that missed zsh `path`, `NULLCMD`, `EDITOR`.
+
+Writes into the gate's own config and VCS internals were also allowed.
+
+**User decision:** close whole classes instead of patching instances. A command
+can be ALLOWED only if every executed simple command uses a conservative syntax
+subset; anything outside it gets no opinion. Banned-pattern DENY is unchanged: a
+parse failure plus a banned hit still denies.
+
+The rules live in the shared scanner and prefix parser, so the allow view and
+the banned/withhold view agree:
+
+1. **Backslashes:** outside single quotes, only a line continuation (spliced),
+   plus a double-quoted escape of `"`, `\`, a backtick or `$`. Any other
+   backslash defers. `split_subcommands` also no longer treats an escaped `>`/`<`
+   as a redirect character.
+2. **`$` expansions:** only `$NAME`, `${NAME}` (and `${1}`-style braces), and the
+   single-character specials `$1`-`$9`, `$0`, `$#`, `$?`, `$$`, `$!`, `$@`, `$*`
+   and `$-`. None of them may be followed by `[`, and a special may not run into a
+   name character. Everything else defers.
+3. **Brackets:** an unquoted `[` or `]` in a word that also holds a `$` expansion
+   or substitution defers. Plain globs are fine.
+4. **Assignments (bare and leading):** allowed only for a `safe_env` name, with a
+   value free of backslashes, backticks, brackets, parentheses and any `$` other
+   than a plain `$NAME` or a vetted `$(...)`.
+   - `COLUMNS` leaves the base set.
+   - The zsh integer specials are a hard exclusion, even when `safe_env` lists
+     one.
+   - The `UNSAFE_BARE_*` denylist is gone.
+   - **Builder addition:** a `for`/`select` loop variable must be a `safe_env`
+     name, or a lowercase name that is not a zsh special. zsh `for path in ./bin`
+     reassigns `PATH`.
+5. **Wrappers:** only bare `time`/`nohup`/`command`/`builtin`/`nice`,
+   `timeout <duration>`, and `env` with only `-i` / `-u NAME` followed by
+   `safe_env` assignments. Words are read with the quote-aware word reader. Any
+   other option, or a wrapper with no command after it, defers.
+6. **Redirect-only segments** (`>/dev/null`, `2>&1`) defer.
+7. **Protected paths:** a redirect under the project's `.git/`, `.claude/`,
+   `.agents/`, `.codex/`, `.cursor/`, `.gemini/`, `.factory/`, `.augment/` or
+   `.github/hooks/` defers, compared after `realpath`. `hook.py` computes the list
+   and passes it to `command_gate` as `protected`, which keeps the parser
+   harness-agnostic. Banned-edit handling is unaffected.
+8. **Length cap:** a command over 64 KiB gets no allow. Its banned check still
+   runs, with no read-only forgiveness.
+9. **Read-only forgiveness** is also withdrawn for any word that is `--pre`,
+   `--pager`, `--hostname-bin`, `--output`, `--ext-diff`, `--textconv` or
+   `--open-files-in-pager`, or an abbreviation of one (`=value` forms included),
+   and for a short cluster holding `-O`.
+
+A differential test lane (`tests/template/test_command_gate_differential.py`)
+runs every command the gate allows, for real, in `bash -c` and `zsh -c` inside a
+sandbox. The sandbox has shimmed allow-listed programs and decoys. Any `pwned*`
+file or call to a non-allow-listed program fails the test.
+
+Deliberate new deferrals:
+
+- `ROOT="$(git rev-parse --show-toplevel)" && echo $ROOT` (ROOT is not a
+  `safe_env` name);
+- an unquoted escaped backslash (`echo x\\`);
+- `printf "a\n"`-style double-quoted escapes;
+- `command -v`, `nice -n`, `timeout -s` and `stdbuf`;
+- lowercase-name bare assignments (`x=1`).

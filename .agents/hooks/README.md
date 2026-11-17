@@ -11,20 +11,64 @@ The gate returns one of three answers for a shell command or a file edit:
 
 | Answer | When |
 |--------|------|
-| **Allow** | Every simple command the shell would run matches an allow pattern, and every output redirect lands inside an allowed root (the project root, `/tmp`, the OS temp dir, plus `write_roots` and Claude `additionalDirectories`). |
+| **Allow** | The command stays inside the syntax subset below, every simple command the shell would run matches an allow pattern, and every output redirect lands inside an allowed root (the project root, `/tmp`, the OS temp dir, plus `write_roots` and Claude `additionalDirectories`) and outside every protected path. |
 | **Deny** | A shell command or the text an edit adds matches a `banned` pattern. |
 | **No opinion** | Everything else. The harness shows its normal prompt. |
 
 Allow is checked per command, not by prefix: `uv run pytest && rm -rf /` is not
 allowed just because it starts with `uv run`. The parser handles compound commands
 (`&&`, `||`, `;`, `|`, `&`, newlines), `cd <dir> && ...`, `$(...)`, backticks,
-`<(...)`, `for`/`while`/`if` bodies, leading `NAME=value` assignments, and the
-wrappers `timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin` and
-`env`. Anything it cannot parse is no opinion, including heredocs (`<<`),
-subshells and other bare parentheses, `${...}` other than a plain `${NAME}` or
-`${1}`, `$[...]`, and the zsh forms `$~x` and `$x[...]`. Backslash-newline
-continuations are joined first, as the shell does, so they cannot hide any of these. Redirect targets are resolved through symlinks before the
-root check.
+`<(...)`, `for`/`while`/`if` bodies, and `#` comments. Backslash-newline
+continuations are joined first, as the shell does. Redirect targets are resolved
+through symlinks before the root check.
+
+### The syntax subset
+
+An allow is possible only when the whole command, including every `$(...)` inside
+it, uses this conservative subset. bash and zsh both run it the way the gate reads
+it. Anything outside it is no opinion, so the harness prompts as usual.
+
+- **Backslashes:** none outside single quotes, except a line continuation and,
+  inside double quotes, `\"`, `\\`, `` \` `` or `\$`. So `echo a\ b` and
+  `printf "a\n"` prompt.
+- **`$` expansions:** only `$NAME`, `${NAME}`, `${1}`-style braces, and `$1`-`$9`,
+  `$0`, `$#`, `$?`, `$$`, `$!`, `$@`, `$*`, `$-`, never followed by `[`. A special
+  must not run into a name either (zsh reads `$#x` as a length). Every other form
+  prompts: `${x:-y}` and other operators, `$((..))`, `$[..]`, `$"..."`, `$'...'`,
+  and zsh `$~x`, `$+x`, `$^x`, `$=x`, `$#x`.
+- **Brackets:** an unquoted `[` or `]` in a word that also holds a `$` expansion or
+  substitution prompts (zsh may subscript it and evaluate math). Plain globs such
+  as `*.py` or `[ab]` are fine.
+- **Assignments:** a bare `NAME=value` or a leading `NAME=value cmd` is allowed
+  only when NAME is in `safe_env` (built-in list below, plus `policy.json`). The
+  value may hold no backslash, backtick, `[`, `]`, `(` or `)`, and no `$` other
+  than a plain `$NAME` or an already-vetted `$(...)`. The zsh integer specials
+  (`SECONDS`, `LINES`, `COLUMNS`, `HISTSIZE`, `SAVEHIST`, `TMOUT`, `RANDOM`,
+  `KEYTIMEOUT`, `LISTMAX`, `DIRSTACKSIZE`, `MAILCHECK`, `PERIOD` and the other
+  integer-valued specials such as `SHLVL`, `UID`, `OPTIND`) are never allowed,
+  even when `safe_env` names one: zsh evaluates their values as math. A
+  `for`/`select` loop variable must be a `safe_env` name or a lowercase name with
+  no special meaning (zsh's `path` is tied to `PATH`).
+- **Wrappers:** only bare `time`, `nohup`, `command`, `builtin` and `nice`,
+  `timeout <duration>`, and `env` with only `-i` and `-u NAME` followed by
+  `safe_env` assignments are stripped before matching. Any other option to any
+  wrapper (`env -S`, `env -P`, `nice -n`, `timeout -s`, `command -v`, ...) and
+  `stdbuf` prompt, as does a wrapper with no command after it.
+- **Not modelled:** heredocs (`<<`; a `<<<` here-string is fine), subshells and
+  other bare parentheses, and a segment that is only a redirect (`>/dev/null`;
+  zsh runs `$NULLCMD`).
+- **Length:** a command over 64 KiB is never allowed (banned patterns are still
+  checked).
+
+### Protected paths
+
+Even inside an allowed root, an allowed command may never redirect output under
+`.git/`, `.claude/`, `.agents/`, `.codex/`, `.cursor/`, `.gemini/`, `.factory/`,
+`.augment/` or `.github/hooks/` in the project root. These hold the gate's own
+policy, every harness's hook registration and VCS hooks; writing there could switch
+the gate off or run code later. The check compares real paths, so a symlink does not
+get around it. Edits made through edit tools are a separate path and are not
+affected.
 
 It never allows or denies on uncertainty. A bad payload, an unreadable policy, a
 missing file or any exception ends in exit 0 with empty stdout. A deny is the
@@ -36,10 +80,12 @@ harness's JSON on stdout plus the reason on stderr, always with exit 0.
   simple command in it is a read-only search and nothing redirects output. The
   read-only set is `grep`, `egrep`, `fgrep`, `rg`, `ag`, `ack`, `cat`, `head`,
   `tail`, `less`, `wc`, `ls`, `git grep`, `git log`, `git show`, `git diff` and
-  `git blame`. `rg old_call` passes; `rg old_call | sh`, `rg old_call > out.txt`,
-  `rg --pre ...` and `git grep -O` / `--open-files-in-pager` (or any abbreviation
-  of it) are denied, because those run a program or
-  write a file.
+  `git blame`. `rg old_call` passes. These are denied because they run a program
+  or write a file: `rg old_call | sh`, `rg old_call > out.txt`, and any word that
+  is `--pre`, `--pager`, `--hostname-bin`, `--output`, `--ext-diff`, `--textconv`,
+  `--open-files-in-pager` or an abbreviation of one (`--opt=value` included), or a
+  short-option cluster holding `-O`. A banned hit in a command the parser cannot
+  read (for example one outside the syntax subset) is always denied.
 - **Edits:** only what the edit adds counts. An edit is denied when the new text
   has more matches than the old text, so touching a file that already contains a
   banned string is fine as long as the count does not grow. Edits come from Claude
@@ -54,7 +100,7 @@ next to `hook.py` only when the root has none.
 | Key | Type | Meaning |
 |-----|------|---------|
 | `allow` | list of strings | Extra allow patterns in Claude `Bash(...)` pattern syntax, without the `Bash(` wrapper: an exact command, a trailing ` *` or `:*` for a prefix, or `*` anywhere inside one simple command. |
-| `safe_env` | list of strings | Extra env var names that may lead a command and are stripped before matching. Built in: `PYTHONUNBUFFERED`, `PYTHONDONTWRITEBYTECODE`, `NO_COLOR`, `FORCE_COLOR`, `CLICOLOR`, `COLUMNS`, `TZ`, `LANG`, `LC_ALL`, `CI`. Any other leading assignment (`PATH=`, `GIT_*`, `LD_*`, ...) stays in the command and so defers. |
+| `safe_env` | list of strings | Extra env var names that may be assigned (bare, or leading a command, where they are stripped before matching). Built in: `PYTHONUNBUFFERED`, `PYTHONDONTWRITEBYTECODE`, `NO_COLOR`, `FORCE_COLOR`, `CLICOLOR`, `TZ`, `LANG`, `LC_ALL`, `CI`. Any other assignment (`PATH=`, zsh `path=`, `EDITOR=`, `GIT_*`, `LD_*`, ...) defers, and a zsh integer special (`COLUMNS`, `SECONDS`, ...) defers even when listed here. |
 | `write_roots` | list of strings | Extra directories an allowed command may redirect output into. `~/...` expands to the home directory; a relative entry is relative to the project root. |
 | `banned` | list of objects | Banned patterns, below. |
 

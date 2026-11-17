@@ -12,8 +12,8 @@ questions about the string:
 It understands the command shapes agents really emit:
 
 - leading env-var assignments, but only for the names in ``safe_env``
-- process wrappers (``timeout``, ``time``, ``nice``, ``nohup``, ``stdbuf``,
-  ``env``)
+- bare process wrappers (``time``, ``nohup``, ``command``, ``builtin``,
+  ``nice``), ``timeout <duration>`` and ``env`` with only ``-i`` / ``-u NAME``
 - compound commands (``a && b``, ``a | b``, ``a ; b``, ``a & b``, newlines)
 - ``cd <dir> && <cmd>`` (the ``cd`` becomes its own vetted subcommand)
 - command and process substitution (``$(...)``, backticks, ``<(...)``)
@@ -22,8 +22,12 @@ It understands the command shapes agents really emit:
   the command changes directory
 - ``#`` comments (ANSI-C ``$'...'`` strings are not modelled and fail closed)
 
-Heredocs, subshells, non-trivial ``${...}`` expansions and ``$[...]`` are not
-modelled either; they fail closed (see ``scan_substitutions``).
+An allow additionally requires a conservative syntax subset (see
+``scan_substitutions``, ``_read_dollar`` and ``split_prefix``): no backslash but
+a continuation or a double-quoted escape, only plain ``$`` expansions, no
+bracket next to an expansion, only ``safe_env`` assignments, only bare wrappers,
+no heredocs, subshells or redirect-only segments, and no write under a
+``protected`` directory. Anything else fails closed.
 
 SAFETY INVARIANT: this is a security boundary, so it defaults to "no". It
 answers ``True`` from ``is_fully_allowed`` only when the command was fully
@@ -54,20 +58,10 @@ WORDLIST_HEADERS = ("for ", "select ")
 # Headers followed by an executed condition command.
 COND_HEADERS = ("if ", "while ", "until ", "elif ", "time ")
 
-ENV_ASSIGN = re.compile(
-    r'^(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?:"[^"]*"|\'[^\']*\'|[^\s]*)\s+'
-)
-BARE_ASSIGN = re.compile(
-    r'^(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?:"[^"]*"|\'[^\']*\'|[^\s]*)\s*$'
-)
-TIMEOUT = re.compile(r"^timeout\s+(?:--?\S+(?:=\S+)?\s+)*\d+(?:\.\d+)?[smhd]?\s+")
-WRAP = re.compile(r"^(?:time|nice|nohup|stdbuf|command|builtin|env)\s+(?:-\S+\s+)*")
-
-# Only these leading `NAME=value` assignments are stripped before allow-pattern
-# matching. They toggle output formatting or CI behaviour and cannot change WHICH
-# code an allowed command loads or runs. Anything else (GIT_EXTERNAL_DIFF,
-# GIT_SSH_COMMAND, LD_PRELOAD, PYTHONPATH, PATH, ...) stays in the command, so
-# it defers unless a pattern names it explicitly. A policy may extend this set.
+# The only `NAME=value` assignments (bare, or leading a command) that may be
+# allowed. They toggle output formatting or CI behaviour and cannot change WHICH
+# code an allowed command loads or runs. Any other assignment (PATH, zsh `path`,
+# EDITOR, GIT_SSH_COMMAND, LD_PRELOAD, ...) defers. A policy may extend this set.
 BASE_SAFE_ENV_NAMES = frozenset(
     {
         "PYTHONUNBUFFERED",
@@ -75,21 +69,54 @@ BASE_SAFE_ENV_NAMES = frozenset(
         "NO_COLOR",
         "FORCE_COLOR",
         "CLICOLOR",
-        "COLUMNS",
         "TZ",
         "LANG",
         "LC_ALL",
         "CI",
     }
 )
-# A bare `NAME=value` (no command) executes nothing, but assigning one of these
-# (usually already-exported) variables changes how LATER commands are looked up
-# or loaded, so it defers.
-UNSAFE_BARE_NAMES = frozenset(
-    {"PATH", "IFS", "BASH_ENV", "ENV", "CDPATH", "PROMPT_COMMAND", "PS4", "HOME"}
-    | {"SHELLOPTS", "BASHOPTS", "GLOBIGNORE"}
+# zsh evaluates a value assigned to an integer special as arithmetic, which can
+# run a `$(...)` nested in another variable. Never safe, even if a policy's
+# safe_env names one.
+ZSH_INTEGER_SPECIALS = frozenset(
+    {"SECONDS", "LINES", "COLUMNS", "HISTSIZE", "SAVEHIST", "TMOUT", "RANDOM"}
+    | {"KEYTIMEOUT", "LISTMAX", "DIRSTACKSIZE", "MAILCHECK", "PERIOD", "SHLVL"}
+    | {"OPTIND", "UID", "GID", "EUID", "EGID", "LINENO", "PPID", "ERRNO"}
+    | {"HISTCMD", "TRY_BLOCK_ERROR", "TRY_BLOCK_INTERRUPT", "ZLE_RPROMPT_INDENT"}
 )
-UNSAFE_BARE_PREFIXES = ("LD_", "DYLD_", "GIT_", "PYTHON")
+# A `for`/`select` loop assigns its variable. A lowercase name is fine unless the
+# shell gives it a special meaning (zsh `path` is tied to PATH, `mapfile` writes
+# files, ...); bash's specials are all uppercase.
+_LOOP_VAR = re.compile(r"^[a-z][a-z0-9_]*$")
+ZSH_LOWERCASE_SPECIALS = frozenset(
+    {"argv", "cdpath", "fignore", "fpath", "histchars", "mailpath", "manpath"}
+    | {"module_path", "path", "pipestatus", "prompt", "psvar", "signals"}
+    | {"status", "watch", "aliases", "builtins", "commands", "dirstack"}
+    | {"errnos", "functions", "galiases", "history", "historywords", "jobdirs"}
+    | {"jobstates", "jobtexts", "keymaps", "langinfo", "mapfile", "modules"}
+    | {"nameddirs", "options", "parameters", "patchars", "reswords"}
+    | {"saliases", "sysparams", "termcap", "terminfo", "userdirs", "usergroups"}
+    | {"widgets", "epochtime", "funcstack", "funcfiletrace", "funcsourcetrace"}
+    | {"functrace", "match", "mbegin", "mend", "reply", "zsh_eval_context"}
+    | {"zsh_scheduled_events"}
+)
+# Wrappers stripped before matching, and only in these exact shapes: bare
+# `time`/`nohup`/`command`/`builtin`/`nice`, `timeout <duration>`, and `env`
+# with only `-i` / `-u NAME`. Any other option to any wrapper defers.
+_BARE_WRAPPERS = frozenset({"time", "nohup", "command", "builtin", "nice"})
+_DURATION = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_NAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+)
+_ASSIGN_WORD = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?=)")
+_ARRAY_ASSIGN_WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\[")
+# A plain `$NAME` / `${NAME}` (including the `$S` substitution placeholder).
+_PLAIN_REF = re.compile(r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)")
+# Single-character special parameters allowed after `$`.
+_SPECIAL_PARAMS = frozenset("123456789#?$!@*-0")
+# A command longer than this gets no allow (the banned check still runs).
+MAX_ALLOW_COMMAND_CHARS = 64 * 1024
 # fd duplication / close targets (`>&2`, `2>&1`, `>&-`, `2>&1-`) -- not file writes.
 FD_DUP_TARGET = re.compile(r"^(?:\d+-?|-)$")
 # Any segment that changes directory makes relative redirect targets unverifiable.
@@ -243,50 +270,92 @@ def _splice_continuations(s: str, i: int) -> str:
     return s
 
 
-def _follows_param(s: str, i: int) -> bool:
-    """Return True when ``s[i]`` directly follows an unbraced ``$NAME``/``$1``/``$#``.
+def _read_dollar(s: str, i: int, in_dq: bool) -> tuple[str, int, str]:
+    """Classify the ``$`` at ``s[i]`` (not ``$(`` or an unquoted ``$'``).
 
-    zsh treats such a ``[`` as a subscript, and evaluating the subscript as
-    math can run code held in a variable's value.
+    Only these are allowable: ``$NAME``, ``${NAME}``, ``${1}``-style braces,
+    and the single-character specials ``$1``-``$9``, ``$0``, ``$#``, ``$?``,
+    ``$$``, ``$!``, ``$@``, ``$*`` and ``$-``, never followed by ``[`` (zsh
+    subscripts it and evaluates the index as math, which can run code). A
+    special must not be followed by a name character either: zsh reads ``$#x``
+    as the length of ``x``. A ``$`` followed by a blank, the end, or (inside
+    double quotes) the closing ``"`` is a literal dollar sign. Every other form
+    (``$~x``, ``$+x``, ``$^x``, ``$=x``, ``$[``, ``${x:-y}``, ``$"..."``) is
+    ``"bad"``.
 
     Parameters
     ----------
     s : str
-        The (continuation-spliced) shell text being scanned.
+        The shell text being scanned (continuations at ``i`` already spliced).
     i : int
-        Index of the ``[``.
+        Index of the ``$``.
+    in_dq : bool
+        True when the ``$`` is inside double quotes.
 
     Returns
     -------
-    bool
-        True when a parameter expansion ends right before ``i``.
+    tuple[str, int, str]
+        The (possibly further spliced) text, the index after the expansion, and
+        ``"param"``, ``"literal"`` or ``"bad"``.
     """
-    j = i
-    while j > 0 and (s[j - 1].isalnum() or s[j - 1] == "_"):
-        j -= 1
-    if j < i and j > 0 and s[j - 1] == "$":
-        return True
-    return i >= 2 and s[i - 1] in "#?@*!$-" and s[i - 2] == "$"
+    nxt = s[i + 1 : i + 2]
+    if nxt == "{":
+        close = s.find("}", i + 2)
+        if close == -1 or not _PLAIN_PARAM.match(s[i + 2 : close]):
+            return s, i, "bad"
+        k, name_like = close + 1, True
+    elif nxt and nxt in _NAME_CHARS and not nxt.isdigit():
+        k = i + 1
+        while True:
+            s = _splice_continuations(s, k)
+            if k < len(s) and s[k] in _NAME_CHARS:
+                k += 1
+            else:
+                break
+        name_like = True
+    elif nxt and nxt in _SPECIAL_PARAMS:
+        k, name_like = i + 2, False
+    elif not nxt or nxt in " \t\n" or (in_dq and nxt == '"'):
+        return s, i + 1, "literal"
+    else:
+        return s, i, "bad"
+    s = _splice_continuations(s, k)
+    after = s[k : k + 1]
+    if after == "[" or (not name_like and after and after in _NAME_CHARS | {"{"}):
+        return s, i, "bad"
+    return s, k, "param"
+
+
+# Unquoted characters that end a word (rule 3 tracks `$` and `[`/`]` per word).
+_WORD_BREAKS = frozenset(" \t\n;&|<>")
+# The only characters a backslash may escape inside double quotes.
+_DQ_ESCAPABLE = frozenset('"\\`$')
 
 
 def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
     """Extract command/process substitutions and blank them out.
 
-    ``ok`` in the result is False on unbalanced quotes/parens so the caller
-    defers. Single-quoted regions are literal (no substitution); double-quoted
-    regions still expand ``$()``/backticks. Word-initial ``#`` comments are
-    dropped up to the newline (a ``'`` inside one is not a quote), and ANSI-C
-    ``$'...'`` strings (where a backslash-escaped ``'`` does not close the
-    string) are not modelled, so they fail closed.
+    ``ok`` in the result is False whenever the command leaves the conservative
+    syntax subset the gate can reason about, so the caller defers. Single-quoted
+    regions are literal (no substitution); double-quoted regions still expand
+    ``$()``/backticks and ``$NAME``. Word-initial ``#`` comments are dropped up
+    to the newline (a ``'`` inside one is not a quote). Backslash-newline
+    continuations outside single quotes and comments are spliced out first, as
+    the shell does, so they cannot hide anything below.
 
-    Also fail closed, because they hide a body or can run code: an unquoted
-    heredoc ``<<`` (a ``<<<`` here-string is fine), ``${...}`` unless its body
-    is a plain name or a single digit, ``$[...]``, zsh ``$~`` and ``$x[...]``
-    subscripts, and any unquoted
-    ``(`` or ``)`` that is not part of ``$(``, ``<(`` or ``>(``. Backslash-
-    newline continuations outside single quotes and comments are spliced out
-    first, as bash does, so they cannot hide any of these. Both the allow view
-    and the banned/withhold view go through this scanner, so they cannot drift.
+    Outside the subset (``ok`` is False):
+
+    - any backslash other than a continuation, except a double-quoted escape of
+      a double quote, a backslash, a backtick or ``$`` (rule 1);
+    - any ``$`` form ``_read_dollar`` does not accept (rule 2), and ANSI-C
+      ``$'...'`` strings;
+    - an unquoted ``[`` or ``]`` in a word that also holds a ``$`` expansion or
+      substitution (rule 3; zsh may subscript it and evaluate math);
+    - an unquoted heredoc ``<<`` (a ``<<<`` here-string is fine);
+    - any unquoted ``(`` or ``)`` that is not part of ``$(``, ``<(`` or ``>(``.
+
+    Both the allow view and the banned/withhold view go through this scanner,
+    so they cannot drift.
 
     Parameters
     ----------
@@ -302,6 +371,7 @@ def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
     inners: list[str] = []
     out: list[str] = []
     i, n, quote = 0, len(s), None
+    word_dollar = word_bracket = False
     while i < n:
         if quote != "'":
             # Bash deletes a backslash-newline outside single quotes before it
@@ -321,11 +391,12 @@ def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
                 quote = None
             i += 1
             continue
-        if quote == '"' and c == "\\" and i + 1 < n:
-            # Inside double quotes a backslash escapes the next char, so a `\"`
-            # does NOT close the string (e.g. a commit message with \"quoted\").
-            out.append(c)
-            out.append(s[i + 1])
+        if quote == '"' and c == "\\":
+            # A double-quoted `\"`, `\\`, `` \` `` or `\$` cannot move a word or
+            # operator boundary (a commit message with \"quoted\" text is fine).
+            if s[i + 1 : i + 2] not in _DQ_ESCAPABLE or i + 1 >= n:
+                return inners, "", False
+            out.append(s[i : i + 2])
             i += 2
             continue
         active = quote == '"' or quote is None
@@ -353,37 +424,36 @@ def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
             out.append(c)
             i += 1
             continue
-        if quote is None and c == "\\" and i + 1 < n:
-            out.append(c)
-            out.append(s[i + 1])
-            i += 2
-            continue
+        if quote is None and c == "\\":
+            return inners, "", False  # rule 1: only continuations, spliced above
         if quote is None and s.startswith("<<<", i):
             out.append("<<<")  # here-string: one word of input, no body
+            word_dollar = word_bracket = False
             i += 3
             continue
         if quote is None and s.startswith("<<", i):
             return inners, "", False  # heredoc body is not modelled
-        if active and s.startswith("${", i):
-            end = s.find("}", i + 2)
-            if end == -1 or not _PLAIN_PARAM.match(s[i + 2 : end]):
-                return inners, "", False
-            out.append(s[i : end + 1])
-            i = end + 1
-            continue
-        if active and s.startswith("$[", i):
-            return inners, "", False  # legacy arithmetic expansion
-        if active and s.startswith("$~", i):
-            return inners, "", False  # zsh GLOB_SUBST: a glob qualifier runs code
-        if active and c == "[" and _follows_param(s, i):
-            return inners, "", False  # zsh `$x[y]`: y is evaluated as math
         if active and s.startswith("$(", i):
             inner, j, ok = _read_paren(s, i + 2)
-            if not ok:
+            if not ok or word_bracket:
+                return inners, "", False
+            s = _splice_continuations(s, j)
+            n = len(s)
+            if s[j : j + 1] == "[":
                 return inners, "", False
             inners.append(inner)
             out.append(SUBST_PLACEHOLDER)
+            word_dollar = True
             i = j
+            continue
+        if active and c == "$":
+            s, k, dollar = _read_dollar(s, i, quote == '"')
+            n = len(s)
+            if dollar == "bad" or (dollar == "param" and word_bracket):
+                return inners, "", False
+            word_dollar = word_dollar or dollar == "param"
+            out.append(s[i:k])
+            i = k
             continue
         if (
             active
@@ -395,14 +465,16 @@ def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
                 return inners, "", False
             inners.append(inner)
             out.append(SUBST_PLACEHOLDER)
+            word_dollar, word_bracket = True, False
             i = j
             continue
         if active and c == "`":
             inner, j, ok = _read_backtick(s, i + 1)
-            if not ok:
+            if not ok or word_bracket:
                 return inners, "", False
             inners.append(inner)
             out.append(SUBST_PLACEHOLDER)
+            word_dollar = True
             i = j
             continue
         if quote is None and c in "()":
@@ -410,6 +482,12 @@ def scan_substitutions(s: str) -> tuple[list[str], str, bool]:
             # definition, arithmetic `$((`'s inner paren, zsh `=(...)` or glob
             # qualifier, or a `case` arm. None is modelled -> fail closed.
             return inners, "", False
+        if quote is None and c in _WORD_BREAKS:
+            word_dollar = word_bracket = False
+        elif quote is None and c in "[]":
+            if word_dollar:
+                return inners, "", False  # rule 3: `$x[y]`, `$x/[ab]`, ...
+            word_bracket = True
         out.append(c)
         i += 1
     if quote is not None:
@@ -438,6 +516,7 @@ def split_subcommands(s: str) -> list[str]:
     segs: list[str] = []
     buf: list[str] = []
     i, n, quote = 0, len(s), None
+    escaped = False  # True when buf[-1] was escaped by a backslash
     while i < n:
         c = s[i]
         if quote:
@@ -451,16 +530,19 @@ def split_subcommands(s: str) -> list[str]:
             if c == quote:
                 quote = None
             i += 1
+            escaped = False
             continue
         if c in ("'", '"'):
             quote = c
             buf.append(c)
             i += 1
+            escaped = False
             continue
         if c == "\\" and i + 1 < n:
             buf.append(c)
             buf.append(s[i + 1])
             i += 2
+            escaped = True
             continue
         if s[i : i + 2] in ("&&", "||"):
             segs.append("".join(buf))
@@ -475,7 +557,7 @@ def split_subcommands(s: str) -> list[str]:
         if c == "&":
             # `&&` was consumed above; here `&` is either a background separator
             # or part of a redirection (`2>&1`, `>&2`, `&>`). Only split the former.
-            prev = buf[-1] if buf else ""
+            prev = buf[-1] if buf and not escaped else ""
             nxt = s[i + 1] if i + 1 < n else ""
             if prev not in (">", "<") and nxt != ">":
                 segs.append("".join(buf))
@@ -484,49 +566,113 @@ def split_subcommands(s: str) -> list[str]:
                 continue
         buf.append(c)
         i += 1
+        escaped = False
     segs.append("".join(buf))
     return [seg.strip() for seg in segs if seg.strip()]
 
 
-def strip_env_and_wrappers(
-    s: str, safe_env: frozenset[str] = BASE_SAFE_ENV_NAMES
-) -> str:
-    """Strip leading env-var assignments and process wrappers.
+def _safe_value(value: str) -> bool:
+    """Return True when an assignment value can be allowed (rule 4).
 
-    Empty when the command is a pure assignment. Only assignments named in
-    ``safe_env`` are stripped; any other leading assignment stays in place, so
-    the allow-pattern match sees (and normally rejects) it. A bare assignment
-    to an ``UNSAFE_BARE_NAMES`` / prefixed loader variable is left in place
-    too, so it defers.
+    No backslash, backtick, ``[``, ``]``, ``(`` or ``)``, and no ``$`` other
+    than a plain ``$NAME`` / ``${NAME}`` (which covers the ``$S`` placeholder of
+    an already-vetted substitution).
+
+    Parameters
+    ----------
+    value : str
+        The text after ``=``, quotes included.
+
+    Returns
+    -------
+    bool
+        True when the value is allowable.
+    """
+    if any(ch in value for ch in "\\`[]()"):
+        return False
+    return "$" not in _PLAIN_REF.sub("", value)
+
+
+def _skip_blanks(s: str, i: int) -> int:
+    while i < len(s) and s[i] in " \t\n":
+        i += 1
+    return i
+
+
+def split_prefix(s: str, safe_env: frozenset[str]) -> tuple[str, bool]:
+    """Strip leading assignments and wrappers from one simple command.
+
+    Words are read with the quote-aware ``_read_word``, so an escaped or quoted
+    space never ends an assignment or an option. Allowed, and stripped:
+
+    - ``NAME=value`` when NAME is in ``safe_env`` (never a zsh integer special)
+      and the value passes ``_safe_value`` (rule 4);
+    - bare ``time``/``nohup``/``command``/``builtin``/``nice``,
+      ``timeout <duration>``, and ``env`` with only ``-i`` / ``-u NAME``
+      followed by such assignments (rule 5).
+
+    Anything else in the prefix (another assignment, an array-element
+    assignment, a wrapper option, a wrapper with no command) makes the
+    command not allowable.
 
     Parameters
     ----------
     s : str
-        A single simple command segment.
+        One simple command with its redirects already removed.
     safe_env : frozenset[str]
-        Variable names whose leading assignment may be stripped.
+        Variable names that may be assigned.
 
     Returns
     -------
-    str
-        The command without leading assignments and wrappers, or an empty
-        string for a pure assignment.
+    tuple[str, bool]
+        The command after the prefix (or ``s`` unchanged when not allowable)
+        and an allowable flag. An empty command means pure assignments.
     """
-    prev = None
-    while prev != s:
-        prev = s
-        m = ENV_ASSIGN.match(s)
-        if m and m.group("name") in safe_env:
-            s = s[m.end() :]
-        s = TIMEOUT.sub("", s, count=1)
-        s = WRAP.sub("", s, count=1)
-    bare = BARE_ASSIGN.match(s.strip())
-    if bare:
-        name = bare.group("name")
-        if name in UNSAFE_BARE_NAMES or name.startswith(UNSAFE_BARE_PREFIXES):
-            return s
-        return ""
-    return s
+    names = safe_env - ZSH_INTEGER_SPECIALS
+    i = _skip_blanks(s, 0)
+    assign_ok, wrapped = True, False
+    while i < len(s):
+        word, j, ok = _read_word(s, i)
+        if not ok or not word:
+            return s, False
+        if _ARRAY_ASSIGN_WORD.match(word) and "=" in word:
+            return s, False
+        m = _ASSIGN_WORD.match(word)
+        if m and assign_ok:
+            if m.group(1) not in names or m.group(2) != "=":
+                return s, False
+            if not _safe_value(word[m.end() :]):
+                return s, False
+            i = _skip_blanks(s, j)
+            continue
+        if word in _BARE_WRAPPERS or word in ("timeout", "env"):
+            i = _skip_blanks(s, j)
+            nxt, k, ok = _read_word(s, i)
+            if word == "timeout":
+                if not ok or not _DURATION.match(nxt):
+                    return s, False
+                i = _skip_blanks(s, k)
+            elif word == "env":
+                while ok and nxt.startswith("-"):
+                    if nxt == "-i":
+                        i = _skip_blanks(s, k)
+                    elif nxt == "-u":
+                        name, k2, ok2 = _read_word(s, _skip_blanks(s, k))
+                        if not ok2 or not _NAME.match(name):
+                            return s, False
+                        i = _skip_blanks(s, k2)
+                    else:
+                        return s, False
+                    nxt, k, ok = _read_word(s, i)
+            elif nxt.startswith("-"):
+                return s, False
+            wrapped, assign_ok = True, word == "env"
+            continue
+        break
+    rest = s[i:].strip()
+    if wrapped and not rest:
+        return s, False  # `env` / `nohup` alone runs something we did not vet
+    return rest, True
 
 
 def _read_word(s: str, i: int) -> tuple[str, int, bool]:
@@ -652,8 +798,13 @@ def redirect_target_ok(
     cwd: str,
     home: str,
     dir_changed: bool = False,
+    protected: Sequence[str] = (),
 ) -> bool:
     """Return True iff a redirect target resolves inside an allowed root.
+
+    A target under a ``protected`` directory (the gate's own config, VCS
+    internals) is never allowed, even inside a root; both sides are compared
+    after ``realpath``, so a symlink cannot route around it.
 
     Parameters
     ----------
@@ -668,12 +819,14 @@ def redirect_target_ok(
     dir_changed : bool
         True when the command runs ``cd``/``pushd``/``popd`` somewhere, so a
         relative target no longer resolves against ``cwd`` and defers.
+    protected : Sequence[str]
+        Directories whose subtrees are never write targets.
 
     Returns
     -------
     bool
         True when the target is ``/dev/null`` or resolves inside an allowed
-        root.
+        root and outside every protected directory.
     """
     t = target.strip()
     quoted = len(t) >= 2 and (t[:1], t[-1:]) in (('"', '"'), ("'", "'"))
@@ -694,8 +847,14 @@ def redirect_target_ok(
     # realpath, not normpath: an in-root symlink that points outside every root
     # (`link -> /etc`) must not count as an in-root write.
     p = os.path.realpath(t if t.startswith("/") else os.path.join(cwd, t))
-    real_roots = [os.path.realpath(r) for r in roots]
-    return any(p == r or p.startswith(r.rstrip("/") + "/") for r in real_roots)
+    if any(_within(p, os.path.realpath(d)) for d in protected):
+        return False
+    return any(_within(p, os.path.realpath(r)) for r in roots)
+
+
+def _within(path: str, root: str) -> bool:
+    """Return True when ``path`` is ``root`` or lies under it."""
+    return path == root or path.startswith(root.rstrip("/") + "/")
 
 
 def dequote_leading(cmd: str) -> str:
@@ -804,6 +963,7 @@ def simple_command_allowed(
     home: str,
     safe_env: frozenset[str] = BASE_SAFE_ENV_NAMES,
     dir_changed: bool = False,
+    protected: Sequence[str] = (),
 ) -> bool:
     """Vet a single (non-control-structure) command.
 
@@ -820,29 +980,57 @@ def simple_command_allowed(
     home : str
         Home directory for ``~`` expansion.
     safe_env : frozenset[str]
-        Variable names whose leading assignment may be stripped.
+        Variable names that may be assigned.
     dir_changed : bool
         True when the surrounding command changes directory.
+    protected : Sequence[str]
+        Directories whose subtrees are never write targets.
 
     Returns
     -------
     bool
-        True when the command and its redirects are allowed.
+        True when the command, its prefix and its redirects are allowed.
     """
-    s = strip_env_and_wrappers(seg, safe_env)
-    if not s.strip():
-        return True  # pure variable assignment(s): executes nothing
-    targets, s2, ok = extract_redirect_targets(s)
+    targets, s2, ok = extract_redirect_targets(seg)
     if not ok:
         return False
     for t in targets:
-        if not redirect_target_ok(t, roots, cwd, home, dir_changed):
+        if not redirect_target_ok(t, roots, cwd, home, dir_changed, protected):
             return False
-    cmd = s2.strip()
+    cmd, ok = split_prefix(s2, safe_env)
+    if not ok:
+        return False
     if not cmd:
-        return True
+        # Pure safe assignments run nothing; a redirect (even `2>&1`) with no
+        # command does (zsh runs $NULLCMD), so that defers.
+        return ">" not in seg and "<" not in seg
     candidates = {cmd, dequote_leading(cmd)}
     return any(pattern_matches(p, c, home) for c in candidates for p in patterns)
+
+
+def _loop_var_ok(seg: str, safe_env: frozenset[str]) -> bool:
+    """Return True when a ``for``/``select`` header assigns an allowable name.
+
+    Parameters
+    ----------
+    seg : str
+        The header segment, e.g. ``for f in a b``.
+    safe_env : frozenset[str]
+        Variable names that may be assigned.
+
+    Returns
+    -------
+    bool
+        True for a safe_env name (never a zsh integer special) or a lowercase
+        name with no special meaning in bash or zsh.
+    """
+    words = seg.split()
+    if len(words) < 2:
+        return False
+    name = words[1]
+    if name in safe_env - ZSH_INTEGER_SPECIALS:
+        return True
+    return bool(_LOOP_VAR.match(name)) and name not in ZSH_LOWERCASE_SPECIALS
 
 
 def segment_allowed(
@@ -853,6 +1041,7 @@ def segment_allowed(
     home: str,
     safe_env: frozenset[str] = BASE_SAFE_ENV_NAMES,
     dir_changed: bool = False,
+    protected: Sequence[str] = (),
 ) -> bool:
     """Vet one top-level subcommand, handling control-structure scaffolding.
 
@@ -880,7 +1069,9 @@ def segment_allowed(
     """
 
     def vet(part: str) -> bool:
-        return segment_allowed(part, patterns, roots, cwd, home, safe_env, dir_changed)
+        return segment_allowed(
+            part, patterns, roots, cwd, home, safe_env, dir_changed, protected
+        )
 
     seg = seg.strip()
     if seg.endswith("&"):
@@ -896,7 +1087,9 @@ def segment_allowed(
         # never prefix-matched as one string (mirrors the COND_HEADERS path).
         return all(vet(s) for s in split_subcommands(rest))
     if seg.startswith(WORDLIST_HEADERS):
-        return True  # iterates a word list; embedded $() vetted separately
+        # The word list is not executed (embedded $() is vetted separately),
+        # but the loop variable is assigned.
+        return _loop_var_ok(seg, safe_env)
     for header in COND_HEADERS:
         if seg.startswith(header):
             rest = seg[len(header) :].strip()
@@ -904,7 +1097,7 @@ def segment_allowed(
                 return True
             return all(vet(s) for s in split_subcommands(rest))
     return simple_command_allowed(
-        seg, patterns, roots, cwd, home, safe_env, dir_changed
+        seg, patterns, roots, cwd, home, safe_env, dir_changed, protected
     )
 
 
@@ -916,6 +1109,7 @@ def is_fully_allowed(
     home: str,
     safe_env: frozenset[str] = BASE_SAFE_ENV_NAMES,
     dir_changed: bool = False,
+    protected: Sequence[str] = (),
 ) -> bool:
     """Return True iff every executed command matches the allow-list.
 
@@ -939,6 +1133,8 @@ def is_fully_allowed(
         Variable names whose leading assignment may be stripped.
     dir_changed : bool
         True when an enclosing command already changed directory.
+    protected : Sequence[str]
+        Directories whose subtrees are never write targets.
 
     Returns
     -------
@@ -958,14 +1154,16 @@ def is_fully_allowed(
         return False
     for inner in inners:
         if not is_fully_allowed(
-            inner, patterns, roots, cwd, home, safe_env, dir_changed
+            inner, patterns, roots, cwd, home, safe_env, dir_changed, protected
         ):
             return False
     segs = split_subcommands(blanked)
     if not segs:
         return False
     return all(
-        segment_allowed(seg, patterns, roots, cwd, home, safe_env, dir_changed)
+        segment_allowed(
+            seg, patterns, roots, cwd, home, safe_env, dir_changed, protected
+        )
         for seg in segs
     )
 
@@ -1005,13 +1203,13 @@ def _collect_segment(seg: str, safe_env: frozenset[str], out: list[str]) -> bool
                 break
     if rest is not None:
         return all(_collect_segment(s, safe_env, out) for s in split_subcommands(rest))
-    s = strip_env_and_wrappers(seg, safe_env)
-    if not s.strip():
-        return True
-    _, s2, ok = extract_redirect_targets(s)
+    _, s2, ok = extract_redirect_targets(seg)
     if not ok:
         return False
-    cmd = s2.strip()
+    # The same prefix parser as the allow view. When the prefix is not
+    # allowable the whole command stays visible (so it is never read-only).
+    cmd, _ = split_prefix(s2, safe_env)
+    cmd = cmd.strip()
     if cmd:
         out.append(dequote_leading(cmd))
     return True
@@ -1072,6 +1270,17 @@ def simple_commands(
 ALLOW = "allow"
 DENY = "deny"
 NO_OPINION = "no_opinion"
+
+# Long options of the read-only commands that run a program or write a file.
+RUNNER_OPTIONS = (
+    "--pre",
+    "--pager",
+    "--hostname-bin",
+    "--output",
+    "--ext-diff",
+    "--textconv",
+    "--open-files-in-pager",
+)
 
 READ_ONLY_COMMANDS = frozenset(
     {"grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "head", "tail", "less"}
@@ -1169,17 +1378,16 @@ def _is_read_only(simple: str) -> bool:
     two = " ".join(words[:2])
     if words[0] not in READ_ONLY_COMMANDS and two not in READ_ONLY_COMMANDS:
         return False
-    # Options that make a "search" run an arbitrary program.
-    args = [w.lstrip("\"'") for w in words[1:]]
-    if words[0] == "rg":
-        return not any(w == "--pre" or w.startswith("--pre=") for w in args)
-    if two == "git grep":
-        # git accepts any unambiguous abbreviation of --open-files-in-pager.
-        return not any(
-            w.startswith("--op")
-            or (w.startswith("-") and not w.startswith("--") and "O" in w)
-            for w in args
-        )
+    # Options that make a "search" run a program or write a file. git (and
+    # some search tools) accept any unambiguous abbreviation of a long option,
+    # so a prefix of one counts too; a short cluster holding `O` is `-O`.
+    for w in (w.lstrip("\"'") for w in words[1:]):
+        name = w.split("=", 1)[0]
+        if len(name) > 2 and name.startswith("--"):
+            if any(opt.startswith(name) for opt in RUNNER_OPTIONS):
+                return False
+        elif name.startswith("-") and "O" in name:
+            return False
     return True
 
 
@@ -1255,14 +1463,18 @@ def shell_verdict(
     cwd: str,
     roots: Sequence[str],
     home: str,
+    protected: Sequence[str] = (),
 ) -> Verdict:
     """Decide a shell command: deny a banned hit, allow a listed one, else defer.
 
     A banned hit is forgiven only when every executed simple command is a
     read-only search, so ``rg old_call`` passes but ``rg old_call | sh`` and an
-    unparseable command do not.
+    unparseable command do not. A command longer than
+    ``MAX_ALLOW_COMMAND_CHARS`` is only checked for banned hits (unforgiven),
+    never allowed. ``protected`` directories are never write targets.
     """
-    simple = simple_commands(command, policy.safe_env)
+    too_long = len(command) > MAX_ALLOW_COMMAND_CHARS
+    simple = None if too_long else simple_commands(command, policy.safe_env)
     for banned in policy.banned:
         if not banned.regex.search(command):
             continue
@@ -1278,7 +1490,15 @@ def shell_verdict(
     forms = simple + [_normalize_for_withhold(c) for c in simple]
     if any(pattern_matches(w, c, home) for w in policy.withhold for c in forms):
         return Verdict(NO_OPINION)
-    if is_fully_allowed(command, policy.allow, roots, cwd, home, policy.safe_env):
+    if is_fully_allowed(
+        command,
+        policy.allow,
+        roots,
+        cwd,
+        home,
+        policy.safe_env,
+        protected=protected,
+    ):
         return Verdict(ALLOW)
     return Verdict(NO_OPINION)
 

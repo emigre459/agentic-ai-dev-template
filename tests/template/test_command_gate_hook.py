@@ -840,3 +840,46 @@ def test_gate_sh_continuation_heredoc_is_no_opinion(tmp_path: Path) -> None:
     payload = _bash(HEREDOC_SMUGGLE.replace("<<", "<\\\n<", 1))
     proc = _run(root, payload, entry="gate.sh")
     assert (proc.returncode, proc.stdout) == (0, "")
+
+
+# --- Syntax allowlist and protected paths (pre-merge review, 2026-11-17) ---------
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        ".agents/hooks/policy.json",
+        ".claude/settings.json",
+        ".git/hooks/pre-commit",
+        ".github/hooks/command-gate.json",
+        ".codex/hooks.json",
+        "cfg/settings.json",
+    ],
+)
+def test_protected_paths_are_never_write_targets(tmp_path: Path, target: str) -> None:
+    root = _project(tmp_path, {"allow": ["echo *"]}, {})
+    (root / "cfg").symlink_to(root / ".claude")
+    proc = _run(root, _claude("Bash", {"command": f"echo x > {target}"}, cwd=str(root)))
+    assert (proc.returncode, proc.stdout) == (0, "")
+
+
+def test_unprotected_in_root_write_still_allowed(tmp_path: Path) -> None:
+    root = _project(tmp_path, {"allow": ["echo *"]}, {})
+    payload = _claude("Bash", {"command": "echo x > out.txt"}, cwd=str(root))
+    assert _decision(_run(root, payload)) == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git add x \\>&touch pwned",
+        "CI=a\\ bunx touch pwned",
+        "env -S'touch pwned' git add x",
+        "path=./bin; git add x",
+        "NULLCMD=./evil.sh; >/dev/null",
+    ],
+)
+def test_gate_sh_syntax_allowlist_defers(tmp_path: Path, command: str) -> None:
+    root = _project(tmp_path, {"allow": ["git add *", "bunx *"]})
+    proc = _run(root, _bash(command), entry="gate.sh")
+    assert (proc.returncode, proc.stdout) == (0, "")

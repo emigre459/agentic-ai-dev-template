@@ -48,6 +48,13 @@ PATTERNS = [
     "tail:*",
     "git status *",
     "git push *",
+    "bunx *",
+]
+# Gate config and VCS internals inside the project root: never a write target.
+PROTECTED = [
+    f"/repo/{d}"
+    for d in (".git", ".claude", ".agents", ".codex", ".cursor", ".gemini")
+    + (".factory", ".augment", ".github/hooks")
 ]
 
 
@@ -107,8 +114,6 @@ HARDENED_ALLOW_CASES = [
     "echo x # just a comment",
     "echo 'a # not a comment'",
     "echo $#",
-    # Command-substitution assignment still works.
-    'ROOT="$(git rev-parse --show-toplevel)" && echo $ROOT',
     # Telemetry/display env toggles are still stripped before matching.
     "PYTHONUNBUFFERED=1 uv run pytest -q",
 ]
@@ -244,7 +249,6 @@ def test_base_safe_env_names() -> None:
             "NO_COLOR",
             "FORCE_COLOR",
             "CLICOLOR",
-            "COLUMNS",
             "TZ",
             "LANG",
             "LC_ALL",
@@ -483,12 +487,206 @@ ADVERSARIAL_DEFER_CASES = [
     "y='a[$(touch /tmp/P)]'; echo \"$x[y]\"",
     "echo $1[y]",
     "y='a[$(touch /tmp/P)]'; echo $x\\\n[y]",
+    # --- Syntax allowlist (pre-merge review, 2026-11-17) ---
+    # The user's decision: under the user's choice to allow only a conservative
+    # syntax subset, this used-to-allow case now defers: ROOT is not a safe_env
+    # name, so its assignment is not allowable.
+    'ROOT="$(git rev-parse --show-toplevel)" && echo $ROOT',
+    # C1: an escaped `>`/`<` is not a redirect, so the `&` after it separates.
+    "git add x \\>&touch pwned",
+    "git add x \\<&touch pwned",
+    # C2: an escaped space must not end an assignment value or a wrapper option.
+    "CI=a\\ bunx touch pwned",
+    "CI='a'\\ bunx touch pwned",
+    "env -u\\ bunx touch pwned",
+    # C3: only bare wrappers (and `env -i`/`-u NAME`) are stripped.
+    'env -S"touch\\_pwned" git add x',
+    "env -S'touch pwned' git add x",
+    "env -P./bin git add x",
+    "env -C /tmp git add x",
+    "env --chdir=/tmp git add x",
+    "env --split-string='touch pwned' git add x",
+    "env",
+    "nice -n 5 git add x",
+    "stdbuf -oL git add x",
+    "timeout -s KILL 5 git add x",
+    "timeout --foreground 5 git add x",
+    "command -p git add x",
+    "time -p git add x",
+    "nohup -- git add x",
+    # C4a: zsh `$#x[y]`, `$+x[y]`, `$^x[y]`, `$=x[y]` evaluate y as math.
+    "git add $#x[y]",
+    "git add $+x[y]",
+    "git add $^x[y]",
+    "git add $=x[y]",
+    'git add "$#x[y]"',
+    "git add $#x",
+    "git add ${x}[y]",
+    'git add "${x}[y]"',
+    "git add $x/[ab]",
+    'git add "$x"[ab]',
+    "git add $(echo x)[ab]",
+    'echo $"x"',
+    "echo $%",
+    "echo $12",
+    # C4b: assigning a zsh integer special evaluates the value as math.
+    "SECONDS='path[$(touch pwned)]'; git add x",
+    "COLUMNS=y git add x",
+    "HISTSIZE=y git add x",
+    "LINES=y git add x",
+    # C5: only safe_env names may be assigned, and a redirect alone defers.
+    "path=./bin; git add x",
+    "NULLCMD=./evil.sh; >/dev/null",
+    ">/dev/null",
+    "2>&1",
+    "EDITOR=./evil.sh; git commit -m x",
+    "VISUAL=./evil.sh git commit -m x",
+    "x[y]=1; echo hi",
+    "CI=$x[y] git add x",
+    "CI=a[b] git add x",
+    "CI=\\x git add x",
+    # A loop variable is an assignment too (zsh `path` is tied to PATH).
+    "for path in ./bin; do git add x; done",
+    "for SECONDS in 1; do echo x; done",
+    "for UID in 1; do echo x; done",
+    # Rule 1: no backslash outside single quotes but a continuation, or a
+    # double-quoted escape of `"`, `\\`, backtick or `$`.
+    "echo a\\ b",
+    'echo "a\\nb"',
+    # I1: gate config and VCS internals are never write targets.
+    "git add x > .agents/hooks/policy.json",
+    "git add x >> .claude/settings.json",
+    "git add x >> .git/hooks/pre-commit",
+    "echo x > /repo/.github/hooks/command-gate.json",
+    "echo x > .codex/hooks.json",
+    "echo x > .gemini/settings.json",
 ]
 
 
 @pytest.mark.parametrize("cmd", ADVERSARIAL_DEFER_CASES)
 def test_adversarial_deferred(cmd: str) -> None:
-    assert GATE.is_fully_allowed(cmd, PATTERNS, ROOTS, CWD, HOME) is False
+    assert (
+        GATE.is_fully_allowed(cmd, PATTERNS, ROOTS, CWD, HOME, protected=PROTECTED)
+        is False
+    )
+
+
+SYNTAX_ALLOW_CASES = [
+    "echo [ab] *.py",
+    'echo "$HOME" $1 $# $? $$ $@ $* $- $0 ${HOME} ${1}',
+    'echo "x$" a$ $',
+    "CI=1 bunx foo",
+    'CI="$(git rev-parse HEAD)" git add x',
+    "CI=$HOME git add x",
+    "env -i -u FOO CI=1 bunx foo",
+    "env CI=1 git add x",
+    "timeout 5 git add x",
+    "timeout 1.5m git add x",
+    "nice git add x",
+    "nohup git add x",
+    "time git add x",
+    "command git add x",
+    "builtin echo x",
+    "for f in a b; do echo $f; done",
+    "NO_COLOR=1 git add x",
+    "CI=1",
+    'git commit -m "a \\"b\\" \\$c \\\\ \\`d\\`"',
+    "[ -f x ] && echo y",
+    "echo x > out.txt",
+    "echo x > /repo/.gitignore",
+    "echo x > /repo/.github/workflows/x.yml",
+]
+
+
+@pytest.mark.parametrize("cmd", SYNTAX_ALLOW_CASES)
+def test_syntax_subset_allowed(cmd: str) -> None:
+    patterns = [*PATTERNS, "[ *"]
+    assert (
+        GATE.is_fully_allowed(cmd, patterns, ROOTS, CWD, HOME, protected=PROTECTED)
+        is True
+    )
+
+
+def test_split_respects_escaped_redirect_chars() -> None:
+    assert GATE.split_subcommands("git add x \\>&touch pwned") == [
+        "git add x \\>",
+        "touch pwned",
+    ]
+
+
+def _old_call_policy(**kwargs: Any) -> Any:
+    banned = GATE.BannedPattern.from_dict(
+        {"pattern": "old_call", "message": "gone", "replacement": "new_call"}
+    )
+    return GATE.Policy(banned=(banned,), **kwargs)
+
+
+def test_escaped_redirect_banned_hit_denies() -> None:
+    assert _shell("rg x \\>&old_call", _old_call_policy()).decision == GATE.DENY
+
+
+def test_escaped_redirect_does_not_bypass_withhold() -> None:
+    policy = GATE.Policy(allow=("git *",), withhold=("git push *",))
+    verdict = _shell("git add x \\>&git push origin main", policy)
+    assert verdict.decision == GATE.NO_OPINION
+
+
+def test_zsh_integer_special_never_safe_env() -> None:
+    policy = GATE.Policy(
+        allow=("git add *",),
+        safe_env=GATE.BASE_SAFE_ENV_NAMES | {"SECONDS", "COLUMNS", "LINES"},
+    )
+    for name in ("SECONDS", "COLUMNS", "LINES"):
+        assert _shell(f"{name}=1 git add x", policy).decision == GATE.NO_OPINION
+    assert "COLUMNS" not in GATE.BASE_SAFE_ENV_NAMES
+
+
+def test_protected_path_through_symlink_defers(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / ".claude").mkdir(parents=True)
+    (root / "cfg").symlink_to(root / ".claude")
+    protected = [str(root / ".claude")]
+    ok = GATE.redirect_target_ok(
+        "cfg/settings.json", [str(root)], str(root), "/h", protected=protected
+    )
+    assert ok is False
+    assert GATE.redirect_target_ok(
+        "src/x", [str(root)], str(root), "/h", protected=protected
+    )
+
+
+def test_overlong_command_is_no_opinion_but_banned_still_denies() -> None:
+    long_cmd = "echo " + "a" * (64 * 1024)
+    assert _shell(long_cmd, GATE.Policy(allow=("echo *",))).decision == GATE.NO_OPINION
+    banned = _shell(long_cmd + " old_call", _old_call_policy(allow=("echo *",)))
+    assert banned.decision == GATE.DENY
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "rg --pre=sh 'old_call' .",
+        "rg --pr=sh old_call .",
+        "rg --hostname-bin=sh old_call",
+        "rg --hostname sh old_call",
+        "git log --output=x -S old_call",
+        "git log --out=x -S old_call",
+        "git diff --ext-diff old_call",
+        "git diff --ext old_call",
+        "git show --textconv old_call",
+        "git log --pager=sh old_call",
+        "git grep --open-files-in-pager=sh old_call",
+        "git grep -O old_call",
+        "git grep -Osh old_call",
+    ],
+)
+def test_read_only_forgiveness_withdrawn_for_runner_options(cmd: str) -> None:
+    assert _shell(cmd, _old_call_policy()).decision == GATE.DENY, cmd
+
+
+def test_read_only_forgiveness_kept_for_plain_search() -> None:
+    for cmd in ("rg old_call src", "git log -S old_call", "grep -rn old_call ."):
+        assert _shell(cmd, _old_call_policy()).decision == GATE.NO_OPINION, cmd
 
 
 @pytest.mark.parametrize(
@@ -557,14 +755,18 @@ def test_git_grep_abbreviated_pager_option_denies() -> None:
     [
         "echo a \\\n  b",
         'git commit -m "wip" \\\n  --no-verify',
-        # `\\` before a newline is an escaped backslash: the newline separates.
-        "echo x\\\\\necho y",
         # Inside single quotes backslash-newline is literal.
         "echo 'a\\\nb'",
     ],
 )
 def test_line_continuations_still_allowed(cmd: str) -> None:
     assert allowed(cmd) is True
+
+
+def test_escaped_backslash_before_newline_defers() -> None:
+    # Allowed before the syntax allowlist (2026-11-17). An unquoted `\\` is a
+    # backslash other than a continuation, so rule 1 now defers it.
+    assert allowed("echo x\\\\\necho y") is False
 
 
 def test_multi_line_continued_command_allowed() -> None:
