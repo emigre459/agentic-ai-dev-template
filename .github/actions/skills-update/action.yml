@@ -3,26 +3,19 @@ description: >-
   Update every agent skill installed with the skills CLI and open (or refresh) one
   "Update agent skills" PR: tag-pinned skills move to their source's newest stable
   release, branch-tracking skills to the branch tip. The branch is rebuilt on the
-  latest base each run; with no drift an open update PR is closed. The caller checks
-  the repo out (full history) and sets up Node 22; the PR never merges itself.
+  latest base each run; with no drift an open update PR is closed. A pushed or new PR
+  gets auto-merge enabled, so it lands once its required checks pass. The caller checks
+  the repo out (full history) and sets up Node 22.
 inputs:
   token:
     description: >-
-      Token for gh AND for git pushes (GITHUB_TOKEN, a GitHub App token or a PAT).
+      Token for gh AND for git pushes: a GitHub App token or a PAT, never the
+      workflow's GITHUB_TOKEN (its pushes do not trigger the PR's pull_request CI).
       The action replaces the checkout's persisted git credentials with it, so the
-      push is made as this token's identity (a GitHub App or PAT push triggers the
-      PR's pull_request CI; a GITHUB_TOKEN push does not). It needs contents: write
-      and pull-requests: write, plus actions: write when dispatch-ci is "true".
-      Only the push and the PR step see it: the `npx skills` steps run with the
-      job's own github.token instead.
+      push is made as this token's identity. It needs contents: write and
+      pull-requests: write. Only the push and the PR step see it: the
+      `npx skills` steps run with the job's own github.token instead.
     required: true
-  dispatch-ci:
-    description: >-
-      "true" to dispatch the CI workflow on the update branch after a push or a new
-      PR. Needed with GITHUB_TOKEN, whose pushes do not trigger pull_request CI
-      normally; leave "false" with a GitHub App token or PAT.
-    required: false
-    default: "false"
   branch:
     description: Branch the update is committed on, rebuilt from base every run.
     required: false
@@ -31,10 +24,6 @@ inputs:
     description: Branch the update PR targets.
     required: false
     default: main
-  ci-workflow:
-    description: Workflow file dispatched on the branch when dispatch-ci is "true".
-    required: false
-    default: ci.yml
   labels:
     description: Space-separated labels added to the PR (best-effort).
     required: false
@@ -116,7 +105,5 @@ runs:
         GH_CMD: gh
         BRANCH: ${{ inputs.branch }}
         BASE: ${{ inputs.base }}
-        DISPATCH_CI: ${{ inputs.dispatch-ci }}
-        CI_WORKFLOW: ${{ inputs.ci-workflow }}
         PR_LABELS: ${{ inputs.labels }}
       run: bash "$RUNNER_TEMP/skills_update_pr.sh"

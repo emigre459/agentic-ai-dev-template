@@ -500,8 +500,10 @@ elif args[:2] == ["pr", "edit"]:
 elif args[:2] == ["pr", "close"]:
     if os.path.exists(state):
         os.remove(state)
-elif args[:2] == ["workflow", "run"]:
-    pass
+elif args[:2] == ["pr", "merge"]:
+    if os.environ.get("FAKE_GH_FAIL_MERGE"):
+        sys.stderr.write("auto-merge is not allowed\n")
+        sys.exit(1)
 else:
     sys.stderr.write("unexpected gh call: %r\n" % (args,))
     sys.exit(2)
@@ -598,8 +600,6 @@ class _Helper:
             "BASE": "main",
             "GH_CMD": str(self.gh),
             "PR_LABELS": "dependencies",
-            "DISPATCH_CI": "true",
-            "CI_WORKFLOW": "ci.yml",
             "SKILLS_UPDATE_SUMMARY": (
                 summary if isinstance(summary, str) else json.dumps(summary)
             ),
@@ -621,6 +621,9 @@ class _Helper:
             return []
         rows = [json.loads(line) for line in self.log.read_text().splitlines()]
         return [r for r in rows if r[: len(prefix)] == list(prefix)]
+
+    def origin_sha(self) -> str:
+        return _git(self.origin, "rev-parse", f"refs/heads/{self.branch}")
 
     def push_count(self) -> int:
         if not self.pushes.exists():
@@ -654,7 +657,7 @@ def test_no_drift_exits_0_without_push(helper: _Helper) -> None:
     assert helper.push_count() == 0
     assert not helper.remote_branch_exists()
     assert helper.gh_calls("pr", "create") == []
-    assert helper.gh_calls("workflow") == []
+    assert helper.gh_calls("pr", "merge") == []
 
 
 @needs_bash
@@ -673,7 +676,7 @@ def test_no_drift_closes_stale_update_pr(helper: _Helper) -> None:
 
 @needs_bash
 @needs_node
-def test_first_run_pushes_creates_pr_and_dispatches(helper: _Helper) -> None:
+def test_first_run_pushes_creates_pr_and_enables_auto_merge(helper: _Helper) -> None:
     helper.make_drift()
     result = helper.run()
     assert result.returncode == 0, result.stderr
@@ -684,7 +687,17 @@ def test_first_run_pushes_creates_pr_and_dispatches(helper: _Helper) -> None:
     assert create[create.index("--head") + 1] == "skills-update"
     assert create[create.index("--base") + 1] == "main"
     assert helper.gh_calls("pr", "edit", "7", "--add-label", "dependencies")
-    assert helper.gh_calls("workflow", "run", "ci.yml", "--ref", "skills-update")
+    assert helper.gh_calls("pr", "merge") == [
+        [
+            "pr",
+            "merge",
+            "7",
+            "--auto",
+            "--squash",
+            "--match-head-commit",
+            helper.origin_sha(),
+        ]
+    ]
     # The commit holds exactly the drift, on top of origin/main.
     assert _git(helper.work, "rev-parse", "HEAD^") == _git(
         helper.work, "rev-parse", "origin/main"
@@ -696,7 +709,7 @@ def test_first_run_pushes_creates_pr_and_dispatches(helper: _Helper) -> None:
 
 @needs_bash
 @needs_node
-def test_second_identical_run_reuses_pr_and_skips_push_and_dispatch(
+def test_second_identical_run_reuses_pr_and_skips_push_and_auto_merge(
     helper: _Helper,
 ) -> None:
     helper.make_drift()
@@ -709,14 +722,14 @@ def test_second_identical_run_reuses_pr_and_skips_push_and_dispatch(
     assert result.returncode == 0, result.stderr
     assert helper.push_count() == 1  # still just the first run's push
     assert helper.gh_calls("pr", "create") == []
-    assert helper.gh_calls("workflow") == []
+    assert helper.gh_calls("pr", "merge") == []
     edits = helper.gh_calls("pr", "edit", "7", "--body")
     assert len(edits) == 1  # the body is refreshed on the existing PR
 
 
 @needs_bash
 @needs_node
-def test_changed_drift_force_pushes_and_dispatches_again(helper: _Helper) -> None:
+def test_changed_drift_force_pushes_and_re_enables_auto_merge(helper: _Helper) -> None:
     helper.make_drift()
     assert helper.run().returncode == 0
     helper.log.unlink()
@@ -726,7 +739,48 @@ def test_changed_drift_force_pushes_and_dispatches_again(helper: _Helper) -> Non
     assert result.returncode == 0, result.stderr
     assert helper.push_count() == 2
     assert helper.gh_calls("pr", "create") == []
-    assert helper.gh_calls("workflow", "run", "ci.yml", "--ref", "skills-update")
+    assert helper.gh_calls("pr", "merge") == [
+        [
+            "pr",
+            "merge",
+            "7",
+            "--auto",
+            "--squash",
+            "--match-head-commit",
+            helper.origin_sha(),
+        ]
+    ]
+
+
+@needs_bash
+@needs_node
+def test_create_on_an_already_current_branch_matches_the_remote_sha(
+    helper: _Helper,
+) -> None:
+    helper.make_drift()
+    assert helper.run().returncode == 0
+    helper.state.unlink()  # the PR was closed by hand; the branch is still current
+    helper.log.unlink()
+    helper.rebuild_branch()
+    helper.make_drift()
+    local_head = _git(helper.work, "rev-parse", "HEAD")  # a fresh commit, new SHA
+    result = helper.run()
+    assert result.returncode == 0, result.stderr
+    assert helper.push_count() == 1  # not pushed again
+    assert len(helper.gh_calls("pr", "create")) == 1
+    (merge,) = helper.gh_calls("pr", "merge")
+    assert merge[merge.index("--match-head-commit") + 1] == helper.origin_sha()
+    assert helper.origin_sha() != local_head
+
+
+@needs_bash
+@needs_node
+def test_auto_merge_failure_fails_the_run(helper: _Helper) -> None:
+    helper.make_drift()
+    result = helper.run(FAKE_GH_FAIL_MERGE="1")
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "::error::" in out and "Allow auto-merge" in out
 
 
 @needs_bash
@@ -737,7 +791,7 @@ def test_missing_label_does_not_block_pr(helper: _Helper) -> None:
     assert result.returncode == 0, result.stderr
     assert "::warning::" in result.stdout + result.stderr
     assert len(helper.gh_calls("pr", "create")) == 1
-    assert helper.gh_calls("workflow", "run")  # dispatch still happens
+    assert helper.gh_calls("pr", "merge")  # auto-merge still enabled
 
 
 @needs_bash
@@ -752,31 +806,13 @@ def test_labels_are_not_passed_to_pr_create(helper: _Helper) -> None:
 
 @needs_bash
 @needs_node
-def test_dispatch_disabled_with_token_path(helper: _Helper) -> None:
+def test_body_says_auto_merge_is_on(helper: _Helper) -> None:
     helper.make_drift()
-    result = helper.run(DISPATCH_CI="false")
-    assert result.returncode == 0, result.stderr
-    assert helper.push_count() == 1
-    assert len(helper.gh_calls("pr", "create")) == 1
-    assert helper.gh_calls("workflow") == []
-    # An App/PAT push runs the PR's own pull_request CI: nothing to explain.
-    assert "CI on this PR" not in helper.pr_body()
-
-
-@needs_bash
-@needs_node
-def test_body_says_which_checks_did_not_run_on_the_github_token_path(
-    helper: _Helper,
-) -> None:
-    helper.make_drift()
-    result = helper.run(DISPATCH_CI="true")
+    result = helper.run()
     assert result.returncode == 0, result.stderr
     body = helper.pr_body()
-    assert "## CI on this PR" in body
-    note = body.split("## CI on this PR", 1)[1]
-    assert "workflow_dispatch" in note
-    assert "`pull_request`" in note and "review-gate" in note
-    assert "SKILLS_UPDATE_TOKEN" in note and "SKILLS_UPDATE_APP_ID" in note
+    assert "auto-merge" in body.lower()
+    assert "never merges itself" not in body
 
 
 @needs_bash
@@ -792,7 +828,7 @@ def test_body_lists_bumps_available_and_removed(helper: _Helper) -> None:
     assert "Available, not installed" in body and "`newcomer`" in body
     assert "Removed upstream (kept)" in body and "`gone`" in body
     assert "No releases found" in body and "acme/quiet" in body
-    assert "never merges itself" in body
+    assert "Auto-merge is on" in body
     assert "latest `main`" in body
 
 
@@ -806,7 +842,7 @@ def test_body_without_summary_has_only_the_fixed_text(
     result = helper.run(summary=summary)
     assert result.returncode == 0, result.stderr
     body = helper.pr_body()
-    assert "never merges itself" in body
+    assert "Auto-merge is on" in body
     for heading in ("Bumped", "Available", "Removed", "No releases"):
         assert heading not in body
 
@@ -881,8 +917,8 @@ def test_invalid_summary_json_is_an_error(helper: _Helper) -> None:
 def test_action_is_a_composite_with_the_documented_inputs() -> None:
     text = (_ACTION / "action.yml").read_text()
     assert "using: composite" in text
-    for name in ("token", "dispatch-ci", "branch", "base", "ci-workflow", "labels"):
-        assert f"\n  {name}:" in text, name
+    inputs = yaml.safe_load(text)["inputs"]
+    assert set(inputs) == {"token", "branch", "base", "labels"}
     assert 'npx -y "skills@${SKILLS_CLI_VERSION}" update -p -y' in text
     assert "skills@latest" not in text
     assert 'DISABLE_TELEMETRY: "1"' in text
@@ -1080,7 +1116,6 @@ def test_update_workflow_triggers_and_permissions() -> None:
     assert job["permissions"] == {
         "contents": "write",
         "pull-requests": "write",
-        "actions": "write",
     }
     assert wf["env"]["DISABLE_TELEMETRY"] == "1"
     assert wf["concurrency"] == {"group": "skills-update", "cancel-in-progress": False}
@@ -1154,11 +1189,10 @@ def test_update_workflow_token_precedence() -> None:
         "private-key": "${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}",
         "permission-contents": "write",
         "permission-pull-requests": "write",
-        "permission-actions": "write",
     }
     assert pick["env"]["APP_TOKEN"] == "${{ steps.app.outputs.token }}"
     assert pick["env"]["SKILLS_UPDATE_TOKEN"] == "${{ secrets.SKILLS_UPDATE_TOKEN }}"
-    assert pick["env"]["GITHUB_TOKEN"] == "${{ github.token }}"
+    assert "GITHUB_TOKEN" not in pick["env"]
 
     # Each secret appears only in the step(s) that need it.
     holders = {
@@ -1178,10 +1212,14 @@ def test_update_workflow_token_precedence() -> None:
 
     final = steps[-1]
     assert final["uses"] == "./.github/actions/skills-update"
-    assert final["with"] == {
-        "token": "${{ steps.token.outputs.value }}",
-        "dispatch-ci": "${{ steps.token.outputs.dispatch }}",
-    }
+    assert final["with"] == {"token": "${{ steps.token.outputs.value }}"}
+
+
+def test_update_workflow_grants_no_actions_write() -> None:
+    (job,) = _workflow("skills-update.yml")["jobs"].values()
+    assert "actions" not in job["permissions"]
+    assert "permission-actions" not in _caller_step("app")["with"]
+    assert "actions: write" not in (_WORKFLOWS / "skills-update.yml").read_text()
 
 
 @needs_bash
@@ -1246,39 +1284,61 @@ def test_secrets_probe_fails_on_a_half_configured_app(
     assert all(v not in result.stdout + result.stderr for v in env.values() if v)
 
 
-@needs_bash
-@pytest.mark.parametrize(
-    ("env", "value", "dispatch"),
-    [
-        ({"APP_TOKEN": "app-tok", "SKILLS_UPDATE_TOKEN": "pat"}, "app-tok", "false"),
-        ({"APP_TOKEN": "", "SKILLS_UPDATE_TOKEN": "pat"}, "pat", "false"),
-        ({"APP_TOKEN": "", "SKILLS_UPDATE_TOKEN": ""}, "ghs-default", "true"),
-        ({}, "ghs-default", "true"),
-    ],
-)
-def test_token_step_picks_app_then_pat_then_github_token(
-    tmp_path: Path, env: dict[str, str], value: str, dispatch: str
-) -> None:
+def _run_token_step(
+    tmp_path: Path, env: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], Path]:
     out = tmp_path / "github_output"
     out.write_text("")
     result = subprocess.run(  # nosec B603 B607 -- the workflow's own step script
         ["bash", "-euo", "pipefail", "-c", _caller_step("token")["run"]],
         capture_output=True,
         text=True,
-        check=True,
-        env={
-            "PATH": os.environ["PATH"],
-            "GITHUB_OUTPUT": str(out),
-            "GITHUB_TOKEN": "ghs-default",
-            **env,
-        },
+        check=False,
+        env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(out), **env},
     )
+    return result, out
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("env", "value"),
+    [
+        ({"APP_TOKEN": "app-tok", "SKILLS_UPDATE_TOKEN": "pat"}, "app-tok"),
+        ({"APP_TOKEN": "", "SKILLS_UPDATE_TOKEN": "pat"}, "pat"),
+        ({"SKILLS_UPDATE_TOKEN": "pat"}, "pat"),
+    ],
+)
+def test_token_step_picks_app_then_pat(
+    tmp_path: Path, env: dict[str, str], value: str
+) -> None:
+    result, out = _run_token_step(tmp_path, env)
+    assert result.returncode == 0, result.stderr
     written = dict(ln.split("=", 1) for ln in out.read_text().splitlines())
-    assert written == {"value": value, "dispatch": dispatch}
+    assert written == {"value": value}
     # Only ::add-mask:: lines may carry the token to the log.
     shown = [ln for ln in result.stdout.splitlines() if value in ln]
     assert all(ln.startswith("::add-mask::") for ln in shown)
     assert value not in result.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "env",
+    [{}, {"APP_TOKEN": "", "SKILLS_UPDATE_TOKEN": ""}],
+    ids=["unset", "empty"],
+)
+def test_token_step_fails_with_neither_app_nor_pat(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    # Even with the workflow's own token around, there is no fallback to it.
+    result, out = _run_token_step(tmp_path, {**env, "GITHUB_TOKEN": "ghs-default"})
+    assert result.returncode == 1
+    shown = result.stdout + result.stderr
+    assert "::error::" in shown
+    assert "SKILLS_UPDATE_APP_ID" in shown and "SKILLS_UPDATE_TOKEN" in shown
+    assert "setup_skills_update_app.py" in shown
+    assert out.read_text() == ""
+    assert "ghs-default" not in shown
 
 
 def test_ci_accepts_workflow_dispatch() -> None:

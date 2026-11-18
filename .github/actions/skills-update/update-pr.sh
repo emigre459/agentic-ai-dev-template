@@ -9,9 +9,6 @@
 #   REMOTE                 git remote (default origin)
 #   GH_CMD                 the gh executable (default gh); the test seam
 #   PR_LABELS              space-separated labels, applied best-effort after creation
-#   DISPATCH_CI            "true" to dispatch $CI_WORKFLOW on the branch (default true);
-#                          the PR body then says which pull_request-only checks did not run
-#   CI_WORKFLOW            workflow file to dispatch (default ci.yml)
 #   SKILLS_UPDATE_SUMMARY  bump-pins.mjs's JSON; builds the PR body (may be empty or {})
 #
 # Exit codes: 0 nothing to do, or the PR is open and current; 1 a precondition is
@@ -27,8 +24,6 @@ BASE="${BASE:-main}"
 REMOTE="${REMOTE:-origin}"
 GH_CMD="${GH_CMD:-gh}"
 PR_LABELS="${PR_LABELS:-}"
-DISPATCH_CI="${DISPATCH_CI:-true}"
-CI_WORKFLOW="${CI_WORKFLOW:-ci.yml}"
 SKILLS_UPDATE_SUMMARY="${SKILLS_UPDATE_SUMMARY:-}"
 TITLE="Update agent skills"
 
@@ -44,8 +39,7 @@ git rev-parse --verify -q "refs/remotes/$REMOTE/$BASE" >/dev/null \
 
 # --- PR body, from bump-pins.mjs's JSON -------------------------------------
 build_body() {
-  SKILLS_UPDATE_BASE="$BASE" SKILLS_UPDATE_DISPATCH_CI="$DISPATCH_CI" \
-    SKILLS_UPDATE_CI_WORKFLOW="$CI_WORKFLOW" node -e '
+  SKILLS_UPDATE_BASE="$BASE" node -e '
     const raw = (process.env.SKILLS_UPDATE_SUMMARY || "").trim();
     let s = {};
     if (raw) {
@@ -64,19 +58,8 @@ build_body() {
     section("Removed upstream (kept)", list(s.removed).map((r) =>
       "- `" + r.name + "` (" + r.source + ")"));
     section("No releases found", list(s.no_releases).map((src) => "- " + src));
-    // GITHUB_TOKEN path: say plainly which checks this PR did not get.
-    if (process.env.SKILLS_UPDATE_DISPATCH_CI === "true") {
-      section("CI on this PR", [
-        "This branch was pushed with the workflow `GITHUB_TOKEN`, whose pushes do not trigger `pull_request` workflows, so `" +
-          process.env.SKILLS_UPDATE_CI_WORKFLOW + "` was dispatched on it with `workflow_dispatch` instead. " +
-          "Checks that run only on `pull_request` (such as `review-gate`) did not run on this PR.",
-        "",
-        "To get the PR its full CI, set the `SKILLS_UPDATE_TOKEN` secret (a fine-grained PAT), or the " +
-          "`SKILLS_UPDATE_APP_ID` and `SKILLS_UPDATE_APP_PRIVATE_KEY` secrets (a GitHub App).",
-      ]);
-    }
     out.push("", "This branch is rebuilt on the latest `" + process.env.SKILLS_UPDATE_BASE +
-      "` every night, so it is force-pushed whenever the update changes. This PR never merges itself: review the diff and merge it yourself.");
+      "` every night. Auto-merge is on: it merges itself once its required checks pass (through the merge queue where there is one).");
     process.stdout.write(out.join("\n") + "\n");
   '
 }
@@ -168,14 +151,22 @@ if [ "${#labels[@]}" -gt 0 ]; then
   done
 fi
 
-# --- 5. Dispatch CI ---------------------------------------------------------
-# GitHub parks the pull_request runs of a GITHUB_TOKEN-pushed PR in
-# action_required; workflow_dispatch is the one trigger it always honours from
-# that token. A brand-new PR on an already-current branch still needs one.
-if [ "$pushed" != true ] && [ "$created" != true ]; then
-  log "Branch and PR are unchanged; the existing checks remain valid."
-elif [ "$DISPATCH_CI" != true ]; then
-  log "DISPATCH_CI is not 'true'; not dispatching $CI_WORKFLOW."
+# --- 5. Auto-merge -------------------------------------------------------------
+# Enabled only when this run pushed or created the PR, so a human who turned it
+# off on an unchanged PR is not overridden. --match-head-commit pins it to the SHA
+# on the remote branch: HEAD when this run pushed, else the SHA already there (a
+# re-made commit has a new local SHA, but the remote branch kept its own).
+if [ "$pushed" = true ] || [ "$created" = true ]; then
+  if [ "$pushed" = true ]; then
+    head="$(git rev-parse HEAD)"
+  else
+    head="$remote_sha"
+  fi
+  if ! "$GH_CMD" pr merge "$pr_number" --auto --squash --match-head-commit "$head"; then
+    echo "::error::could not enable auto-merge on PR #$pr_number. Turn on Settings -> General -> \"Allow auto-merge\", and check the token has contents and pull requests: write."
+    exit 1
+  fi
+  log "Auto-merge enabled on PR #$pr_number at $head."
 else
-  "$GH_CMD" workflow run "$CI_WORKFLOW" --ref "$BRANCH"
+  log "Branch and PR are unchanged; keeping the existing auto-merge setting."
 fi
