@@ -345,8 +345,9 @@ merging without your one-off OK is a hard stop.
 ## Installing the skills
 
 A repo created from this template already has the skills: `make init` installs the
-release pinned in the template's `skills-lock.json` (the last re-pinned tag, not
-necessarily the newest release) and keeps that pin. To add them to any other repo,
+release pinned in the template's `.github/template-skills-lock.json` (the last
+re-pinned tag, not necessarily the newest release) and keeps that pin as the new
+repo's `skills-lock.json`. To add them to any other repo,
 install a release by its tag with the [skills CLI](https://github.com/vercel-labs/skills):
 
 ```bash
@@ -476,7 +477,8 @@ In your repo it asks the skills CLI itself, at the version the kit pins:
 The CLI reads each skill's source from GitHub, so the job needs network access; it
 uses the job's own token for those reads. A CLI run that fails for another reason, such
 as a network error, fails the check rather than passing it: re-run the job. In this
-template the check runs offline instead, against its own skills.
+template the check runs offline instead, against its own skills and its own lock,
+`.github/template-skills-lock.json`.
 
 When it fails:
 
@@ -537,8 +539,10 @@ PR merged so far.
 
 **In this template**, a release also has a follow-up: the `release` skill offers to
 open a PR on a `release-pin-vX.Y.Z` branch that runs `make skills_lock TAG=vX.Y.Z`,
-recording the tag and hashes in `skills-lock.json`. Repos made from the template start
-from that tag. Merge it like any other PR; it is a separate step because the tag
+recording the tag and hashes in `.github/template-skills-lock.json`. Repos made from
+the template start from that tag, with that file as their `skills-lock.json`. The
+template keeps no root `skills-lock.json`: the skills CLI hides every skill a source
+repo's root lock lists, so `npx skills add` would find none. Merge it like any other PR; it is a separate step because the tag
 cannot exist before the release does.
 
 **In your own repo**, the same flow works once it has the release pieces:

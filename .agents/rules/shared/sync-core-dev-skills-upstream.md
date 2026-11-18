@@ -27,6 +27,9 @@ deletes and recreates each skill folder, so an edit inside one is silently lost.
 - **The template** (`scripts/init_template.py` exists at the repo root; `make init`
   deletes it, so a fork of the template made to send PRs upstream counts too): this
   is the skills' canonical home. Edit them in place, with the usual tests and review.
+  The template pins its skills in `.github/template-skills-lock.json` (`make
+  skills_lock`), not a root `skills-lock.json`, which would hide them from `npx
+  skills add`; `make init` turns it into the new repo's `skills-lock.json`.
 - **Any other repo**, including one created from the template: vendored skill
   folders are **read-only**. Never edit, add or delete files inside them, and never
   let another skill (such as `review-skill`) do it for you.

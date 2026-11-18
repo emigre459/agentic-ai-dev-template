@@ -360,6 +360,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "skills_lock"
 _HASH_SCRIPT = _REPO_ROOT / ".github" / "actions" / "skills-drift" / "skills-lock.mjs"
 _SOURCE = "emigre459/agentic-ai-dev-template"
+# The template's own pin; `make init` turns it into the new repo's root lock.
+_TEMPLATE_LOCK = Path(".github") / "template-skills-lock.json"
+_CONSUMER_LOCK = Path("skills-lock.json")
 _REF = "v1.2.0"
 _NEEDS_NODE = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is not on PATH"
@@ -431,7 +434,7 @@ def _make_source(tmp_path: Path, skills: dict[str, str]) -> Path:
 
 
 def _write_lock(root: Path, entries: dict[str, tuple[str, str | None]]) -> None:
-    """Write a skills-lock.json from ``{name: (computedHash, ref-or-None)}``."""
+    """Write the template lock from ``{name: (computedHash, ref-or-None)}``."""
     skills: dict[str, dict[str, str]] = {}
     for name, (digest, ref) in entries.items():
         entry = {"source": _SOURCE, "sourceType": "github"}
@@ -440,7 +443,7 @@ def _write_lock(root: Path, entries: dict[str, tuple[str, str | None]]) -> None:
         entry["skillPath"] = f".agents/skills/{name}/SKILL.md"
         entry["computedHash"] = digest
         skills[name] = entry
-    (root / "skills-lock.json").write_text(
+    (root / _TEMPLATE_LOCK).write_text(
         json.dumps({"version": 1, "skills": skills}, indent=2) + "\n"
     )
 
@@ -583,7 +586,7 @@ def test_init_without_ref_keeps_tree_and_local_actions(template_tree: Path) -> N
         "jobs:\n  drift:\n    steps:\n      - uses: ./.github/actions/skills-drift\n"
     )
     _unpin_lock(template_tree)
-    assert '"ref"' not in (template_tree / "skills-lock.json").read_text()
+    assert '"ref"' not in (template_tree / _TEMPLATE_LOCK).read_text()
     skill = template_tree / ".agents" / "skills" / "run-tests"
     hash_before = _python_skill_hash(skill)
 
@@ -595,7 +598,7 @@ def test_init_without_ref_keeps_tree_and_local_actions(template_tree: Path) -> N
 
 
 def test_init_without_lock_file_is_a_no_op(template_tree: Path) -> None:
-    (template_tree / "skills-lock.json").unlink()
+    (template_tree / _TEMPLATE_LOCK).unlink()
 
     initialize(template_tree, "python", "acme-svc", "svc", runner=_no_commands)
 
@@ -713,7 +716,7 @@ def _unpin_lock(root: Path) -> None:
     The shipped lock is pinned once a release exists, so tests of the
     before-first-release path build that state themselves.
     """
-    path = root / "skills-lock.json"
+    path = root / _TEMPLATE_LOCK
     lock: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     for entry in lock["skills"].values():
         entry.pop("ref", None)
@@ -722,8 +725,8 @@ def _unpin_lock(root: Path) -> None:
     )
 
 
-def _lock_skills(root: Path) -> dict[str, Any]:
-    text = (root / "skills-lock.json").read_text(encoding="utf-8")
+def _lock_skills(root: Path, lock_file: Path = _CONSUMER_LOCK) -> dict[str, Any]:
+    text = (root / lock_file).read_text(encoding="utf-8")
     lock: dict[str, Any] = json.loads(text)
     # Rewritten the way the skills CLI writes it: 2-space indent, final newline.
     assert text == json.dumps(lock, indent=2, ensure_ascii=False) + "\n"
@@ -757,7 +760,7 @@ def test_react_init_drops_notebook_skill_before_first_release(
 ) -> None:
     _unpin_lock(template_tree)
     # The lock before the first release (no `ref`) lists the skill too.
-    assert "write-teaching-notebook" in _lock_skills(template_tree)
+    assert "write-teaching-notebook" in _lock_skills(template_tree, _TEMPLATE_LOCK)
 
     initialize(template_tree, "react", "acme-web", "web", runner=_no_commands)
 
@@ -776,26 +779,80 @@ def test_python_init_keeps_notebook_skill(template_tree: Path, tmp_path: Path) -
     _write_lock(
         template_tree, _released(source, "run-tests", "write-teaching-notebook")
     )
-    before = (template_tree / "skills-lock.json").read_bytes()
+    before = (template_tree / _TEMPLATE_LOCK).read_bytes()
 
     initialize(template_tree, "python", "acme-svc", "svc", runner=_FakeGit(source))
 
     skill = template_tree / ".agents" / "skills" / "write-teaching-notebook"
     assert (skill / "SKILL.md").read_text() == "nb\n"
-    assert (template_tree / "skills-lock.json").read_bytes() == before
+    assert (template_tree / _CONSUMER_LOCK).read_bytes() == before
 
 
 def test_init_without_lock_file_still_drops_python_only_skill(
     template_tree: Path,
 ) -> None:
-    (template_tree / "skills-lock.json").unlink()
+    (template_tree / _TEMPLATE_LOCK).unlink()
 
     initialize(template_tree, "react", "acme-web", "web", runner=_no_commands)
 
     assert not (
         template_tree / ".agents" / "skills" / "write-teaching-notebook"
     ).exists()
-    assert not (template_tree / "skills-lock.json").exists()
+    assert not (template_tree / _CONSUMER_LOCK).exists()
+    assert not (template_tree / _TEMPLATE_LOCK).exists()
+
+
+@pytest.mark.parametrize(
+    ("stack", "kept"),
+    [
+        ("python", ["run-tests", "write-teaching-notebook"]),
+        ("react", ["run-tests"]),
+    ],
+)
+def test_init_writes_the_consumer_lock(
+    template_tree: Path, tmp_path: Path, stack: str, kept: list[str]
+) -> None:
+    """The template's .github/ pin becomes the new repo's root skills-lock.json.
+
+    Everything in a consumer repo (drift check, update PR, lane) reads the root
+    lock, and the template-only path must not survive init.
+    """
+    source = _make_source(
+        tmp_path, {"run-tests": "released\n", "write-teaching-notebook": "nb\n"}
+    )
+    _write_lock(
+        template_tree, _released(source, "run-tests", "write-teaching-notebook")
+    )
+    template_lock = json.loads((template_tree / _TEMPLATE_LOCK).read_text())
+
+    initialize(template_tree, stack, "acme-app", "app", runner=_FakeGit(source))
+
+    assert not (template_tree / _TEMPLATE_LOCK).exists()
+    consumer_lock = json.loads((template_tree / _CONSUMER_LOCK).read_text())
+    assert consumer_lock["version"] == template_lock["version"]
+    assert consumer_lock["skills"] == {
+        name: entry for name, entry in template_lock["skills"].items() if name in kept
+    }
+
+
+def test_init_failure_leaves_the_template_lock_in_place(
+    template_tree: Path, tmp_path: Path
+) -> None:
+    """A failed fetch must not move the lock, so `make init` can be retried."""
+    source = _make_source(tmp_path, {"run-tests": "x\n"})
+    _write_lock(template_tree, _released(source, "run-tests"))
+
+    with pytest.raises(RuntimeError, match="network access"):
+        initialize(
+            template_tree,
+            "python",
+            "acme-svc",
+            "svc",
+            runner=_FakeGit(source, fetch_error=_fetch_failure()),
+        )
+
+    assert (template_tree / _TEMPLATE_LOCK).is_file()
+    assert not (template_tree / _CONSUMER_LOCK).exists()
 
 
 def test_init_fails_when_a_local_action_reference_survives(
