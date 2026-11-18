@@ -681,3 +681,11 @@ def test_pr_check_allow_lists_only_the_anchored_lock_command() -> None:
     assert f"Bash({_ANCHORED_LOCK})" in allowed
     assert "*single_flight.py" not in allowed
     assert f"\n{_ANCHORED_LOCK}\n" in body, "the body's command must match the entry"
+
+
+def test_release_check_skips_repos_without_release_pieces() -> None:
+    """No release and no drafter config: say so, suggest no version."""
+    step2 = _section(_flat(_BUILD), "## Step 2:")
+    assert "no published release and no `.github/release-drafter.yml`" in step2
+    assert "skip the bump suggestion" in step2
+    assert "suggest the first one, `v0.1.0`" in step2  # a drafter config keeps it

@@ -253,7 +253,8 @@ A fast sanity check before brainstorming — *not* a substitute for it. Use `Ask
   - Find the last published release: `gh release list --exclude-drafts --limit 1 --json tagName,publishedAt`.
   - Count the PRs merged since it: `gh pr list --state merged --search "merged:>=<publishedAt date>" --json number`.
   - Say: "Last release `vX.Y.Z`, N days ago, M PRs since. This card reads as a **patch / minor / major** bump because <one reason>." A PR with no user-facing change still counts as a patch in the next release.
-  - On a repo with no published release, say so and suggest the first one, `v0.1.0`.
+  - On a repo with no published release and no `.github/release-drafter.yml`, the repo doesn't publish releases: say so in one line and skip the bump suggestion.
+  - On a repo with no published release but a release-drafter config, say so and suggest the first one, `v0.1.0`.
 - "Does this match your intent? Anything I'm missing or misreading?"
 
 Do not proceed until the user confirms. If they correct you, revise and re-confirm.
