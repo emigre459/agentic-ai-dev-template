@@ -966,3 +966,299 @@ def test_template_ships_no_docs_only_file() -> None:
 def test_example_allowlist_parses() -> None:
     assert review_gate.load_docs_allowlist(EXAMPLE) is not None
     assert "private" not in EXAMPLE.read_text().lower()
+
+
+# --- the skills-update lane ----------------------------------------------------
+
+SHA = _state()["head_sha"]
+LANE = review_gate.SkillsUpdateLane("skills-update", ("acme-skills[bot]",))
+FOLDERS = (".agents/skills/alpha", ".claude/skills/alpha")
+LANE_EXAMPLE = (
+    _SCRIPTS.parent / "references" / "skills-update-lane.example.json"
+)  # a repo copies it to .github/skills-update-lane.json to opt in
+
+
+def _pull(**over: Any) -> dict[str, Any]:
+    pull: dict[str, Any] = {
+        "user": {"login": "acme-skills[bot]"},
+        "head": {"ref": "skills-update", "sha": SHA, "repo": {"full_name": REPO}},
+        "changed_files": 2,
+    }
+    pull.update(over)
+    return pull
+
+
+def _lane_status(
+    names: tuple[str, ...] = ("skills-lock.json", ".agents/skills/alpha/SKILL.md"),
+    *,
+    pull: dict[str, Any] | None = None,
+    lane: Any = LANE,
+    folders: Any = FOLDERS,
+    **renamed: str,
+) -> Any:
+    files = _files(*names, **renamed)
+    pull = pull if pull is not None else _pull(changed_files=len(files))
+    return review_gate.skills_update_status(pull, files, lane, folders, REPO)
+
+
+def test_lane_passes_lock_and_tag_pinned_folders() -> None:
+    assert _lane_status() == review_gate.SKILLS_UPDATE_STATUS
+
+
+def test_lane_passes_claude_skills_root() -> None:
+    assert (
+        _lane_status(("skills-lock.json", ".claude/skills/alpha/x.md"))
+        == review_gate.SKILLS_UPDATE_STATUS
+    )
+
+
+def test_lane_status_fits_a_commit_status() -> None:
+    assert len(review_gate.SKILLS_UPDATE_STATUS[1]) <= 140
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        {"pull": _pull(user={"login": "alice"})},
+        {"pull": _pull(head={"ref": "main", "sha": SHA, "repo": {"full_name": REPO}})},
+        {
+            "pull": _pull(
+                head={
+                    "ref": "skills-update",
+                    "sha": SHA,
+                    "repo": {"full_name": "evil/repo"},
+                }
+            )
+        },
+        {"pull": _pull(head={"ref": "skills-update", "sha": SHA, "repo": None})},
+        {"names": ("skills-lock.json", ".agents/skills/beta/SKILL.md")},
+        {"names": ("skills-lock.json", "README.md")},
+        {
+            "names": ("skills-lock.json",),
+            "renamed": {".agents/skills/alpha/x": "src/x.py"},
+        },
+        {"pull": _pull(changed_files=3)},
+        {"names": ()},
+        {"names": ("skills-lock.json", ".agents/skills/alpha-x/SKILL.md")},
+        {"lane": None},
+        {"folders": ()},
+    ],
+    ids=[
+        "wrong-author",
+        "wrong-branch",
+        "fork",
+        "no-head-repo",
+        "branch-tracking-folder",
+        "non-skill-path",
+        "rename-from-outside",
+        "capped-file-list",
+        "no-files",
+        "lookalike-folder",
+        "no-lane",
+        "no-folders",
+    ],
+)
+def test_lane_refuses(case: dict[str, Any]) -> None:
+    kwargs = {k: v for k, v in case.items() if k not in ("names", "renamed")}
+    names = case.get("names", ("skills-lock.json", ".agents/skills/alpha/SKILL.md"))
+    assert _lane_status(names, **case.get("renamed", {}), **kwargs) is None
+
+
+def _write_lock(root: Path, skills: Any) -> Path:
+    lock = root / "skills-lock.json"
+    lock.write_text(json.dumps({"version": 2, "skills": skills}))
+    return lock
+
+
+def test_tag_pinned_folders_use_the_lock_key_not_skill_path(tmp_path: Path) -> None:
+    lock = _write_lock(
+        tmp_path,
+        {
+            "alpha": {"ref": "v1.2.3", "skillPath": "skills/alpha/SKILL.md"},
+            "beta": {"ref": "main"},
+            "gamma": {},
+            "src": {"ref": "v1.0.0", "skillPath": "src/foo/SKILL.md"},
+            "..": {"ref": "v1.0.0"},
+            "a/b": {"ref": "v1.0.0"},
+            "c\\d": {"ref": "v1.0.0"},
+        },
+    )
+    folders = review_gate.tag_pinned_skill_folders(lock)
+    assert sorted(folders) == [
+        ".agents/skills/alpha",
+        ".agents/skills/src",
+        ".claude/skills/alpha",
+        ".claude/skills/src",
+    ]
+    assert not any("foo" in f for f in folders)
+
+
+@pytest.mark.parametrize("content", [None, "not json", '{"skills": []}'])
+def test_tag_pinned_folders_missing_or_malformed_lock_is_empty(
+    tmp_path: Path, content: str | None
+) -> None:
+    lock = tmp_path / "skills-lock.json"
+    if content is not None:
+        lock.write_text(content)
+    assert review_gate.tag_pinned_skill_folders(lock) == ()
+
+
+def test_lane_config_loading(tmp_path: Path) -> None:
+    path = tmp_path / "lane.json"
+    assert review_gate.load_skills_update_lane(path) is None
+    good = {"branch": "skills-update", "authors": ["a[bot]"], "description": "x"}
+    path.write_text(json.dumps(good))
+    assert review_gate.load_skills_update_lane(path) == review_gate.SkillsUpdateLane(
+        "skills-update", ("a[bot]",)
+    )
+    for bad in (
+        json.dumps({**good, "branch": ""}),
+        json.dumps({**good, "authors": []}),
+        json.dumps({**good, "authors": [""]}),
+        json.dumps({"authors": ["a[bot]"]}),
+        "[]",
+        "not json",
+    ):
+        path.write_text(bad)
+        assert review_gate.load_skills_update_lane(path) is None, bad
+
+
+def test_shipped_lane_example_is_valid_and_template_ships_no_lane_file() -> None:
+    assert review_gate.load_skills_update_lane(LANE_EXAMPLE) is not None
+    assert not (REPO_ROOT / ".github" / "skills-update-lane.json").exists()
+
+
+class _LaneRepo:
+    """Fake GitHub answers for one PR in the lane tests."""
+
+    def __init__(self, monkeypatch: Any, root: Path, **over: Any) -> None:
+        (root / ".github").mkdir(exist_ok=True)
+        lane = root / ".github" / "skills-update-lane.json"
+        lane.write_text(
+            json.dumps({"branch": "skills-update", "authors": ["acme-skills[bot]"]})
+        )
+        lock = _write_lock(root, {"alpha": {"ref": "v1.2.3"}})
+        monkeypatch.setattr(review_gate, "SKILLS_UPDATE_LANE_FILE", lane)
+        monkeypatch.setattr(review_gate, "SKILLS_LOCK_FILE", lock)
+        review_gate._cached_skills_update_lane.cache_clear()
+        review_gate._cached_tag_pinned_folders.cache_clear()
+        self.pull = _pull(**over)
+        self.names = ["skills-lock.json", ".agents/skills/alpha/SKILL.md"]
+        self.pull["changed_files"] = over.get("changed_files", len(self.names))
+
+        def gh_json(args: list[str]) -> Any:
+            if args[-1] == f"repos/{REPO}/pulls/1":
+                return self.pull
+            if args[-1] == f"repos/{REPO}/pulls/1/reviews?per_page=100":
+                return []
+            assert args[-1] == f"repos/{REPO}/pulls/1/files?per_page=100"
+            return [{"filename": n} for n in self.names]
+
+        monkeypatch.setattr(review_gate.reviewer_state, "_gh_json", gh_json)
+
+
+def _lane_run(
+    monkeypatch: Any,
+    tmp_path: Path,
+    state: dict[str, Any] | None,
+    extra_names: list[str] | None = None,
+    **over: Any,
+) -> list[tuple[str, str]]:
+    _codeowners(monkeypatch, tmp_path, "* @owner\n")
+    repo = _LaneRepo(monkeypatch, tmp_path, **over)
+    if extra_names:
+        repo.names += extra_names
+        repo.pull["changed_files"] = len(repo.names)
+    posts: list[tuple[str, str]] = []
+    if state is not None:
+        head = _Head([state])
+        monkeypatch.setattr(review_gate.reviewer_state, "collect_state", head.collect)
+    else:
+        monkeypatch.setattr(
+            review_gate.reviewer_state,
+            "collect_state",
+            lambda *a: pytest.fail("no reviewer configured"),
+        )
+    monkeypatch.setattr(review_gate, "_current_gate_status", lambda r, s: None)
+
+    def post(repo: str, sha: str, state_: str, description: str) -> None:
+        posts.append((state_, description))
+        monkeypatch.setattr(
+            review_gate, "_current_gate_status", lambda r, s: (state_, description)
+        )
+
+    monkeypatch.setattr(review_gate, "_post", post)
+    adapter = reviewer_state.load_reviewer(key="coderabbit") if state else None
+    review_gate.post_for_pr(REPO, 1, adapter)
+    return posts
+
+
+def test_update_pr_passes_both_halves_under_a_catch_all_codeowners(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    posts = _lane_run(monkeypatch, tmp_path, _state(verdict="none"))
+    assert posts == [review_gate.SKILLS_UPDATE_STATUS]
+
+
+def test_a_persons_pr_on_skill_paths_still_needs_the_owner(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    posts = _lane_run(
+        monkeypatch, tmp_path, _state(verdict="none"), user={"login": "alice"}
+    )
+    assert [p[0] for p in posts] == ["failure"]
+    assert "@owner must approve" in posts[0][1]
+
+
+def test_an_update_pr_with_one_non_skill_path_needs_both_halves(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    posts = _lane_run(monkeypatch, tmp_path, _state(), extra_names=["src/x.py"])
+    assert [p[0] for p in posts] == ["failure"]
+    assert "@owner must approve" in posts[0][1]
+
+
+def test_a_moved_head_fails_closed(monkeypatch: Any, tmp_path: Path) -> None:
+    moved = {"ref": "skills-update", "sha": "9" * 40, "repo": {"full_name": REPO}}
+    posts = _lane_run(monkeypatch, tmp_path, _state(verdict="none"), head=moved)
+    assert [p[0] for p in posts] == ["failure"]
+    assert "@owner must approve" in posts[0][1]
+
+
+def test_the_lane_passes_with_no_reviewer_configured(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    posts = _lane_run(monkeypatch, tmp_path, None)
+    assert posts == [review_gate.SKILLS_UPDATE_STATUS]
+
+
+def test_a_non_lane_pr_reads_no_files_and_needs_the_owner_with_no_reviewer(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    posts = _lane_run(monkeypatch, tmp_path, None, user={"login": "alice"})
+    assert [p[0] for p in posts] == ["failure"]
+    assert "@owner must approve" in posts[0][1]
+
+
+def test_a_malformed_lane_file_and_lock_say_so_on_stderr(
+    tmp_path: Path, capsys: Any
+) -> None:
+    lane = tmp_path / "lane.json"
+    lane.write_text('{"branch": ""}')
+    assert review_gate.load_skills_update_lane(lane) is None
+    assert f"{lane}: malformed skills-update lane" in capsys.readouterr().err
+    lock = tmp_path / "skills-lock.json"
+    lock.write_text("not json")
+    assert review_gate.tag_pinned_skill_folders(lock) == ()
+    assert f"{lock}: unreadable skills lock" in capsys.readouterr().err
+
+
+def test_empty_and_dot_lock_keys_are_skipped(tmp_path: Path) -> None:
+    lock = _write_lock(
+        tmp_path,
+        {"": {"ref": "v1.0.0"}, ".": {"ref": "v1.0.0"}, "ok": {"ref": "v1.0.0"}},
+    )
+    assert review_gate.tag_pinned_skill_folders(lock) == (
+        ".agents/skills/ok",
+        ".claude/skills/ok",
+    )

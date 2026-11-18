@@ -88,3 +88,48 @@ def test_readme_customizing_documents_docs_only_paths() -> None:
     start = readme.index("## Customizing the skills in your repo")
     end = readme.index("## Branch pattern")
     assert ".github/docs-only-paths.json" in readme[start:end]
+
+
+def test_readme_interview_offers_skills_update_app_setup() -> None:
+    """Offer the two-click App setup for the nightly skills update PR once."""
+    questions = [
+        " ".join(item.split())
+        for item in re.split(r"\n(?=\d+\. )", _interview_block())
+        if re.match(r"\d+\. ", item)
+    ]
+    matching = [
+        q for q in questions if "two clicks" in q and "nightly skills update PR" in q
+    ]
+    assert len(matching) == 1
+
+
+def test_readme_setup_runs_app_script_before_init_commit() -> None:
+    """The App script runs before the init commit so the lane file lands in it."""
+    block = _interview_block()
+    script = "python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py"
+    assert script in block
+    assert block.index(script) < block.index(
+        "chore: initialize from agentic-ai-dev-template"
+    )
+
+
+def test_readme_customizing_documents_skills_update_lane() -> None:
+    """The customizing section documents the opt-in skills-update lane file."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    start = readme.index("## Customizing the skills in your repo")
+    end = readme.index("## Branch pattern")
+    assert ".github/skills-update-lane.json" in readme[start:end]
+
+
+def test_readme_staying_up_to_date_has_no_github_token_fallback() -> None:
+    """Without an App or PAT the nightly run fails; the README says how to fix it."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    start = readme.index("## Staying up to date")
+    end = readme.index("## The drift check")
+    section = " ".join(readme[start:end].split())
+    assert "setup_skills_update_app.py" in section
+    assert "machine account" in section
+    assert "Allow auto-merge" in section
+    assert "| neither |" not in section
+    assert "never merges itself" not in section
+    assert "ci-workflow" not in section

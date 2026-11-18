@@ -41,6 +41,11 @@ _DEMO = _FIXTURES / "demo-skill"
 _GOLDEN_FILE: dict[str, str] = json.loads((_FIXTURES / "golden.json").read_text())
 _GOLDEN = _GOLDEN_FILE["demo-skill"]
 _PINNED_CLI: str = json.loads(_PIN_FILE.read_text())["dependencies"]["skills"]
+# The template keeps its own pin here, not at the root: the skills CLI hides every
+# skill a source repo's root skills-lock.json lists, so a root lock would stop
+# `npx skills add` from finding the template's skills. `make init` turns it into
+# the new repo's skills-lock.json.
+_TEMPLATE_LOCK = Path(".github") / "template-skills-lock.json"
 
 
 def _node(
@@ -381,7 +386,12 @@ def _make_template(root: Path) -> Path:
 
 
 def _read_lock(root: Path) -> dict:
-    return json.loads((root / "skills-lock.json").read_text())
+    return json.loads((root / _TEMPLATE_LOCK).read_text())
+
+
+def _write_template_lock(root: Path, text: str) -> None:
+    (root / _TEMPLATE_LOCK).parent.mkdir(parents=True, exist_ok=True)
+    (root / _TEMPLATE_LOCK).write_text(text)
 
 
 def _hash_of(path: Path) -> str:
@@ -392,7 +402,7 @@ def test_write_without_tag(tmp_path: Path) -> None:
     repo = _make_template(tmp_path / "repo")
     result = _node("write", "--root", repo)
     assert result.returncode == 0, result.stderr
-    text = (repo / "skills-lock.json").read_text()
+    text = (repo / _TEMPLATE_LOCK).read_text()
     assert text.endswith("}\n")
     assert text.startswith('{\n  "version": 2,\n  "skills": {\n    "alpha": {')
     lock = json.loads(text)
@@ -456,30 +466,30 @@ def test_write_with_a_tag_that_has_no_skills_is_a_usage_error(tmp_path: Path) ->
     result = _node("write", "--root", repo, "--tag", "v0.1.0")
     assert result.returncode == 2
     assert "v0.1.0" in result.stderr
-    assert not (repo / "skills-lock.json").exists()
+    assert not (repo / _TEMPLATE_LOCK).exists()
 
 
 def test_write_without_tag_refuses_to_unpin_a_pinned_lock(tmp_path: Path) -> None:
     repo = _make_template(tmp_path / "repo")
     _git(repo, "tag", "v0.1.0")
     assert _node("write", "--root", repo, "--tag", "v0.1.0").returncode == 0
-    pinned = (repo / "skills-lock.json").read_text()
+    pinned = (repo / _TEMPLATE_LOCK).read_text()
 
     result = _node("write", "--root", repo)
 
     assert result.returncode == 2
     assert "--tag" in result.stderr
     assert "delete" in result.stderr
-    assert (repo / "skills-lock.json").read_text() == pinned
+    assert (repo / _TEMPLATE_LOCK).read_text() == pinned
 
 
 def test_write_without_tag_refuses_a_conflicted_pinned_lock(tmp_path: Path) -> None:
     repo = _make_template(tmp_path / "repo")
     conflicted = '<<<<<<< ours\n{"skills": {"alpha": {"ref": "v0.1.0"}}}\n=======\n'
-    (repo / "skills-lock.json").write_text(conflicted)
+    _write_template_lock(repo, conflicted)
     result = _node("write", "--root", repo)
     assert result.returncode == 2
-    assert (repo / "skills-lock.json").read_text() == conflicted
+    assert (repo / _TEMPLATE_LOCK).read_text() == conflicted
 
 
 def test_write_without_tag_regenerates_an_unpinned_lock(tmp_path: Path) -> None:
@@ -496,7 +506,7 @@ def test_write_without_tag_regenerates_a_conflicted_unpinned_lock(
     tmp_path: Path,
 ) -> None:
     repo = _make_template(tmp_path / "repo")
-    (repo / "skills-lock.json").write_text("<<<<<<< ours\n{}\n=======\n{}\n>>>>>>>\n")
+    _write_template_lock(repo, "<<<<<<< ours\n{}\n=======\n{}\n>>>>>>>\n")
     assert _node("write", "--root", repo).returncode == 0
     assert list(_read_lock(repo)["skills"]) == ["alpha", "beta"]
 
@@ -506,7 +516,7 @@ def test_write_with_unknown_tag_is_a_usage_error(tmp_path: Path) -> None:
     result = _node("write", "--root", repo, "--tag", "v9.9.9")
     assert result.returncode == 2
     assert "v9.9.9" in result.stderr
-    assert not (repo / "skills-lock.json").exists()
+    assert not (repo / _TEMPLATE_LOCK).exists()
 
 
 def test_write_cleans_up_temp_dirs(tmp_path: Path) -> None:
@@ -613,7 +623,7 @@ def test_template_check_rejects_a_version_1_lock(tmp_path: Path) -> None:
     assert _node("write", "--root", repo).returncode == 0
     lock = _read_lock(repo)
     lock["version"] = 1
-    (repo / "skills-lock.json").write_text(json.dumps(lock))
+    (repo / _TEMPLATE_LOCK).write_text(json.dumps(lock))
     result = _node("check", "--root", repo, "--template")
     assert result.returncode == 2
     assert "make skills_lock" in result.stderr
@@ -677,12 +687,78 @@ def test_expected_lock_names_follow_the_tag_when_pinned(tmp_path: Path) -> None:
 def test_shipped_lock_is_current() -> None:
     result = _node("check", "--root", _REPO, "--template")
     assert result.returncode == 0, result.stdout + result.stderr
-    lock = json.loads((_REPO / "skills-lock.json").read_text())
+    lock = json.loads((_REPO / _TEMPLATE_LOCK).read_text())
     assert lock["version"] == 2
     assert list(lock["skills"]) == _expected_lock_names(_REPO, lock)
     for name, entry in lock["skills"].items():
         assert entry["source"] == "emigre459/agentic-ai-dev-template"
         assert entry["skillPath"] == f".agents/skills/{name}/SKILL.md"
+
+
+def test_template_ships_no_root_skills_lock() -> None:
+    """The CLI would hide every skill a root lock lists, so the pin lives in .github/.
+
+    ``npx skills add <template>`` reads the source repo's own root
+    ``skills-lock.json`` and drops each ``.agents/skills/`` skill it lists as an
+    installed copy, so the template would publish nothing.
+    """
+    tracked = subprocess.run(  # nosec B603 B607
+        ["git", "ls-files", "--", "skills-lock.json", _TEMPLATE_LOCK.as_posix()],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert tracked == [_TEMPLATE_LOCK.as_posix()]
+    assert not (_REPO / "skills-lock.json").exists()
+    lock = json.loads((_REPO / _TEMPLATE_LOCK).read_text())
+    folders = {
+        path.name
+        for path in (_REPO / ".agents" / "skills").iterdir()
+        if path.is_dir() and not path.is_symlink()
+    }
+    # Every real skill folder, except ones added on main after the pinned release.
+    assert sorted(lock["skills"]) == _expected_lock_names(_REPO, lock)
+    assert set(lock["skills"]) <= folders
+
+
+@pytest.mark.parametrize("tag", [None, "v0.1.0"], ids=["unpinned", "pinned"])
+def test_write_puts_the_lock_under_github_not_the_root(
+    tmp_path: Path, tag: str | None
+) -> None:
+    repo = _make_template(tmp_path / "repo")
+    _git(repo, "tag", "v0.1.0")
+    result = _node("write", "--root", repo, *(["--tag", tag] if tag else []))
+    assert result.returncode == 0, result.stderr
+    assert list(_read_lock(repo)["skills"]) == ["alpha", "beta"]
+    assert not (repo / "skills-lock.json").exists()
+
+
+def test_template_check_reads_only_the_template_lock(tmp_path: Path) -> None:
+    repo = _make_template(tmp_path / "repo")
+    # A root lock alone is a consumer's: template mode does not fall back to it.
+    (repo / "skills-lock.json").write_text(json.dumps(_lock()))
+    missing = _node("check", "--root", repo, "--template")
+    assert missing.returncode == 2
+    assert _TEMPLATE_LOCK.as_posix() in missing.stderr
+
+    assert _node("write", "--root", repo).returncode == 0
+    # A stale root lock is ignored once the template lock is current.
+    result = _node("check", "--root", repo, "--template")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_plain_check_still_reads_the_root_lock(tmp_path: Path) -> None:
+    """Consumer repos keep skills-lock.json at the root; a template lock is ignored."""
+    repo = _make_repo(tmp_path / "repo")
+    _write_template_lock(repo, "{not json")
+    result = _node("check", "--root", repo, env=_fake_npx(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    (repo / "skills-lock.json").unlink()
+    gone = _node("check", "--root", repo, env=_fake_npx(tmp_path))
+    assert gone.returncode == 2
+    assert "skills-lock.json" in gone.stderr
+    assert "template-skills-lock.json" not in gone.stderr
 
 
 def test_make_skills_lock_target_forwards_tag() -> None:

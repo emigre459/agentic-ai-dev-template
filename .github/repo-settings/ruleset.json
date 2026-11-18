@@ -21,10 +21,6 @@
       }
     },
     {
-      "type": "copilot_code_review",
-      "parameters": { "review_on_push": false, "review_draft_pull_requests": false }
-    },
-    {
       "type": "required_status_checks",
       "parameters": {
         "strict_required_status_checks_policy": false,
@@ -37,7 +33,8 @@
           { "context": "react-tests", "integration_id": 15368 },
           { "context": "react-security", "integration_id": 15368 },
           { "context": "template machinery (lint + tests)", "integration_id": 15368 },
-          { "context": "skills drift", "integration_id": 15368 }
+          { "context": "skills drift", "integration_id": 15368 },
+          { "context": "skills installable", "integration_id": 15368 }
         ]
       }
     },

@@ -13,6 +13,13 @@ the default branch's rules require it (resolving a thread fires no Actions event
 a status would lag); otherwise the gate itself fails while any is open, and the
 periodic sweep picks up the resolution.
 
+A repo may opt in to a skills-update lane (``.github/skills-update-lane.json``): the
+update workflow's own PR (its bot author, its branch, this repo, no fork) whose every
+changed and renamed-from path is ``skills-lock.json`` or inside a tag-pinned skill's
+folder passes as "skills-update: tag-pinned skills only, no review required" on BOTH
+halves, before the CODEOWNERS half is read. Any other PR, or no lane file, falls
+through to the order below.
+
 With a CODEOWNERS file (see ``path_owners``), a PR touching a path its author
 doesn't own also needs that path's owner to approve the head; that half is reported
 first. Once no owner's approval is missing, a docs-only PR (every changed and
@@ -34,6 +41,7 @@ import argparse
 import functools
 import json
 import os
+import re
 import subprocess  # nosec B404 -- fixed gh argv, no shell
 import sys
 from collections.abc import Mapping, Sequence
@@ -53,6 +61,15 @@ OWNERSHIP_CLEAR = "no changed path needs another owner's approval"
 # references/). Read from the default-branch checkout, like CODEOWNERS.
 DOCS_ONLY_PATHS_FILE = REPO_ROOT / ".github" / "docs-only-paths.json"
 DOCS_ONLY_STATUS = ("success", "docs-only: no review required")
+# Opt-in like the docs-only file; the lane reads the default branch's lock too.
+SKILLS_UPDATE_LANE_FILE = REPO_ROOT / ".github" / "skills-update-lane.json"
+SKILLS_LOCK_FILE = REPO_ROOT / "skills-lock.json"
+SKILLS_UPDATE_STATUS = (
+    "success",
+    "skills-update: tag-pinned skills only, no review required",
+)
+_SEMVER_TAG = re.compile(r"^v\d+\.\d+\.\d+$")  # same test as bump-pins.mjs
+_SKILL_ROOTS = (".agents/skills", ".claude/skills")
 _MAX_DESCRIPTION = 140  # GitHub rejects longer status descriptions
 # Posts per run before giving up on a state that keeps changing (the sweep retries).
 _MAX_POSTS = 5
@@ -173,6 +190,162 @@ def docs_only_status(
     paths += [f["previous_filename"] for f in files if f.get("previous_filename")]
     if all(_is_docs_path(path, allowlist) for path in paths):
         return DOCS_ONLY_STATUS
+    return None
+
+
+class SkillsUpdateLane(NamedTuple):
+    """Who may open the skills-update PR, and from which branch.
+
+    Attributes
+    ----------
+    branch : str
+        The head branch the update workflow pushes.
+    authors : tuple[str, ...]
+        Logins allowed to author that PR (the workflow's bot).
+    """
+
+    branch: str
+    authors: tuple[str, ...]
+
+
+def load_skills_update_lane(path: Path) -> SkillsUpdateLane | None:
+    """Read the skills-update lane file, failing closed on any problem.
+
+    Parameters
+    ----------
+    path : Path
+        The ``skills-update-lane.json`` file to read.
+
+    Returns
+    -------
+    SkillsUpdateLane or None
+        The lane, or None (the lane is off) when the file is missing (silently),
+        isn't a JSON object, or ``branch`` (a non-empty string) or ``authors`` (a
+        non-empty list of non-empty strings) is missing or mistyped. Other keys
+        are ignored.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        print(f"{path}: unreadable skills-update lane: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(data, dict):
+        data = {}
+    branch = data.get("branch")
+    authors = _string_tuple(data.get("authors"))
+    if not isinstance(branch, str) or not branch or authors is None:
+        print(f"{path}: malformed skills-update lane", file=sys.stderr)
+        return None
+    return SkillsUpdateLane(branch, authors)
+
+
+def tag_pinned_skill_folders(lock_path: Path) -> tuple[str, ...]:
+    """Return the local folders of every tag-pinned skill in the lock.
+
+    The folder comes from the entry's key (where the skills CLI installs it), not
+    its ``skillPath``, which is a path in the upstream repo.
+
+    Parameters
+    ----------
+    lock_path : Path
+        The ``skills-lock.json`` file to read.
+
+    Returns
+    -------
+    tuple[str, ...]
+        ``.agents/skills/<name>`` and ``.claude/skills/<name>`` for each entry whose
+        ``ref`` is a ``vX.Y.Z`` tag; empty (the lane is off) when the lock is missing
+        or malformed. Keys that aren't a plain folder name are skipped.
+    """
+    try:
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ()
+    except (OSError, ValueError) as exc:
+        print(f"{lock_path}: unreadable skills lock: {exc}", file=sys.stderr)
+        return ()
+    skills = data.get("skills") if isinstance(data, dict) else None
+    if not isinstance(skills, dict):
+        return ()
+    folders = []
+    for name, entry in skills.items():
+        ref = entry.get("ref") if isinstance(entry, dict) else None
+        if not isinstance(ref, str) or not _SEMVER_TAG.match(ref):
+            continue
+        if name in ("", ".", "..") or "/" in name or "\\" in name:
+            continue
+        folders += [f"{root}/{name}" for root in _SKILL_ROOTS]
+    return tuple(folders)
+
+
+@functools.cache
+def _cached_skills_update_lane(path: Path) -> SkillsUpdateLane | None:
+    """Load the lane once per path per process, so a sweep reads it once."""
+    return load_skills_update_lane(path)
+
+
+@functools.cache
+def _cached_tag_pinned_folders(path: Path) -> tuple[str, ...]:
+    """Read the lock once per path per process, so a sweep reads it once."""
+    return tag_pinned_skill_folders(path)
+
+
+def _is_lane_pull(pull: Mapping[str, Any], lane: SkillsUpdateLane, repo: str) -> bool:
+    """Whether the PR's author, branch and head repo are the lane's (no fork)."""
+    head = pull["head"]
+    return (
+        pull["user"]["login"] in lane.authors
+        and head["ref"] == lane.branch
+        and (head.get("repo") or {}).get("full_name") == repo
+    )
+
+
+def skills_update_status(
+    pull: Mapping[str, Any],
+    files: Sequence[Mapping[str, Any]],
+    lane: SkillsUpdateLane | None,
+    folders: Sequence[str],
+    repo: str,
+) -> tuple[str, str] | None:
+    """Return a passing status for the skills-update PR, else None.
+
+    Parameters
+    ----------
+    pull : Mapping[str, Any]
+        The PR as the REST API returns it.
+    files : Sequence[Mapping[str, Any]]
+        The PR's files: ``filename`` and, for a rename, ``previous_filename``.
+    lane : SkillsUpdateLane or None
+        The opted-in lane; None turns the lane off.
+    folders : Sequence[str]
+        Tag-pinned skill folders (``tag_pinned_skill_folders``); empty turns the
+        lane off.
+    repo : str
+        Repository as ``owner/name``; a head from any other repo (a fork) is refused.
+
+    Returns
+    -------
+    tuple[str, str] or None
+        ``SKILLS_UPDATE_STATUS``, or None when the PR isn't the update PR or
+        touches any other path.
+    """
+    if (
+        lane is None
+        or not folders
+        or not _is_lane_pull(pull, lane, repo)
+        or not files
+        or int(pull["changed_files"]) != len(files)
+    ):
+        return None
+    paths = [f["filename"] for f in files]
+    paths += [f["previous_filename"] for f in files if f.get("previous_filename")]
+    if all(
+        p == "skills-lock.json" or any(p.startswith(f + "/") for f in folders)
+        for p in paths
+    ):
+        return SKILLS_UPDATE_STATUS
     return None
 
 
@@ -439,6 +612,35 @@ def _docs_only(repo: str, pr: int, head_sha: str) -> tuple[str, str] | None:
     return docs_only_status(listed, int(pull["changed_files"]), allowlist)
 
 
+def _skills_update(
+    repo: str, pr: int, head_sha: str | None
+) -> tuple[str, tuple[str, str] | None]:
+    """Return (head SHA, the skills-update pass or None) for ``pr``.
+
+    Reads nothing from the PR unless the repo opted in with a lane file and the lock
+    has tag-pinned skills. With ``head_sha`` given, a push since it was read moves
+    the head, so the files would belong to a different head: fail closed (the push
+    triggers its own run). With it None the head is the pull's own.
+    """
+    lane = _cached_skills_update_lane(SKILLS_UPDATE_LANE_FILE)
+    folders = _cached_tag_pinned_folders(SKILLS_LOCK_FILE) if lane else ()
+    if lane is None or not folders:
+        return head_sha or "", None
+    pull = reviewer_state._gh_json(["api", f"repos/{repo}/pulls/{pr}"])
+    head = str(pull["head"]["sha"])
+    if head_sha is not None and head != head_sha:
+        return head_sha, None
+    if not _is_lane_pull(pull, lane, repo):
+        return head, None  # skip the paginated files read for every other PR
+    listed = (
+        reviewer_state._gh_json(
+            ["api", "--paginate", f"repos/{repo}/pulls/{pr}/files?per_page=100"]
+        )
+        or []
+    )
+    return head, skills_update_status(pull, listed, lane, folders, repo)
+
+
 def _threads_enforced(repo: str) -> bool:
     """Return whether the default branch's rules require review threads resolved.
 
@@ -508,14 +710,21 @@ def _want(
 ) -> tuple[str, tuple[str, str] | None]:
     """Return (head SHA, status to post) for ``pr``; no status when nothing gates it.
 
-    A missing owner's approval wins (it is the slower, human half); then a docs-only
-    PR (opt-in) passes; otherwise the reviewer's gate decides, or the ownership half
-    alone when there is no reviewer.
+    The skills-update lane (opt-in) passes first, on both halves. Otherwise a missing
+    owner's approval wins (it is the slower, human half); then a docs-only PR (opt-in)
+    passes; otherwise the reviewer's gate decides, or the ownership half alone when
+    there is no reviewer.
     """
     if adapter is None:
+        head, lane_pass = _skills_update(repo, pr, None)
+        if lane_pass is not None:
+            return head, lane_pass
         return _ownership(repo, pr, None)
     state = reviewer_state.collect_state(repo, pr, adapter)
     head_sha = state["head_sha"]
+    _, lane_pass = _skills_update(repo, pr, head_sha)
+    if lane_pass is not None:
+        return head_sha, lane_pass
     owners = ownership_gate_status(repo, pr, head_sha)
     if owners is not None and owners[0] == "failure":
         return head_sha, owners
@@ -537,11 +746,13 @@ def post_for_pr(
 ) -> None:
     """Compute the gate for ``pr`` and post it on the head it was computed for.
 
-    The gate fails while a path owner's approval is missing, whatever the reviewer's
-    state; once none is missing a docs-only PR passes (``docs_only_status``, opt-in);
-    any other PR gets the reviewer's gate (``gate_status``). With no reviewer
-    (``adapter`` None) it is the ownership half alone, and nothing is posted when
-    there is no CODEOWNERS file naming a user owner either.
+    The opt-in skills-update lane (``skills_update_status``) passes the update PR
+    before the CODEOWNERS half is read. Otherwise the gate fails while a path
+    owner's approval is missing, whatever the reviewer's state; once none is missing
+    a docs-only PR passes (``docs_only_status``, opt-in); any other PR gets the
+    reviewer's gate (``gate_status``). With no reviewer (``adapter`` None) it is the
+    lane or the ownership half alone; ``main()`` skips the call when neither a
+    reviewer nor a CODEOWNERS file naming a user owner is configured.
 
     Runs are never cancelled (a cancelled run is a red X on the PR and on `main`),
     so several can overlap. A run posts only when the head's newest status differs

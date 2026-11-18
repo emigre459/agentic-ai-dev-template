@@ -36,7 +36,7 @@ machinery_tests: ## Test the template machinery
 	@uv run pytest tests/template -v --tb=short
 
 .PHONY: skills_lock
-skills_lock: ## Regenerate skills-lock.json for the template's skills (TAG=vX.Y.Z records a release)
+skills_lock: ## Regenerate .github/template-skills-lock.json, the template's skill pin (TAG=vX.Y.Z records a release)
 	@node .github/actions/skills-drift/skills-lock.mjs write --root .$(if $(TAG), --tag $(TAG))
 
 .PHONY: deps
