@@ -1145,7 +1145,6 @@ class _LaneRepo:
         self.pull = _pull(**over)
         self.names = ["skills-lock.json", ".agents/skills/alpha/SKILL.md"]
         self.pull["changed_files"] = over.get("changed_files", len(self.names))
-        self.pull["head"] = over.get("head", self.pull["head"])
 
         def gh_json(args: list[str]) -> Any:
             if args[-1] == f"repos/{REPO}/pulls/1":
@@ -1222,7 +1221,8 @@ def test_an_update_pr_with_one_non_skill_path_needs_both_halves(
 def test_a_moved_head_fails_closed(monkeypatch: Any, tmp_path: Path) -> None:
     moved = {"ref": "skills-update", "sha": "9" * 40, "repo": {"full_name": REPO}}
     posts = _lane_run(monkeypatch, tmp_path, _state(verdict="none"), head=moved)
-    assert posts and review_gate.SKILLS_UPDATE_STATUS not in posts
+    assert [p[0] for p in posts] == ["failure"]
+    assert "@owner must approve" in posts[0][1]
 
 
 def test_the_lane_passes_with_no_reviewer_configured(
@@ -1230,3 +1230,35 @@ def test_the_lane_passes_with_no_reviewer_configured(
 ) -> None:
     posts = _lane_run(monkeypatch, tmp_path, None)
     assert posts == [review_gate.SKILLS_UPDATE_STATUS]
+
+
+def test_a_non_lane_pr_reads_no_files_and_needs_the_owner_with_no_reviewer(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    posts = _lane_run(monkeypatch, tmp_path, None, user={"login": "alice"})
+    assert [p[0] for p in posts] == ["failure"]
+    assert "@owner must approve" in posts[0][1]
+
+
+def test_a_malformed_lane_file_and_lock_say_so_on_stderr(
+    tmp_path: Path, capsys: Any
+) -> None:
+    lane = tmp_path / "lane.json"
+    lane.write_text('{"branch": ""}')
+    assert review_gate.load_skills_update_lane(lane) is None
+    assert f"{lane}: malformed skills-update lane" in capsys.readouterr().err
+    lock = tmp_path / "skills-lock.json"
+    lock.write_text("not json")
+    assert review_gate.tag_pinned_skill_folders(lock) == ()
+    assert f"{lock}: unreadable skills lock" in capsys.readouterr().err
+
+
+def test_empty_and_dot_lock_keys_are_skipped(tmp_path: Path) -> None:
+    lock = _write_lock(
+        tmp_path,
+        {"": {"ref": "v1.0.0"}, ".": {"ref": "v1.0.0"}, "ok": {"ref": "v1.0.0"}},
+    )
+    assert review_gate.tag_pinned_skill_folders(lock) == (
+        ".agents/skills/ok",
+        ".claude/skills/ok",
+    )

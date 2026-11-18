@@ -292,6 +292,16 @@ def _cached_tag_pinned_folders(path: Path) -> tuple[str, ...]:
     return tag_pinned_skill_folders(path)
 
 
+def _is_lane_pull(pull: Mapping[str, Any], lane: SkillsUpdateLane, repo: str) -> bool:
+    """Whether the PR's author, branch and head repo are the lane's (no fork)."""
+    head = pull["head"]
+    return (
+        pull["user"]["login"] in lane.authors
+        and head["ref"] == lane.branch
+        and (head.get("repo") or {}).get("full_name") == repo
+    )
+
+
 def skills_update_status(
     pull: Mapping[str, Any],
     files: Sequence[Mapping[str, Any]],
@@ -321,13 +331,10 @@ def skills_update_status(
         ``SKILLS_UPDATE_STATUS``, or None when the PR isn't the update PR or
         touches any other path.
     """
-    if lane is None or not folders:
-        return None
-    head = pull["head"]
     if (
-        pull["user"]["login"] not in lane.authors
-        or head["ref"] != lane.branch
-        or (head.get("repo") or {}).get("full_name") != repo
+        lane is None
+        or not folders
+        or not _is_lane_pull(pull, lane, repo)
         or not files
         or int(pull["changed_files"]) != len(files)
     ):
@@ -623,6 +630,8 @@ def _skills_update(
     head = str(pull["head"]["sha"])
     if head_sha is not None and head != head_sha:
         return head_sha, None
+    if not _is_lane_pull(pull, lane, repo):
+        return head, None  # skip the paginated files read for every other PR
     listed = (
         reviewer_state._gh_json(
             ["api", "--paginate", f"repos/{repo}/pulls/{pr}/files?per_page=100"]
@@ -738,11 +747,12 @@ def post_for_pr(
     """Compute the gate for ``pr`` and post it on the head it was computed for.
 
     The opt-in skills-update lane (``skills_update_status``) passes the update PR
-    before either half is read. Otherwise the gate fails while a path owner's
-    approval is missing, whatever the reviewer's state; once none is missing a docs-only PR passes (``docs_only_status``, opt-in);
-    any other PR gets the reviewer's gate (``gate_status``). With no reviewer
-    (``adapter`` None) it is the ownership half alone, and nothing is posted when
-    there is no CODEOWNERS file naming a user owner either.
+    before the CODEOWNERS half is read. Otherwise the gate fails while a path
+    owner's approval is missing, whatever the reviewer's state; once none is missing
+    a docs-only PR passes (``docs_only_status``, opt-in); any other PR gets the
+    reviewer's gate (``gate_status``). With no reviewer (``adapter`` None) it is the
+    lane or the ownership half alone; ``main()`` skips the call when neither a
+    reviewer nor a CODEOWNERS file naming a user owner is configured.
 
     Runs are never cancelled (a cancelled run is a red X on the PR and on `main`),
     so several can overlap. A run posts only when the head's newest status differs
