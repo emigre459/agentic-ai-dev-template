@@ -59,6 +59,16 @@ Each item has one sensible fix:
 - **Item 3:** an alternative is to drop the entry and rely on `.claude/settings.json`.
   That breaks repos whose settings don't carry it.
 
+## Amendment — 2026-11-18 (build)
+
+Item 3's body change was revised. `review-skill/scripts/validate.py`'s "No cross-skill
+script invocations" check fails a SKILL.md body that runs another skill's script by a
+concrete path, so the body keeps `<resolve-pr-concerns skill dir>/scripts/single_flight.py`.
+A prose line now says that with skills in `.agents/skills/`, that dir is
+`.agents/skills/resolve-pr-concerns`: run from the repo root, the command matches the
+anchored `allowed-tools` entry. The frontmatter (not scanned) carries the anchored entry
+as designed.
+
 ## Left to the builder
 
 The exact wording of the generic kanban example and of the release-check skip line,

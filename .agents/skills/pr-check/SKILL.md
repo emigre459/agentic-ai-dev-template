@@ -10,14 +10,16 @@ allowed-tools: Bash(make pr_check), Bash(python3 .agents/skills/resolve-pr-conce
 
 Run the full PR readiness check through the single-flight lock, so parallel sessions
 on this machine queue for it instead of competing (the lock is a script in the
-`resolve-pr-concerns` skill; every worktree of the repo shares it). Run it from the
-repo root, exactly as written, so it matches the allow-list entry and needs no prompt
-(`.agents/skills/` is canonical; Claude Code reads it through the `.claude/skills`
-symlink):
+`resolve-pr-concerns` skill; every worktree of the repo shares it):
 
 ```bash
-python3 .agents/skills/resolve-pr-concerns/scripts/single_flight.py suite -- make pr_check
+python3 <resolve-pr-concerns skill dir>/scripts/single_flight.py suite -- make pr_check
 ```
+
+With skills installed in the canonical `.agents/skills/` (Claude Code reads it through
+the `.claude/skills` symlink), that dir is `.agents/skills/resolve-pr-concerns`: run
+the command from the repo root with that relative path, the one this skill's
+`allowed-tools` entry names, and it needs no permission prompt.
 
 While it waits it names the session holding the lock. Without the
 `resolve-pr-concerns` skill installed, or with `SINGLE_FLIGHT=0`, run `make pr_check`

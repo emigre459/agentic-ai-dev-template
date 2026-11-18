@@ -680,7 +680,10 @@ def test_pr_check_allow_lists_only_the_anchored_lock_command() -> None:
     body = "\n".join(lines[end + 1 :])
     assert f"Bash({_ANCHORED_LOCK})" in allowed
     assert "*single_flight.py" not in allowed
-    assert f"\n{_ANCHORED_LOCK}\n" in body, "the body's command must match the entry"
+    # The body keeps the placeholder (validate.py: a skill runs only its own scripts
+    # by a concrete path) and names the canonical dir the entry is anchored to.
+    assert "<resolve-pr-concerns skill dir>/scripts/single_flight.py" in body
+    assert "`.agents/skills/resolve-pr-concerns`" in body
 
 
 def test_release_check_skips_repos_without_release_pieces() -> None:
