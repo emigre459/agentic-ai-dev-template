@@ -19,10 +19,17 @@ a GitHub App from a manifest"):
 7. add ``<slug>[bot]`` to ``.github/skills-update-lane.json`` so the review gate's
    skills-update lane accepts the App's PRs.
 
-``--existing-app SLUG`` runs only steps 6 and 7, for an org whose App and org secrets
-already exist. A private App installs only on the account that owns it, so an
-org-owned repo needs ``--org <org>``, and a personal repo's App can only be created by
-its owner.
+``--existing-app SLUG`` is for another repo of an org whose App and org secrets
+already exist (made once with ``--org-secrets``): it adds the repo to both org
+secrets' selected repositories, never replacing their lists, then runs steps 6 and 7.
+A personal repo has no org secrets to share, so it needs its own App (or a PAT). A
+private App installs only on the account that owns it, so an org-owned repo needs
+``--org <org>``, and a personal repo's App can only be created by its owner.
+``--org-secrets`` refuses to overwrite an org secret that already exists: it belongs
+to an existing App.
+
+The install confirmation is read from stdin; at end of input (an agent's background
+run) the summary says the install was not confirmed and how to check it.
 
 The private key never lands in argv, on disk, in output, or in an error message. Run
 it with ``python3`` (stdlib only) from anywhere inside the repo's git checkout: the
@@ -50,7 +57,7 @@ import urllib.parse
 import webbrowser
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, NoReturn
 
 DEFAULT_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
 LANE_FILE = Path(".github") / "skills-update-lane.json"
@@ -64,6 +71,7 @@ LISTEN_TIMEOUT = 600.0
 
 _CODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_./-]*$")
 _PEM_BLOCK_RE = re.compile(
     r"-----BEGIN [^-]+-----.*?(?:-----END [^-]+-----|\Z)", re.DOTALL
 )
@@ -124,6 +132,43 @@ def _redact(text: str, secret: str | None) -> str:
     return text
 
 
+def _gh_proc(
+    args: Sequence[str], stdin_text: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run ``gh`` and return the finished process, whatever its exit code.
+
+    Parameters
+    ----------
+    args : Sequence[str]
+        The ``gh`` arguments. They must never hold a secret.
+    stdin_text : str | None
+        Text for ``gh``'s stdin (the only way a secret reaches it).
+
+    Returns
+    -------
+    subprocess.CompletedProcess[str]
+        The finished ``gh``, its output captured.
+
+    Raises
+    ------
+    SetupError
+        ``gh`` is missing.
+    """
+    try:
+        return subprocess.run(  # nosec B603 -- fixed gh argv, no shell
+            [_gh_cmd(), *args],
+            input=stdin_text,
+            stdin=None if stdin_text is not None else subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        raise SetupError(
+            "gh is not installed or not on PATH: https://cli.github.com"
+        ) from None
+
+
 def _gh(
     args: Sequence[str], *, stdin_text: str | None = None, secret: str | None = None
 ) -> str:
@@ -149,24 +194,25 @@ def _gh(
         ``gh`` is missing or exits non-zero. The message holds the command and
         ``gh``'s redacted stderr, never its stdout.
     """
-    shown = " ".join(args)
-    try:
-        proc = subprocess.run(  # nosec B603 -- fixed gh argv, no shell
-            [_gh_cmd(), *args],
-            input=stdin_text,
-            stdin=None if stdin_text is not None else subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        raise SetupError(
-            "gh is not installed or not on PATH: https://cli.github.com"
-        ) from None
+    proc = _gh_proc(args, stdin_text)
     if proc.returncode != 0:
-        detail = _redact(proc.stderr.strip(), secret)
-        raise SetupError(f"`gh {shown}` failed (exit {proc.returncode}): {detail}")
+        _fail(args, proc, secret)
     return proc.stdout
+
+
+def _fail(
+    args: Sequence[str],
+    proc: subprocess.CompletedProcess[str],
+    secret: str | None = None,
+) -> NoReturn:
+    """Raise ``SetupError`` for a failed ``gh`` call, with its redacted stderr."""
+    detail = _redact(proc.stderr.strip(), secret)
+    raise SetupError(f"`gh {' '.join(args)}` failed (exit {proc.returncode}): {detail}")
+
+
+def _is_not_found(proc: subprocess.CompletedProcess[str]) -> bool:
+    """Whether a failed ``gh api`` call was GitHub's 404."""
+    return proc.returncode != 0 and "HTTP 404" in proc.stderr
 
 
 def build_manifest(
@@ -444,6 +490,75 @@ def set_secrets(repo: str, creds: AppCredentials, org_secrets_org: str | None) -
     )
 
 
+def org_secret_exists(org: str, name: str) -> bool:
+    """Return whether ``org`` has the Actions secret ``name`` (a 404 means no).
+
+    Parameters
+    ----------
+    org : str
+        The org login.
+    name : str
+        The secret's name.
+
+    Returns
+    -------
+    bool
+        True when GitHub returns the secret, False on its 404.
+
+    Raises
+    ------
+    SetupError
+        ``gh`` failed with anything but a 404.
+    """
+    args = ["api", f"orgs/{org}/actions/secrets/{name}"]
+    proc = _gh_proc(args)
+    if proc.returncode == 0:
+        return True
+    if _is_not_found(proc):
+        return False
+    _fail(args, proc)
+
+
+def add_repo_to_org_secrets(org: str, repo: str, repo_id: int) -> None:
+    """Add ``repo`` to both App secrets' selected repositories in ``org``.
+
+    It adds the one repo (``PUT .../repositories/<repo_id>``) and never replaces a
+    secret's list, so the other repos sharing the App keep their access.
+
+    Parameters
+    ----------
+    org : str
+        The org that holds the secrets.
+    repo : str
+        ``owner/name``, for the messages.
+    repo_id : int
+        The repo's numeric id.
+
+    Raises
+    ------
+    SetupError
+        A secret doesn't exist in the org (create it once with ``--org-secrets``),
+        or ``gh`` failed.
+    """
+    for name in (APP_ID_SECRET_NAME, APP_KEY_SECRET_NAME):
+        args = [
+            "api",
+            "-X",
+            "PUT",
+            f"orgs/{org}/actions/secrets/{name}/repositories/{repo_id}",
+        ]
+        proc = _gh_proc(args)
+        if _is_not_found(proc):
+            raise SetupError(
+                f"the org secret {name} isn't set in {org} (or you can't manage "
+                f"{org}'s secrets): --existing-app shares the App's org secrets, so "
+                "create the App once without --existing-app and with --org-secrets "
+                f"(--org {org} --org-secrets), then rerun this for {repo}"
+            )
+        if proc.returncode != 0:
+            _fail(args, proc)
+
+
 def write_lane_file(path: Path, author: str, branch: str = LANE_BRANCH) -> bool:
     """Create the skills-update lane file, or add ``author`` to an existing one.
 
@@ -469,7 +584,7 @@ def write_lane_file(path: Path, author: str, branch: str = LANE_BRANCH) -> bool:
     data: dict[str, Any] = {}
     if path.exists():
         try:
-            loaded = json.loads(path.read_text())
+            loaded = json.loads(path.read_text(encoding="utf-8"))
         except ValueError:
             raise SetupError(f"{path} is not valid JSON; fix or remove it") from None
         if not isinstance(loaded, dict) or not isinstance(
@@ -487,7 +602,7 @@ def write_lane_file(path: Path, author: str, branch: str = LANE_BRANCH) -> bool:
     if path.exists() and json.dumps(data, sort_keys=True) == before:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return True
 
 
@@ -523,12 +638,15 @@ class Preflight(NamedTuple):
     ----------
     owner_type : str
         ``"User"`` or ``"Organization"``, from the repo's ``owner.type``.
+    repo_id : int
+        The repo's numeric id (for adding it to an org secret's repositories).
     root : Path | None
         The local git work tree's root (where the lane file goes); None when the
         lane file isn't wanted.
     """
 
     owner_type: str
+    repo_id: int
     root: Path | None
 
 
@@ -584,7 +702,7 @@ def _preflight(repo: str, *, want_root: bool) -> Preflight:
             "api",
             f"repos/{repo}",
             "--jq",
-            "{admin: .permissions.admin, owner_type: .owner.type}",
+            "{admin: .permissions.admin, owner_type: .owner.type, id: .id}",
         ]
     )
     try:
@@ -596,7 +714,10 @@ def _preflight(repo: str, *, want_root: bool) -> Preflight:
             f"you need admin on {repo} to set its Actions secrets "
             "(ask an admin to run this, or to grant you admin)"
         )
-    return Preflight(owner_type=str(info.get("owner_type")), root=root)
+    repo_id = info.get("id")
+    if not isinstance(repo_id, int) or isinstance(repo_id, bool):
+        raise SetupError(f"couldn't read {repo}'s id from gh")
+    return Preflight(owner_type=str(info.get("owner_type")), repo_id=repo_id, root=root)
 
 
 def _check_owner(
@@ -689,13 +810,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--org-secrets",
         action="store_true",
-        help="set the secrets once as org secrets visible to --repo (needs --org)",
+        help="set the secrets once as org secrets visible to --repo (needs --org; "
+        "refused if the org already has them: use --existing-app)",
     )
     parser.add_argument(
         "--existing-app",
         metavar="SLUG",
-        help="the App already exists (with org secrets): only install it and "
-        "write the lane file",
+        help="the org's App and its org secrets already exist: add --repo to the "
+        "org secrets, install the App and write the lane file (org repos only)",
+    )
+    parser.add_argument(
+        "--branch",
+        default=LANE_BRANCH,
+        help="the update branch for a new lane file, if the workflow overrides the "
+        f"action's branch input (default: {LANE_BRANCH})",
     )
     parser.add_argument(
         "--no-lane", action="store_true", help="don't write the lane file"
@@ -725,6 +853,47 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
         parser.error("--existing-app must be the App's slug")
     if args.org and not _NAME_RE.match(args.org):
         parser.error("--org must be an org login")
+    if not _BRANCH_RE.match(args.branch) or ".." in args.branch:
+        parser.error("--branch must be a branch name")
+
+
+def _check_existing_app(repo: str, owner_type: str, org: str | None) -> None:
+    """Refuse ``--existing-app`` unless the repo is the org's and ``--org`` matches."""
+    if owner_type == "User":
+        raise SetupError(
+            f"--existing-app shares an org's App through its org secrets, and {repo} "
+            "is a personal repo: each personal repo needs its own App (rerun without "
+            "--existing-app), or a SKILLS_UPDATE_TOKEN PAT"
+        )
+    _check_owner(repo, owner_type, org, org_secrets=False)
+
+
+def _recovery(args: argparse.Namespace, creds: AppCredentials) -> str:
+    """Say how to finish by hand after the key couldn't be stored."""
+    repo: str = args.repo
+    slug = creds.slug
+    settings = (
+        f"https://github.com/organizations/{args.org}/settings/apps/{slug}"
+        if args.org
+        else f"https://github.com/settings/apps/{slug}"
+    )
+    if args.org_secrets:
+        scope = f"--org {args.org} --visibility selected --repos {repo.split('/')[1]}"
+        finish = f"then rerun with --existing-app {slug} --org {args.org}."
+    else:
+        scope = f"--repo {repo}"
+        finish = (
+            f"then install the App on {repo} at "
+            f"https://github.com/apps/{slug}/installations/new and add "
+            f'"{slug}[bot]" to the authors in {LANE_FILE}.'
+        )
+    return (
+        f"The App {slug} (id {creds.app_id}) was created, but its key was not stored "
+        f"and this script keeps no copy. Generate a new private key at {settings}, "
+        f"run `gh secret set {APP_ID_SECRET_NAME} {scope} --body {creds.app_id}` and "
+        f"`gh secret set {APP_KEY_SECRET_NAME} {scope} < the-key.pem`, delete the "
+        f"downloaded key, {finish}"
+    )
 
 
 def _run(args: argparse.Namespace) -> None:
@@ -733,37 +902,51 @@ def _run(args: argparse.Namespace) -> None:
     done: list[str] = []
     if args.existing_app:
         slug = args.existing_app
+        _check_existing_app(repo, checked.owner_type, args.org)
+        add_repo_to_org_secrets(args.org, repo, checked.repo_id)
+        done.append(
+            f"Added {repo} to the org secrets {APP_ID_SECRET_NAME} and "
+            f"{APP_KEY_SECRET_NAME} of {args.org} (other repos keep theirs)."
+        )
     else:
         _check_owner(repo, checked.owner_type, args.org, args.org_secrets)
+        if args.org_secrets and org_secret_exists(args.org, APP_ID_SECRET_NAME):
+            raise SetupError(
+                f"the org secret {APP_ID_SECRET_NAME} already exists in {args.org}: "
+                "it belongs to an existing App, and this script never overwrites it. "
+                f"Rerun with --existing-app <that App's slug> --org {args.org} to add "
+                f"{repo} to it."
+            )
         creds = _create_app(args)
         slug = creds.slug
         done.append(f"Created the App {slug} (id {creds.app_id}).")
         try:
             set_secrets(repo, creds, args.org if args.org_secrets else None)
         except SetupError as exc:
-            settings = (
-                f"https://github.com/organizations/{args.org}/settings/apps/{slug}"
-                if args.org
-                else f"https://github.com/settings/apps/{slug}"
-            )
-            raise SetupError(
-                f"{exc}\nThe App {slug} (id {creds.app_id}) was created, but its key "
-                "was not stored and this script keeps no copy. Generate a new private "
-                f"key at {settings}, set {APP_ID_SECRET_NAME} to {creds.app_id} and "
-                f"{APP_KEY_SECRET_NAME} to the key (gh secret set "
-                f"{APP_KEY_SECRET_NAME} --repo {repo} < the-key.pem), delete the "
-                f"downloaded key, then rerun with --existing-app {slug}."
-            ) from None
+            raise SetupError(f"{exc}\n{_recovery(args, creds)}") from None
         where = f"org {args.org}, visible to {repo}" if args.org_secrets else repo
         done.append(f"Set {APP_ID_SECRET_NAME} and {APP_KEY_SECRET_NAME} on {where}.")
     install = f"https://github.com/apps/{slug}/installations/new"
+    check = (
+        'run "skills update" by hand from the Actions tab '
+        f"(gh workflow run skills-update.yml --repo {repo})"
+    )
     _show(install, "the App's install page", args.no_browser)
-    _ask(f"Install it on {repo} only, then press Enter here: ")
-    done.append(f"Install page opened for {repo} (you confirmed the install).")
+    reply = _ask(f"Install it on {repo} only, then press Enter here: ")
+    confirmed = reply != ""
+    if confirmed:
+        done.append(f"Install page opened for {repo} (you confirmed the install).")
+    else:
+        print()
+        done.append(
+            "The install was not confirmed: no answer reached this script "
+            f"(end of input). Install the App on {repo} only at {install}, then "
+            f"{check} to prove it."
+        )
     author = f"{slug}[bot]"
     lane_changed = False
     if checked.root is not None:
-        lane_changed = write_lane_file(checked.root / LANE_FILE, author)
+        lane_changed = write_lane_file(checked.root / LANE_FILE, author, args.branch)
         state = "added" if lane_changed else "already lists"
         done.append(f"{LANE_FILE} {state} {author}.")
     print("\nDone:")
@@ -780,10 +963,7 @@ def _run(args: argparse.Namespace) -> None:
             f'  - Add "{author}" to the authors in {LANE_FILE} on the default branch '
             "so the review gate's skills-update lane accepts its PRs."
         )
-    print(
-        '  - Prove the install with a workflow_dispatch run of "skills update": '
-        f"gh workflow run skills-update.yml --repo {repo}"
-    )
+    print(f"  - Prove the install: {check}.")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

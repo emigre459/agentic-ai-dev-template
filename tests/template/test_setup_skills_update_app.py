@@ -79,8 +79,22 @@ if args[:2] == ["auth", "status"]:
 if args[:1] == ["api"] and args[1].startswith("repos/"):
     owner = args[1].split("/")[1]
     kind = cfg.get("owner_type") or ("Organization" if owner == "acme" else "User")
-    print(json.dumps({"admin": cfg.get("admin", True), "owner_type": kind}))
+    print(json.dumps({
+        "admin": cfg.get("admin", True),
+        "owner_type": kind,
+        "id": cfg.get("repo_id", 777),
+    }))
     sys.exit(0)
+if args[:1] == ["api"] and "/actions/secrets/" in " ".join(args):
+    # GET orgs/<org>/actions/secrets/<NAME>, or
+    # PUT orgs/<org>/actions/secrets/<NAME>/repositories/<repo_id>.
+    path = args[3] if args[1:3] == ["-X", "PUT"] else args[1]
+    name = path.split("/actions/secrets/")[1].split("/")[0]
+    if name in cfg.get("org_secrets", []):
+        print(json.dumps({"name": name}))
+        sys.exit(0)
+    sys.stderr.write("gh: Not Found (HTTP 404)\n")
+    sys.exit(1)
 if args[:2] == ["api", "user"]:
     print(cfg.get("user", "owner"))
     sys.exit(0)
@@ -135,6 +149,11 @@ def gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
 
 def _creds() -> Any:
     return app.AppCredentials(app_id=42, slug="acme-skills", pem=PEM)
+
+
+ORG_SECRETS = ["SKILLS_UPDATE_APP_ID", "SKILLS_UPDATE_APP_PRIVATE_KEY"]
+EXISTING = ["--repo", "acme/repo", "--org", "acme", "--existing-app", "acme-skills"]
+INSTALL_URL = "https://github.com/apps/acme-skills/installations/new"
 
 
 # --------------------------------------------------------------------------- #
@@ -476,9 +495,9 @@ def test_main_writes_the_lane_file_at_the_repo_root(
     gh: FakeGh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _enter_repo(tmp_path, monkeypatch, sub="deep/inside")
+    gh.configure(org_secrets=ORG_SECRETS)
     _feed(monkeypatch, "\n")
-    argv = ["--repo", "acme/repo", "--existing-app", "acme-skills", "--no-browser"]
-    assert app.main(argv) == 0
+    assert app.main([*EXISTING, "--no-browser"]) == 0
     lane = tmp_path / ".github" / "skills-update-lane.json"
     assert json.loads(lane.read_text())["authors"] == ["acme-skills[bot]"]
     assert not (tmp_path / "deep" / "inside" / ".github").exists()
@@ -499,13 +518,15 @@ def test_main_refuses_outside_a_git_work_tree(
     assert not any("app-manifests" in " ".join(c["argv"]) for c in gh.calls())
 
 
-def test_main_existing_app_skips_creation_and_secrets(
+def test_main_existing_app_adds_the_repo_to_the_org_secrets(
     gh: FakeGh,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """A second repo joins the org secrets' lists; nothing replaces them."""
     _enter_repo(tmp_path, monkeypatch)
+    gh.configure(org_secrets=ORG_SECRETS, repo_id=777)
     opened: list[str] = []
 
     def fake_open(url: str) -> bool:
@@ -514,15 +535,120 @@ def test_main_existing_app_skips_creation_and_secrets(
 
     monkeypatch.setattr(app.webbrowser, "open", fake_open)
     _feed(monkeypatch, "\n")
-    assert app.main(["--repo", "acme/repo", "--existing-app", "acme-skills"]) == 0
-    assert opened == ["https://github.com/apps/acme-skills/installations/new"]
-    joined = [" ".join(c["argv"]) for c in gh.calls()]
+    assert app.main(EXISTING) == 0
+    assert opened == [INSTALL_URL]
+    calls = [c["argv"] for c in gh.calls()]
+    joined = [" ".join(argv) for argv in calls]
     assert not any("app-manifests" in j or "secret set" in j for j in joined)
+    puts = [argv for argv in calls if argv[1:3] == ["-X", "PUT"]]
+    assert puts == [
+        [
+            "api",
+            "-X",
+            "PUT",
+            f"orgs/acme/actions/secrets/{name}/repositories/777",
+        ]
+        for name in ORG_SECRETS
+    ]
     lane = json.loads((tmp_path / ".github" / "skills-update-lane.json").read_text())
     assert lane["authors"] == ["acme-skills[bot]"]
     out = capsys.readouterr().out
     assert "skills-update-lane.json" in out
+    assert "acme/repo" in out and "org secrets" in out
+    assert "you confirmed the install" in out
     assert "workflow_dispatch" in out or "workflow run" in out
+
+
+def test_main_existing_app_refuses_a_personal_repo(
+    gh: FakeGh,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _enter_repo(tmp_path, monkeypatch)
+    gh.configure(org_secrets=ORG_SECRETS)
+    _feed(monkeypatch, "\n")
+    argv = ["--repo", "owner/repo", "--existing-app", "acme-skills", "--no-browser"]
+    assert app.main(argv) == 1
+    captured = capsys.readouterr()
+    assert "personal" in captured.err
+    assert "its own App" in captured.err and "PAT" in captured.err
+    assert INSTALL_URL not in captured.out
+    joined = [" ".join(c["argv"]) for c in gh.calls()]
+    assert not any("PUT" in j or "secret set" in j for j in joined)
+    assert not (tmp_path / ".github").exists()
+
+
+def test_main_existing_app_needs_the_matching_org(
+    gh: FakeGh,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _enter_repo(tmp_path, monkeypatch)
+    gh.configure(org_secrets=ORG_SECRETS)
+    argv = ["--repo", "acme/repo", "--existing-app", "acme-skills", "--no-browser"]
+    assert app.main(argv) == 1
+    assert "--org acme" in capsys.readouterr().err
+    assert app.main([*argv, "--org", "other"]) == 1
+    assert "--org acme" in capsys.readouterr().err
+    assert not any("PUT" in " ".join(c["argv"]) for c in gh.calls())
+
+
+def test_main_existing_app_fails_clearly_without_the_org_secrets(
+    gh: FakeGh,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _enter_repo(tmp_path, monkeypatch)
+    gh.configure(org_secrets=[])
+    _feed(monkeypatch, "\n")
+    assert app.main([*EXISTING, "--no-browser"]) == 1
+    captured = capsys.readouterr()
+    assert "SKILLS_UPDATE_APP_ID" in captured.err
+    assert "acme" in captured.err and "--org-secrets" in captured.err
+    assert INSTALL_URL not in captured.out
+    assert not (tmp_path / ".github").exists()
+
+
+def test_main_existing_app_eof_at_the_install_prompt_is_not_a_confirmation(
+    gh: FakeGh,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Run by an agent with no terminal, the install prompt reads end of input."""
+    _enter_repo(tmp_path, monkeypatch)
+    gh.configure(org_secrets=ORG_SECRETS)
+    _feed(monkeypatch, "")
+    assert app.main([*EXISTING, "--no-browser"]) == 0
+    out = capsys.readouterr().out
+    assert "you confirmed" not in out
+    done = out[out.index("Done:") :]
+    assert "not confirmed" in done
+    assert INSTALL_URL in done
+    assert "Actions tab" in done
+
+
+def test_main_branch_flag_names_the_lane_branch(
+    gh: FakeGh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enter_repo(tmp_path, monkeypatch)
+    gh.configure(org_secrets=ORG_SECRETS)
+    _feed(monkeypatch, "\n")
+    assert app.main([*EXISTING, "--no-browser", "--branch", "nightly-skills"]) == 0
+    lane = json.loads((tmp_path / ".github" / "skills-update-lane.json").read_text())
+    assert lane == {"branch": "nightly-skills", "authors": ["acme-skills[bot]"]}
+
+
+def test_main_refuses_a_malformed_branch(
+    gh: FakeGh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enter_repo(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as err:
+        app.main([*EXISTING, "--no-browser", "--branch", "bad branch"])
+    assert err.value.code == 2
 
 
 def test_main_no_lane_leaves_the_file_alone(
@@ -530,9 +656,8 @@ def test_main_no_lane_leaves_the_file_alone(
 ) -> None:
     _enter_repo(tmp_path, monkeypatch)
     _feed(monkeypatch, "\n")
-    argv = ["--repo", "o/r", "--existing-app", "x", "--no-lane", "--no-browser"]
-    gh.configure(user="o")
-    assert app.main(argv) == 0
+    gh.configure(org_secrets=ORG_SECRETS)
+    assert app.main([*EXISTING, "--no-lane", "--no-browser"]) == 0
     assert not (tmp_path / ".github").exists()
 
 
@@ -654,5 +779,62 @@ def test_main_secret_failure_explains_recovery_without_the_key(
     assert "SECRET" not in captured.out + captured.err
     assert "new private key" in captured.err
     assert "https://github.com/settings/apps/acme-skills" in captured.err
-    assert "--existing-app acme-skills" in captured.err
+    assert "--repo owner/repo < the-key.pem" in captured.err
+    # --existing-app needs org secrets, so a personal repo finishes by hand.
+    assert "--existing-app" not in captured.err
+    assert INSTALL_URL in captured.err
+    assert "skills-update-lane.json" in captured.err
     assert not (tmp_path / ".github").exists()
+
+
+def test_main_org_secret_failure_shows_the_org_scoped_recovery(
+    gh: FakeGh,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _enter_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(app, "_new_state", lambda: "fixedstate")
+    gh.configure(fail_secret="SKILLS_UPDATE_APP_PRIVATE_KEY")
+    _feed(monkeypatch, "http://127.0.0.1:9/callback?code=abc123&state=fixedstate\n")
+    argv = ["--repo", "acme/repo", "--org", "acme", "--org-secrets", "--no-browser"]
+    assert app.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "SECRET" not in err
+    assert "https://github.com/organizations/acme/settings/apps/acme-skills" in err
+    assert (
+        "gh secret set SKILLS_UPDATE_APP_PRIVATE_KEY --org acme --visibility "
+        "selected --repos repo < the-key.pem"
+    ) in err
+    assert "--repo acme/repo <" not in err
+    assert "--existing-app acme-skills --org acme" in err
+
+
+def test_main_org_secrets_refuses_when_the_org_already_has_them(
+    gh: FakeGh,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An existing org secret belongs to an App already; never overwrite it."""
+    _enter_repo(tmp_path, monkeypatch)
+    gh.configure(org_secrets=["SKILLS_UPDATE_APP_ID"])
+    opened: list[str] = []
+
+    def fake_open(url: str) -> bool:
+        opened.append(url)
+        return True
+
+    def no_listener(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("the listener must not start")
+
+    monkeypatch.setattr(app.webbrowser, "open", fake_open)
+    monkeypatch.setattr(app, "wait_for_callback", no_listener)
+    _feed(monkeypatch, "")
+    argv = ["--repo", "acme/repo", "--org", "acme", "--org-secrets"]
+    assert app.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "SKILLS_UPDATE_APP_ID" in err and "--existing-app" in err
+    assert opened == []
+    joined = [" ".join(c["argv"]) for c in gh.calls()]
+    assert not any("app-manifests" in j or "secret set" in j for j in joined)
