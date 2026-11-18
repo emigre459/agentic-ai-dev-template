@@ -90,6 +90,43 @@ def test_readme_customizing_documents_docs_only_paths() -> None:
     assert ".github/docs-only-paths.json" in readme[start:end]
 
 
+def _heading_anchors(markdown: str) -> set[str]:
+    """Return GitHub-style anchors for every heading outside fenced code."""
+    anchors: set[str] = set()
+    in_fence = False
+    for line in markdown.splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        match = None if in_fence else re.match(r"#{1,6} (.+)", line)
+        if match:
+            text = match.group(1).strip().lower()
+            text = re.sub(r"[^\w\- ]", "", text)
+            anchors.add(text.replace(" ", "-"))
+    return anchors
+
+
+def test_readme_in_page_links_resolve() -> None:
+    """Every `(#anchor)` link in the README points at a real heading."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    anchors = _heading_anchors(readme)
+    links = re.findall(r"\]\(#([^)]+)\)", readme)
+    assert links, "expected in-page links (the use-case guide)"
+    assert sorted(set(links) - anchors) == []
+
+
+def test_readme_routes_both_use_cases_before_setup() -> None:
+    """The template and the skills-source paths are both linked before setup."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    guide = readme[: readme.index("## Start here: initialize this template")]
+    assert "(#start-here-initialize-this-template)" in guide
+    assert "(#installing-the-skills)" in guide
+    assert "(#adopting-the-kit-in-an-existing-repo)" in guide
+    # Template-only: `make init` strips it with the interview block.
+    start = readme.index("<!-- INTERVIEW:start -->")
+    assert readme.index("## Two ways to use this repo") > start
+
+
 def test_readme_interview_offers_skills_update_app_setup() -> None:
     """Offer the two-click App setup for the nightly skills update PR once."""
     questions = [

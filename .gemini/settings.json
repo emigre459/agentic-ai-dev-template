@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command|write_file|replace",
+        "hooks": [
+          { "name": "command-gate", "type": "command", "command": "sh \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.agents/hooks/gate.sh\" || true", "timeout": 30000 }
+        ]
+      }
+    ]
+  }
+}

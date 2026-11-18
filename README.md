@@ -5,6 +5,29 @@ practices — CI/CD, testing, agent rules/skills, and repo settings — for eith
 Python backend or a React + TypeScript frontend.
 
 <!-- INTERVIEW:start -->
+## Two ways to use this repo
+
+**1. Start a new repo from this template.** You get one of the two stacks, CI, repo
+settings and the agent infrastructure, and the skills come already installed.
+- [Start here: initialize this template](#start-here-initialize-this-template),
+  the prompt that walks you through setup
+- [What this template provides](#what-this-template-provides) and
+  [Prerequisites](#prerequisites)
+
+**2. Install the skills into a repo you already have.** This repo is also a
+versioned source of harness-agnostic dev-workflow skills (`build-from-issue`,
+`resolve-pr-concerns`, `plan-issues`, …). You install them with the `skills` CLI
+and keep them current with a nightly update PR, without adopting the template.
+- [The skills](#the-skills): what each one does
+- [Installing the skills](#installing-the-skills): `npx skills add emigre459/agentic-ai-dev-template#vX.Y.Z`
+- [Adopting the kit in an existing repo](#adopting-the-kit-in-an-existing-repo):
+  the nightly update and drift-check workflows
+- [Customizing the skills in your repo](#customizing-the-skills-in-your-repo):
+  how to change a skill's behavior without editing the vendored copy
+- [Staying up to date](#staying-up-to-date) and [The drift check](#the-drift-check)
+- [Agent hooks](#agent-hooks): the command gate isn't installed by the `skills`
+  CLI, so copy `.agents/hooks/` and the registration file for your harness by hand
+
 ## Start here: initialize this template
 
 Paste the prompt below into your agentic coding harness (Claude Code, Cursor, …).
@@ -341,6 +364,30 @@ the same card. Say why in the file, so the next reader knows what breaks.
 
 A line like `Merge the PR yourself once CI is green.` would be skipped and reported:
 merging without your one-off OK is a hard stop.
+
+## Agent hooks
+
+`.agents/hooks/` holds one harness-neutral command gate. It auto-allows a shell
+command only when the command fits a small, strict grammar (no loops, groups,
+unquoted `$` or unusual redirects) and every command in it matches an allow list, denies a repo-owned list
+of banned patterns in shell commands and file edits, and gives no opinion on the rest.
+Any doubt or error means no opinion, never a block. Policy lives in
+`.agents/hooks/policy.json`; allow rules in the tracked `.claude/settings.json` apply in
+every harness. Details, the policy schema and the recipe for adding a harness are in
+[`.agents/hooks/README.md`](.agents/hooks/README.md).
+
+| Harness | Status | Registration |
+|---------|--------|--------------|
+| Claude Code | Shipped | `.claude/settings.json` |
+| Codex | Shipped (deny-only) | `.codex/hooks.json` |
+| Copilot | Shipped (shell only) | `.github/hooks/command-gate.json` |
+| Gemini CLI | Shipped | `.gemini/settings.json` |
+| Factory | Shipped | `.factory/hooks.json` |
+| Augment | Shipped (deny-only) | `.augment/settings.json` |
+| Cursor | Via `.claude` loading | `.claude/settings.json` |
+| Devin | Via `.claude` loading | `.claude/settings.json` |
+| Windsurf, Cline, Antigravity, Kiro, Amp | Follow-up | none yet |
+| OpenCode | Not possible: JS/TS plugins only, no command hooks | none |
 
 ## Installing the skills
 
