@@ -61,7 +61,7 @@ gh release create v0.1.0 -R "$SRC" --target main --title v0.1.0 --notes "Live-te
 gh api "repos/$SRC/contents/skills-lock.json" >/dev/null 2>&1 && echo "UNEXPECTED: root lock present" || echo "no root lock (good)"
 ```
 
-The source's own CI also runs on that push. Ignore it.
+The source's own CI also runs on that push. Ignore it, and ignore the draft release (for example `v0.1.1`) its release-drafter workflow may create: the update job only reads published releases.
 
 
 ## 1. Create and seed the scratch repo (no secret yet)
@@ -157,7 +157,9 @@ cd ~/skills-update-e2e && git checkout -q main && git pull -q
 git checkout -q -b point-at-test-source
 SRC="$SRC" python3 -c "import json,os;p='skills-lock.json';d=json.load(open(p));[e.update(source=os.environ['SRC']) for e in d['skills'].values()];open(p,'w').write(json.dumps(d,indent=2)+'\n')"
 git commit -qam "Point the skills at the live-test source" && git push -q -u origin point-at-test-source
-gh pr create -R "$REPO" --fill && gh pr checks --watch && gh pr merge --squash --delete-branch
+gh pr create -R "$REPO" --fill
+gh pr merge point-at-test-source -R "$REPO" --auto --squash --delete-branch   # merges once the required checks pass
+until [ "$(gh pr view point-at-test-source -R "$REPO" --json state --jq .state)" = MERGED ]; do sleep 10; done; echo merged
 git checkout -q main && git pull -q
 ```
 
