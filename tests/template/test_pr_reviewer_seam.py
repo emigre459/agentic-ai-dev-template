@@ -21,6 +21,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+import yaml
 
 _REPO = Path(__file__).resolve().parents[2]
 _CONFIG = _REPO / ".github" / "pr-reviewer.json"
@@ -663,3 +664,20 @@ def test_single_flight_full_check_is_allow_listed() -> None:
         f"Add {expected!r} to .claude/settings.json permissions.allow so agents can "
         "run the locked full check without a prompt."
     )
+
+
+_ANCHORED_LOCK = (
+    "python3 .agents/skills/resolve-pr-concerns/scripts/single_flight.py "
+    "suite -- make pr_check"
+)
+
+
+def test_pr_check_allow_lists_only_the_anchored_lock_command() -> None:
+    """``*single_flight.py`` would allow a planted script of that name anywhere."""
+    lines = (_SKILLS / "pr-check" / "SKILL.md").read_text().splitlines()
+    end = lines.index("---", 1)
+    allowed = str(yaml.safe_load("\n".join(lines[1:end]))["allowed-tools"])
+    body = "\n".join(lines[end + 1 :])
+    assert f"Bash({_ANCHORED_LOCK})" in allowed
+    assert "*single_flight.py" not in allowed
+    assert f"\n{_ANCHORED_LOCK}\n" in body, "the body's command must match the entry"
