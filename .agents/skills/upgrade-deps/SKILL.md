@@ -38,6 +38,8 @@ uv run python <skill-dir>/scripts/update_prs.py --help    # sweep mode: plan, cl
 
 Same interpreter rule (it reads alerts and lockfiles through `alert_status.py`). It reads the projects from each `directory` in `.github/dependabot.yml`, the lockfiles from the base branch, and the skills update PR's branch from the `branch` input of the `skills-update` action (a workflow's `with: branch:` override wins).
 
+When the nightly skills update run fails with no token (no App or PAT secret), run `python3 <skill-dir>/scripts/setup_skills_update_app.py --repo <owner>/<repo>` (add `--org <org>` for an org-owned repo; `--help` for the rest). It creates the owner's private GitHub App through GitHub's manifest flow (the person clicks Create, then Install), stores `SKILLS_UPDATE_APP_ID`/`SKILLS_UPDATE_APP_PRIVATE_KEY` with the key on `gh`'s stdin only, and adds `<slug>[bot]` to `.github/skills-update-lane.json`, which you then commit.
+
 ## Rules
 
 - **Lockfiles are regenerated, never hand-edited and never copied from a bot PR.** A bot PR tells you *what* to bump; its lockfile diff is against an older base and its siblings. Apply the manifest change, then run the tool (`uv lock`, `bun install` / `bun update`).
