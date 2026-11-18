@@ -7,7 +7,8 @@ this checkout as the source, in a fresh throwaway git project, and exits 0 only
 if every skill named in ``.github/template-skills-lock.json`` lands at
 ``.agents/skills/<name>/SKILL.md``. It guards against whatever makes a release
 uninstallable (a root ``skills-lock.json`` hiding the skills, invalid
-frontmatter).
+frontmatter). It installs from the local checkout; the GitHub
+``owner/repo#tag`` source path is covered by the live test kit.
 
 Set ``NPX_CMD`` to substitute the ``npx`` executable (the test seam) and
 ``SKILLS_INSTALL_TIMEOUT`` (seconds, default 600) to bound the install.
@@ -27,6 +28,10 @@ _TAIL_LINES = 40
 _DEFAULT_TIMEOUT_S = 600
 
 
+class LockError(Exception):
+    """The template skills lock is missing, unreadable, or malformed."""
+
+
 def skill_names(repo: Path = REPO_ROOT) -> list[str]:
     """Return the skill names in the template's skills lock.
 
@@ -40,8 +45,15 @@ def skill_names(repo: Path = REPO_ROOT) -> list[str]:
     list[str]
         The keys of ``skills`` in ``.github/template-skills-lock.json``.
     """
-    lock = json.loads((repo / ".github" / "template-skills-lock.json").read_text())
-    return list(lock["skills"])
+    path = repo / ".github" / "template-skills-lock.json"
+    try:
+        lock = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise LockError(f"cannot read {path}: {exc}") from exc
+    skills = lock.get("skills") if isinstance(lock, dict) else None
+    if not isinstance(skills, dict):
+        raise LockError(f"{path} has no 'skills' object")
+    return list(skills)
 
 
 def cli_version(repo: Path = REPO_ROOT) -> str:
@@ -71,14 +83,26 @@ def main() -> int:
     int
         0 if all skills installed, 1 otherwise.
     """
-    names = skill_names()
+    try:
+        names = skill_names()
+    except LockError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     if not names:
         print(
             "the lock lists no skills (.github/template-skills-lock.json)",
             file=sys.stderr,
         )
         return 1
-    timeout = float(os.environ.get("SKILLS_INSTALL_TIMEOUT", _DEFAULT_TIMEOUT_S))
+    raw_timeout = os.environ.get("SKILLS_INSTALL_TIMEOUT", str(_DEFAULT_TIMEOUT_S))
+    try:
+        timeout = float(raw_timeout)
+    except ValueError:
+        print(
+            f"SKILLS_INSTALL_TIMEOUT must be a number of seconds, got {raw_timeout!r}",
+            file=sys.stderr,
+        )
+        return 1
     argv = [
         os.environ.get("NPX_CMD", "npx"),
         "-y",

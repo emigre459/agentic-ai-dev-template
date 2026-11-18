@@ -49,6 +49,7 @@ def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
     # machinery self-destructed
     assert not (template_tree / "scripts" / "init_template.py").exists()
     assert not (template_tree / "scripts" / "preflight_init.py").exists()
+    assert not (template_tree / "scripts" / "check_skills_installable.py").exists()
     assert not (template_tree / "tests" / "template").exists()
     # AGENTS.md collapsed + filled
     agents = (template_tree / "AGENTS.md").read_text()
@@ -181,6 +182,15 @@ def test_skills_drift_job_survives_init(template_tree: Path, stack: str) -> None
     assert job["name"] == "skills drift"
 
 
+def test_ruleset_requires_skills_installable() -> None:
+    ruleset = json.loads(
+        (_REPO_ROOT / ".github" / "repo-settings" / "ruleset.json").read_text()
+    )
+    [rule] = [r for r in ruleset["rules"] if r["type"] == "required_status_checks"]
+    checks = rule["parameters"]["required_status_checks"]
+    assert {"context": "skills installable", "integration_id": 15368} in checks
+
+
 def test_initialize_rewrites_required_status_checks(template_tree: Path) -> None:
     import json
 
@@ -199,6 +209,7 @@ def test_initialize_rewrites_required_status_checks(template_tree: Path) -> None
     # init must rewrite them to the post-init job ids exactly, or merges gate
     # forever on contexts that never report
     assert contexts == {"lint", "tests", "security", "skills drift"}
+    assert "skills installable" not in contexts
     # pre-existing rules are preserved
     assert any(r["type"] == "pull_request" for r in ruleset["rules"])
 

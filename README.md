@@ -354,6 +354,8 @@ install a release by its tag with the [skills CLI](https://github.com/vercel-lab
 npx skills add emigre459/agentic-ai-dev-template#vX.Y.Z
 ```
 
+This needs v0.2.0 or later: earlier releases can't be installed by the skills CLI.
+
 - **Pin a tag, not a branch.** `#vX.Y.Z` records that tag as the skill's `ref` in
   `skills-lock.json`, so the install is reproducible and the update PR (below) moves
   it forward one release at a time. Without a `#` suffix the skills track the

@@ -933,6 +933,7 @@ def _collapse_template(
     to_remove = [
         root / "scripts" / "init_template.py",
         root / "scripts" / "preflight_init.py",
+        root / "scripts" / "check_skills_installable.py",
         root / "tests" / "template",
     ]
     if stack == "react":

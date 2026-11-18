@@ -135,3 +135,43 @@ def test_missing_npx_fails_cleanly(tmp_path: Path) -> None:
     out = result.stdout + result.stderr
     assert "not found" in out
     assert "Traceback" not in out
+
+
+def test_missing_lock_fails_cleanly(tmp_path: Path) -> None:
+    script = _copy_with_lock(tmp_path, {"a": {}})
+    (script.parent.parent / ".github" / "template-skills-lock.json").unlink()
+    result = _run(tmp_path, script=script)
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "template-skills-lock.json" in out
+    assert "Traceback" not in out
+
+
+def test_unparseable_lock_fails_cleanly(tmp_path: Path) -> None:
+    script = _copy_with_lock(tmp_path, {"a": {}})
+    (script.parent.parent / ".github" / "template-skills-lock.json").write_text("{")
+    result = _run(tmp_path, script=script)
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "template-skills-lock.json" in out
+    assert "Traceback" not in out
+
+
+def test_lock_without_skills_object_fails_cleanly(tmp_path: Path) -> None:
+    script = _copy_with_lock(tmp_path, {})
+    (script.parent.parent / ".github" / "template-skills-lock.json").write_text(
+        json.dumps({"version": 2})
+    )
+    result = _run(tmp_path, script=script)
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "skills" in out
+    assert "Traceback" not in out
+
+
+def test_non_numeric_timeout_fails_cleanly(tmp_path: Path) -> None:
+    result = _run(tmp_path, SKILLS_INSTALL_TIMEOUT="soon")
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "SKILLS_INSTALL_TIMEOUT" in out
+    assert "Traceback" not in out
