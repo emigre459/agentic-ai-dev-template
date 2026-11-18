@@ -39,7 +39,7 @@ Repo-specific behavior goes in files the repo owns:
 |-----------------|------------|
 | `AGENTS.md` | Always-on, repo-wide instructions |
 | `.agents/rules/` | Shared rules routed from `AGENTS.md` |
-| `.github/pr-reviewer.json` | Structured settings: the active PR reviewer and its adapter (including a repo-owned `notes` file), review-round caps, the test-speed budget |
+| `.github/pr-reviewer.json` | Structured settings: the active PR reviewer and its adapter (including a repo-owned `notes` file), review-round caps |
 | `.agents/skill-config/<skill>.md` | Optional notes for one skill, read by that skill's preflight |
 
 Precedence, highest first: the user's instructions this session, then `AGENTS.md`

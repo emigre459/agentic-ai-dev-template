@@ -165,7 +165,7 @@ python3 <resolve-pr-concerns skill dir>/scripts/single_flight.py suite -- make p
 uv run python <skill-dir>/scripts/alert_status.py --repo <owner>/<repo>   # must exit 0
 ```
 
-`make pr_check` is the local mirror of CI: lint, `make security` (what each stack's scanner covers: a JS dependency audit, a Python SAST scan) and the coverage gate, including the per-test speed check where the repo has one; `alert_status.py` covers the Dependabot alerts across every lockfile.
+`make pr_check` is the local mirror of CI: lint, `make security` (what each stack's scanner covers: a JS dependency audit, a Python SAST scan) and the coverage gate; `alert_status.py` covers the Dependabot alerts across every lockfile.
 
 ### Step 7: PR, then hand off
 

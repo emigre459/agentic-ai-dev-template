@@ -1530,8 +1530,8 @@ def test_loader_accepts_an_empty_unthreaded_finding_list(tmp_path: Path) -> None
 
 
 def test_loader_ignores_unknown_top_level_keys(tmp_path: Path) -> None:
-    """A later top-level section (e.g. ``test_speed``) must not break the loaders."""
-    config = _config_with() | {"test_speed": {"budget_seconds": 10}}
+    """A later top-level section (e.g. ``future_section``) must not break the loaders."""
+    config = _config_with() | {"future_section": {"limit_seconds": 10}}
     config["review_rounds"] = {"max_local_before_final": 2}
     path = _write(tmp_path, config)
     assert load_reviewer(path).key == "x"
