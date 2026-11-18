@@ -17,13 +17,16 @@ The kit has two parts:
 
 ## How the test is rigged
 
-The scratch repo vendors the template's skills **pinned to a fake older tag, `v0.0.1`**, so the update job finds `v0.1.0` newer and opens a real update PR.
+There are two throwaway repos: a **source** that stands in for the template, and a **scratch** consumer.
 
-The repo's `main` also carries this branch's `resolve-pr-concerns/scripts/`, which hold the lane. `review-gate` runs from `main`, so the gate has the lane, and the update PR reverting those files is itself a tag-pinned skill folder change.
+- **The source, `<you>/skills-source-e2e`,** carries this branch's tree, which is installable by the skills CLI, and has its own `v0.1.0` release. The real template's published `v0.1.0` can't be used: it has a root `skills-lock.json` that hides its skills from the CLI, the bug this branch fixes. So nothing is released from the real template before merge.
+- **The scratch repo** vendors the skills from the source, **pinned to a fake older tag, `v0.0.1`**, so the update job finds the source's `v0.1.0` newer and opens a real update PR.
+- **The scratch repo's `main`** also carries this branch's `resolve-pr-concerns/scripts/`, which hold the lane. `review-gate` runs from `main`, so the gate has the lane. The update PR then rewrites the skill folders to the source's `v0.1.0`, and those are tag-pinned skill folder changes too.
+- **The scratch workflow** calls this branch's update action by ref.
 
-The workflow calls this branch's action by ref.
+Use **public** repos: rulesets and auto-merge need GitHub Pro or Team on private personal repos, and nothing in them is secret. On a personal account, the setup script must be run by the repo's owner, which is you.
 
-Use a **public** repo: rulesets and auto-merge need GitHub Pro or Team on private personal repos, and nothing in it is secret. On a personal account, the setup script must be run by the repo's owner, which is you.
+**Already ran steps 1-3 before this rig changed** (your step 4 failed with `SKILLS_NO_MATCHING_SKILLS`)? Keep the scratch repo, its App and secrets. Run step 0 and step 0b below, then skip to **"3b. Re-point an existing scratch repo"**.
 
 ## 0. Variables
 
@@ -33,9 +36,22 @@ Run every step from one terminal, starting inside your checkout of this branch (
 T=$(git rev-parse --show-toplevel)
 ME=$(gh api user --jq .login)
 REPO="$ME/skills-update-e2e"
+SRC="$ME/skills-source-e2e"
 BRANCH=82-let-the-nightly-skills-update-pr-land-on-its-own
-git -C "$T" fetch -q origin --tags && git -C "$T" status -sb | head -1
+git -C "$T" fetch -q origin && git -C "$T" status -sb | head -1
 ```
+
+## 0b. Create the throwaway source with a `v0.1.0` release
+
+```bash
+gh repo create "$SRC" --public
+git -C "$T" push -q "git@github.com:$SRC.git" "origin/$BRANCH:refs/heads/main"
+gh release create v0.1.0 -R "$SRC" --target main --title v0.1.0 --notes "Live-test source for #82"
+gh api "repos/$SRC/contents/skills-lock.json" >/dev/null 2>&1 && echo "UNEXPECTED: root lock present" || echo "no root lock (good)"
+```
+
+The source's own CI also runs on that push. Ignore it.
+
 
 ## 1. Create and seed the scratch repo (no secret yet)
 
@@ -43,8 +59,8 @@ git -C "$T" fetch -q origin --tags && git -C "$T" status -sb | head -1
 cd ~ && gh repo create "$REPO" --public --clone && cd skills-update-e2e
 git symbolic-ref HEAD refs/heads/main   # the clone of an empty repo starts on your init.defaultBranch (often master)
 git -C "$T" archive v0.1.0 .agents/skills | tar -x
-cp "$T/skills-lock.json" .
-python3 -c "import json;p='skills-lock.json';d=json.load(open(p));[e.__setitem__('ref','v0.0.1') for e in d['skills'].values()];open(p,'w').write(json.dumps(d,indent=2)+'\n')"
+cp "$T/.github/template-skills-lock.json" skills-lock.json
+SRC="$SRC" python3 -c "import json,os;p='skills-lock.json';d=json.load(open(p));[e.update(ref='v0.0.1',source=os.environ['SRC']) for e in d['skills'].values()];open(p,'w').write(json.dumps(d,indent=2)+'\n')"
 rm -rf .agents/skills/resolve-pr-concerns/scripts
 cp -R "$T/.agents/skills/resolve-pr-concerns/scripts" .agents/skills/resolve-pr-concerns/scripts
 mkdir -p .github/workflows
@@ -121,6 +137,21 @@ EOF
 gh api -X POST "repos/$REPO/rulesets" --input /tmp/e2e-ruleset.json --jq '.id, .enforcement'
 ```
 
+## 3b. Re-point an existing scratch repo (only if you ran steps 1-3 before the rig changed)
+
+Your scratch repo's lock still points at the real template, whose `v0.1.0` can't be installed. Point it at the source through a PR, because the ruleset blocks direct pushes:
+
+```bash
+cd ~/skills-update-e2e && git checkout -q main && git pull -q
+git checkout -q -b point-at-test-source
+SRC="$SRC" python3 -c "import json,os;p='skills-lock.json';d=json.load(open(p));[e.update(source=os.environ['SRC']) for e in d['skills'].values()];open(p,'w').write(json.dumps(d,indent=2)+'\n')"
+git commit -qam "Point the skills at the live-test source" && git push -q -u origin point-at-test-source
+gh pr create -R "$REPO" --fill && gh pr checks --watch && gh pr merge --squash --delete-branch
+git checkout -q main && git pull -q
+```
+
+That PR is yours, so the lane doesn't apply. `review-gate` passes it through the ownership half instead: you own every path, and no reviewer is configured. Merging it changes `skills-lock.json` on `main`, which starts "skills update" by itself. Step 4 still starts its own run and watches that one.
+
 ## 4. Run the update and watch it land
 
 ```bash
@@ -134,7 +165,7 @@ Expected:
 - the run is green;
 - `author` is `<slug>` (the App bot; `gh` drops the `[bot]` suffix in this field), never `github-actions` or you;
 - `auto` is `true`;
-- the files are `skills-lock.json` plus the files under `.agents/skills/resolve-pr-concerns/scripts/`.
+- the files are `skills-lock.json` plus files under `.agents/skills/<name>/` for skills whose content differs between the template's real `v0.1.0` and this branch. Every one must be under `.agents/skills/` or be the lock (check with `gh pr diff -R "$REPO" "$PR" --name-only | grep -v -e '^skills-lock.json$' -e '^\.agents/skills/'`, which must print nothing).
 
 **Check 3 (CI ran without approval, and the gate passed through the lane):**
 
@@ -179,6 +210,7 @@ Expected: `MERGED`, merged by the App, with no click from you.
 
 ```bash
 gh repo delete "$REPO" --yes          # needs the delete_repo scope: gh auth refresh -s delete_repo
+gh repo delete "$SRC" --yes
 open "https://github.com/settings/apps"   # delete skills-update-e2e-skills-update
 ```
 
