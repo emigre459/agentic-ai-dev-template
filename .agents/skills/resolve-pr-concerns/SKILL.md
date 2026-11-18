@@ -599,7 +599,7 @@ End with a short status summary:
 - A concern shows up in a category you don't recognize (e.g. a third-party SAST bot you haven't seen) — surface it to the user, don't auto-classify.
 - The fix would conflict with the user's stated intent in the PR description — ask before changing direction.
 - Tests pass after a fix but the fix doesn't actually address the reviewer's concern (you treated the symptom, not the cause).
-- Allowlisting a slow test before trying to speed it up or move it (Step 2g).
+- Raising a test's timeout (its own `@pytest.mark.timeout` or Vitest per-test timeout) before fixing what it waited on or moving it (Step 2g).
 - Performative agreement ("Thanks for catching this!", "You're absolutely right!") is being drafted — `superpowers:receiving-code-review` forbids this; state the fix or push back instead.
 - An inline finding was fixed and pushed but its thread has no reply naming the fix commit — Step 4d isn't optional; the dangling thread reads as unaddressed to reviewers. Reply with the SHA, then **leave the thread open for a human to resolve**.
 - About to call `resolveReviewThread` (or resolve a conversation through the UI) yourself — **stop.** Resolution is a human-only final gate, exactly like the merge.

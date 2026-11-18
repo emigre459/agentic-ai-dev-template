@@ -29,9 +29,8 @@ that is `make lint` and `make security` first, then `make coverage`:
   and writes `test-results.xml`. Each test also runs under the stack's fixed per-test
   timeout, which fails only a hung test, never a merely slow one.
 
-`make tests` is the fast iteration target, not this gate: it skips the coverage gate,
-and the security scan, so a green `make tests` says nothing about
-`make pr_check`.
+`make tests` is the fast iteration target, not this gate: it skips the coverage gate
+and the security scan, so a green `make tests` says nothing about `make pr_check`.
 
 This skill always runs the full check. Before opening a PR, the `pr-check-scope` rule
 may let a diff with no code, config or shared test fixtures run the light check

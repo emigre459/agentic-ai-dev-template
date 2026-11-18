@@ -86,8 +86,8 @@ addopts = "-n auto -m 'not e2e and not integration' --allow-hosts=127.0.0.0/8,::
 # broken, not "a bit slow". The method stays the plugin default (signal on POSIX):
 # only the hung test fails and the run continues. Switch to timeout_method = "thread"
 # if the code under test uses SIGALRM itself. A test that truly needs longer takes
-# @pytest.mark.timeout(N) with a comment saying why; --timeout on the command line
-# beats both.
+# @pytest.mark.timeout(N) with a comment saying why. --timeout on the command line
+# overrides this value, but not a test's own marker.
 timeout = 60
 # A blocked connect in a background thread surfaces only as pytest's thread-exception
 # warning; promote it to an error when it names NetworkBlocked (tests/_network_block.py).

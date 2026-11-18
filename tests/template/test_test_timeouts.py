@@ -41,7 +41,8 @@ def test_react_stack_sets_a_10s_test_timeout() -> None:
 
 _GUARD_TERMS = re.compile(
     r"test_speed|check_test_speed|runner_speed|slow_test_allowlist"
-    r"|_pytest_fixture_timing|speed (?:check|guard|budget)",
+    r"|_pytest_fixture_timing|speed (?:check|guard|budget)"
+    r"|allowlist\w* (?:a )?slow test",
     re.IGNORECASE,
 )
 _GUARD_FILES = [
