@@ -165,9 +165,9 @@ rm -rf "$WORK"
   doesn't match the target). A true fork setup adds nothing the preflight
   checks differently.
 
-If a step outside this PR's scope fails, such as the `copilot_code_review` rule
-being rejected on an account without Copilot, note it separately. That rule
-already exists on `main`.
+If a step outside this PR's scope fails, note it separately. The template no
+longer requests Copilot code review: `.github/pr-reviewer.json` and
+`review-gate` are the single source of review truth.
 
 ## Results to report
 
