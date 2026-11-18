@@ -17,6 +17,7 @@ import json
 import queue
 import re
 import stat
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -76,7 +77,9 @@ cfg = json.load(open(os.environ["FAKE_CFG"]))
 if args[:2] == ["auth", "status"]:
     sys.exit(0 if cfg.get("authed", True) else 1)
 if args[:1] == ["api"] and args[1].startswith("repos/"):
-    print("true" if cfg.get("admin", True) else "false")
+    owner = args[1].split("/")[1]
+    kind = cfg.get("owner_type") or ("Organization" if owner == "acme" else "User")
+    print(json.dumps({"admin": cfg.get("admin", True), "owner_type": kind}))
     sys.exit(0)
 if args[:2] == ["api", "user"]:
     print(cfg.get("user", "owner"))
@@ -311,6 +314,27 @@ def test_convert_manifest_posts_the_code(gh: FakeGh) -> None:
     assert call["argv"] == ["api", "-X", "POST", "/app-manifests/abc123/conversions"]
 
 
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"id": 42, "slug": "acme-skills", "pem": None},
+        {"id": 42, "slug": "acme-skills", "pem": ""},
+        {"id": 42, "slug": "", "pem": PEM},
+        {"id": 42, "slug": None, "pem": PEM},
+        {"id": "42", "slug": "acme-skills", "pem": PEM},
+        {"id": True, "slug": "acme-skills", "pem": PEM},
+    ],
+)
+def test_convert_manifest_requires_real_fields(
+    gh: FakeGh, broken: dict[str, Any]
+) -> None:
+    gh.configure(conversion=broken)
+    with pytest.raises(SystemExit) as err:
+        app.convert_manifest("abc123")
+    assert "SECRET" not in str(err.value)
+    assert "BEGIN" not in str(err.value)
+
+
 def test_convert_manifest_failure_never_echoes_the_response(gh: FakeGh) -> None:
     gh.configure(conversion={"slug": "acme-skills", "pem": PEM})  # no id
     with pytest.raises(SystemExit) as err:
@@ -372,6 +396,14 @@ def _feed(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(text))
 
 
+def _enter_repo(root: Path, monkeypatch: pytest.MonkeyPatch, sub: str = "") -> None:
+    """Make ``root`` a git work tree and run from it (or from ``root/sub``)."""
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    where = root / sub
+    where.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(where)
+
+
 def test_main_refuses_without_admin(
     gh: FakeGh,
     tmp_path: Path,
@@ -379,7 +411,7 @@ def test_main_refuses_without_admin(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     gh.configure(admin=False)
-    monkeypatch.chdir(tmp_path)
+    _enter_repo(tmp_path, monkeypatch)
     assert app.main(["--repo", "owner/repo", "--no-browser"]) == 1
     assert "admin" in capsys.readouterr().err
     assert not any("app-manifests" in " ".join(c["argv"]) for c in gh.calls())
@@ -392,7 +424,7 @@ def test_main_refuses_without_gh_auth(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     gh.configure(authed=False)
-    monkeypatch.chdir(tmp_path)
+    _enter_repo(tmp_path, monkeypatch)
     assert app.main(["--repo", "owner/repo", "--no-browser"]) == 1
     assert "gh auth login" in capsys.readouterr().err
 
@@ -403,11 +435,68 @@ def test_main_refuses_an_org_repo_without_org(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    _enter_repo(tmp_path, monkeypatch)
     assert app.main(["--repo", "acme/repo", "--no-browser"]) == 1
     assert "--org acme" in capsys.readouterr().err
     assert app.main(["--repo", "acme/repo", "--org", "other", "--no-browser"]) == 1
     assert "acme" in capsys.readouterr().err
+
+
+def test_main_refuses_org_flags_on_a_personal_repo(
+    gh: FakeGh,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _enter_repo(tmp_path, monkeypatch)
+    assert app.main(["--repo", "owner/repo", "--org", "owner", "--no-browser"]) == 1
+    assert "personal" in capsys.readouterr().err
+    argv = ["--repo", "owner/repo", "--org", "owner", "--org-secrets", "--no-browser"]
+    assert app.main(argv) == 1
+    assert "personal" in capsys.readouterr().err
+    assert not any("app-manifests" in " ".join(c["argv"]) for c in gh.calls())
+
+
+def test_main_collaborator_on_a_personal_repo_is_told_only_the_owner_can(
+    gh: FakeGh,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    gh.configure(user="helper")
+    _enter_repo(tmp_path, monkeypatch)
+    assert app.main(["--repo", "owner/repo", "--no-browser"]) == 1
+    err = capsys.readouterr().err
+    assert "only owner" in err
+    assert "--org" not in err
+    assert not any("app-manifests" in " ".join(c["argv"]) for c in gh.calls())
+
+
+def test_main_writes_the_lane_file_at_the_repo_root(
+    gh: FakeGh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _enter_repo(tmp_path, monkeypatch, sub="deep/inside")
+    _feed(monkeypatch, "\n")
+    argv = ["--repo", "acme/repo", "--existing-app", "acme-skills", "--no-browser"]
+    assert app.main(argv) == 0
+    lane = tmp_path / ".github" / "skills-update-lane.json"
+    assert json.loads(lane.read_text())["authors"] == ["acme-skills[bot]"]
+    assert not (tmp_path / "deep" / "inside" / ".github").exists()
+
+
+def test_main_refuses_outside_a_git_work_tree(
+    gh: FakeGh,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.chdir(outside)
+    assert app.main(["--repo", "owner/repo", "--no-browser"]) == 1
+    assert "git" in capsys.readouterr().err
+    assert not any("app-manifests" in " ".join(c["argv"]) for c in gh.calls())
 
 
 def test_main_existing_app_skips_creation_and_secrets(
@@ -416,7 +505,7 @@ def test_main_existing_app_skips_creation_and_secrets(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    _enter_repo(tmp_path, monkeypatch)
     opened: list[str] = []
 
     def fake_open(url: str) -> bool:
@@ -439,7 +528,7 @@ def test_main_existing_app_skips_creation_and_secrets(
 def test_main_no_lane_leaves_the_file_alone(
     gh: FakeGh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    _enter_repo(tmp_path, monkeypatch)
     _feed(monkeypatch, "\n")
     argv = ["--repo", "o/r", "--existing-app", "x", "--no-lane", "--no-browser"]
     gh.configure(user="o")
@@ -457,7 +546,7 @@ def test_main_create_flow_end_to_end(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    _enter_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(app, "_new_state", lambda: "fixedstate")
     redirect = "http://127.0.0.1:9/callback?code=abc123&state=fixedstate"
     _feed(monkeypatch, redirect + "\n\n")
@@ -487,7 +576,7 @@ def test_main_create_flow_refuses_a_pasted_wrong_state(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    _enter_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(app, "_new_state", lambda: "fixedstate")
     _feed(monkeypatch, "http://127.0.0.1:9/callback?code=abc123&state=evil\n")
     assert app.main(["--repo", "owner/repo", "--no-browser"]) == 1
@@ -502,7 +591,7 @@ def test_main_create_flow_through_the_listener(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The browser path: the opened form's redirect lands on the local listener."""
-    monkeypatch.chdir(tmp_path)
+    _enter_repo(tmp_path, monkeypatch)
     gh.configure(user="acme")
     opened: list[str] = []
     pages: list[str] = []
@@ -556,7 +645,7 @@ def test_main_secret_failure_explains_recovery_without_the_key(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    _enter_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(app, "_new_state", lambda: "fixedstate")
     gh.configure(fail_secret="SKILLS_UPDATE_APP_PRIVATE_KEY")
     _feed(monkeypatch, "http://127.0.0.1:9/callback?code=abc123&state=fixedstate\n")

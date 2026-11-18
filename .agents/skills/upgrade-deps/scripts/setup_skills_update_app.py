@@ -21,11 +21,13 @@ a GitHub App from a manifest"):
 
 ``--existing-app SLUG`` runs only steps 6 and 7, for an org whose App and org secrets
 already exist. A private App installs only on the account that owns it, so an
-org-owned repo needs ``--org <org>``.
+org-owned repo needs ``--org <org>``, and a personal repo's App can only be created by
+its owner.
 
 The private key never lands in argv, on disk, in output, or in an error message. Run
-it from the repo root with ``python3`` (stdlib only); ``gh`` must be logged in with
-admin on the repo. ``GH_CMD`` overrides the ``gh`` executable (the test seam). Exit
+it with ``python3`` (stdlib only) from anywhere inside the repo's git checkout: the
+lane file goes at the work tree's root. ``gh`` must be logged in with admin on the
+repo. ``GH_CMD`` overrides the ``gh`` executable (the test seam). Exit
 0 on success, 1 on any refusal or failure, with the reason on stderr.
 """
 
@@ -382,16 +384,27 @@ def convert_manifest(code: str) -> AppCredentials:
     if not _CODE_RE.match(code):
         raise SetupError("the manifest code is malformed")
     out = _gh(["api", "-X", "POST", f"/app-manifests/{code}/conversions"])
+    bad = SetupError(
+        "GitHub's manifest conversion response was missing the App's id, slug "
+        "or key (response not shown: it holds the private key)"
+    )
     try:
         data = json.loads(out)
-        return AppCredentials(
-            app_id=int(data["id"]), slug=str(data["slug"]), pem=str(data["pem"])
-        )
-    except (ValueError, KeyError, TypeError):
-        raise SetupError(
-            "GitHub's manifest conversion response was missing the App's id, slug "
-            "or key (response not shown: it holds the private key)"
-        ) from None
+    except ValueError:
+        raise bad from None
+    if not isinstance(data, dict):
+        raise bad
+    app_id, slug, pem = data.get("id"), data.get("slug"), data.get("pem")
+    if (
+        not isinstance(app_id, int)
+        or isinstance(app_id, bool)
+        or not isinstance(slug, str)
+        or not slug
+        or not isinstance(pem, str)
+        or not pem.strip()
+    ):
+        raise bad
+    return AppCredentials(app_id=app_id, slug=slug, pem=pem)
 
 
 def set_secrets(repo: str, creds: AppCredentials, org_secrets_org: str | None) -> None:
@@ -503,36 +516,121 @@ def _show(target: str, what: str, no_browser: bool) -> None:
         print(f"Opened {what} in your browser: {target}")
 
 
-def _preflight(repo: str) -> None:
-    """Refuse unless ``gh`` is logged in with admin on ``repo``."""
+class Preflight(NamedTuple):
+    """What the preflight learned about the repo.
+
+    Attributes
+    ----------
+    owner_type : str
+        ``"User"`` or ``"Organization"``, from the repo's ``owner.type``.
+    root : Path | None
+        The local git work tree's root (where the lane file goes); None when the
+        lane file isn't wanted.
+    """
+
+    owner_type: str
+    root: Path | None
+
+
+def _repo_root() -> Path:
+    """Return the root of the git work tree the script runs in.
+
+    Raises
+    ------
+    SetupError
+        Not inside a git work tree, or ``git`` is missing.
+    """
+    try:
+        proc = subprocess.run(  # nosec B603 B607 -- fixed git argv, no shell
+            ["git", "rev-parse", "--show-toplevel"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        raise SetupError("git is not installed or not on PATH") from None
+    root = proc.stdout.strip()
+    if proc.returncode != 0 or not root:
+        raise SetupError(
+            "run this from inside the repo's git checkout: the lane file goes in "
+            "its .github/ (or pass --no-lane)"
+        )
+    return Path(root)
+
+
+def _preflight(repo: str, *, want_root: bool) -> Preflight:
+    """Refuse unless in a git checkout and ``gh`` is logged in with admin on ``repo``.
+
+    Parameters
+    ----------
+    repo : str
+        ``owner/name``.
+    want_root : bool
+        Resolve the git work tree's root (the lane file is wanted).
+
+    Returns
+    -------
+    Preflight
+        The repo owner's type and the work tree's root.
+    """
+    root = _repo_root() if want_root else None
     try:
         _gh(["auth", "status"])
     except SetupError:
         raise SetupError("gh is not logged in: run `gh auth login` first") from None
-    admin = _gh(["api", f"repos/{repo}", "--jq", ".permissions.admin"]).strip()
-    if admin != "true":
+    out = _gh(
+        [
+            "api",
+            f"repos/{repo}",
+            "--jq",
+            "{admin: .permissions.admin, owner_type: .owner.type}",
+        ]
+    )
+    try:
+        info = json.loads(out)
+    except ValueError:
+        raise SetupError(f"couldn't read {repo}'s permissions from gh") from None
+    if not isinstance(info, dict) or info.get("admin") is not True:
         raise SetupError(
             f"you need admin on {repo} to set its Actions secrets "
             "(ask an admin to run this, or to grant you admin)"
         )
+    return Preflight(owner_type=str(info.get("owner_type")), root=root)
 
 
-def _check_owner(repo: str, org: str | None) -> None:
+def _check_owner(
+    repo: str, owner_type: str, org: str | None, org_secrets: bool
+) -> None:
     """Refuse an App the repo couldn't install: a private App stays on its owner."""
     owner = repo.split("/")[0]
-    if org:
+    if owner_type == "User":
+        if org or org_secrets:
+            raise SetupError(
+                f"{repo} is a personal repo of {owner}, not an org's: drop --org "
+                "and --org-secrets (the App and its secrets belong to the user)"
+            )
+        login = _gh(["api", "user", "--jq", ".login"]).strip()
+        if login.lower() != owner.lower():
+            raise SetupError(
+                f"only {owner} can create the App for the personal repo {repo} "
+                f"(you are {login}): a private App installs only on its owner's "
+                f"repos. Ask {owner} to run this, or set a SKILLS_UPDATE_TOKEN PAT."
+            )
+        return
+    if owner_type == "Organization":
+        if not org:
+            raise SetupError(
+                f"{repo} belongs to the org {owner}: pass --org {owner} so the App "
+                "is owned by the org (a private App only installs on its owner)"
+            )
         if org.lower() != owner.lower():
             raise SetupError(
                 f"--org {org} doesn't own {repo}; a private App can only be "
                 f"installed on its owner's repos (use --org {owner})"
             )
         return
-    login = _gh(["api", "user", "--jq", ".login"]).strip()
-    if login.lower() != owner.lower():
-        raise SetupError(
-            f"{repo} belongs to {owner}, not you ({login}): pass --org {owner} so "
-            "the App is owned by the org (a private App only installs on its owner)"
-        )
+    raise SetupError(f"{repo}'s owner has an unexpected type: {owner_type!r}")
 
 
 def _create_app(args: argparse.Namespace) -> AppCredentials:
@@ -631,12 +729,12 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
 
 def _run(args: argparse.Namespace) -> None:
     repo: str = args.repo
-    _preflight(repo)
+    checked = _preflight(repo, want_root=not args.no_lane)
     done: list[str] = []
     if args.existing_app:
         slug = args.existing_app
     else:
-        _check_owner(repo, args.org)
+        _check_owner(repo, checked.owner_type, args.org, args.org_secrets)
         creds = _create_app(args)
         slug = creds.slug
         done.append(f"Created the App {slug} (id {creds.app_id}).")
@@ -664,8 +762,8 @@ def _run(args: argparse.Namespace) -> None:
     done.append(f"Install page opened for {repo} (you confirmed the install).")
     author = f"{slug}[bot]"
     lane_changed = False
-    if not args.no_lane:
-        lane_changed = write_lane_file(Path.cwd() / LANE_FILE, author)
+    if checked.root is not None:
+        lane_changed = write_lane_file(checked.root / LANE_FILE, author)
         state = "added" if lane_changed else "already lists"
         done.append(f"{LANE_FILE} {state} {author}.")
     print("\nDone:")
