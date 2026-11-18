@@ -71,9 +71,8 @@ A plan may still record the decision explicitly with `Stack: none - <reason>`.
 
 - **Consecutive plan tasks, in dependency order**: foundations at the bottom, then the
   code that uses them, then wiring, then docs.
-- **Each layer passes CI on its own** — lint, coverage with its gate, the per-test
-  speed check, security. A layer that only passes once a later layer is on top is a
-  bad split.
+- **Each layer passes CI on its own** — lint, coverage with its gate, security. A
+  layer that only passes once a later layer is on top is a bad split.
 - **Each layer makes sense to review alone.** Its PR body says what it does and why
   that is the boundary.
 - **Tests go in the same layer as the code they test.** A docs-only top layer is

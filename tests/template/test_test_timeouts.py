@@ -86,3 +86,27 @@ def test_react_tests_job_sets_up_no_python() -> None:
     ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
     job = ci.split("  react-tests:")[1].split("  react-security:")[0]
     assert "setup-python" not in job
+
+
+# --- ...and no trace in the prose agents follow (skills, rules, README) ---
+
+
+def _prose_files() -> list[Path]:
+    return [*sorted((REPO_ROOT / ".agents").rglob("*.md")), REPO_ROOT / "README.md"]
+
+
+def test_no_skill_rule_or_readme_names_the_speed_guard() -> None:
+    hits = [
+        f"{p.relative_to(REPO_ROOT)}: {m.group(0)}"
+        for p in _prose_files()
+        if (m := _GUARD_TERMS.search(p.read_text()))
+    ]
+    assert hits == []
+
+
+def test_resolve_pr_concerns_coaches_the_per_test_timeout() -> None:
+    text = (REPO_ROOT / ".agents/skills/resolve-pr-concerns/SKILL.md").read_text()
+    section = text.split("### 2g. ")[1].split("\n### ")[0]
+    assert section.lower().startswith("per-test timeout"), section[:80]
+    for phrase in ("pytest-timeout", "testTimeout", "hung"):
+        assert phrase in section, phrase

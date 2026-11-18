@@ -20,20 +20,17 @@ While it waits it names the session holding the lock. Without the
 `resolve-pr-concerns` skill installed, or with `SINGLE_FLIGHT=0`, run `make pr_check`
 directly.
 
-`make pr_check` is the local mirror of CI: the jobs CI requires, including the
-per-test speed check where the repo has one. In the shipped stacks that is
-`make lint` and `make security` first, then `make coverage` and `make test_speed_check`:
+`make pr_check` is the local mirror of CI: the jobs CI requires. In the shipped stacks
+that is `make lint` and `make security` first, then `make coverage`:
 - **lint** is format-check + linting + type-checking (it does NOT modify files):
   Python = `black --check` + `ruff check` + `mypy`; React = `biome check` + `tsc --noEmit`.
 - **security** is the stack's dependency / SAST scan.
 - **coverage** runs the stack's test suite (pytest / vitest) behind the 80% coverage gate
-  and writes `test-results.xml`.
-- **speed check** (where the repo has one) reads that run and fails any test over the
-  per-test budget (`test_speed` in `.github/pr-reviewer.json`, scaled by the measured
-  speed of the machine) that is not on the slow-test allowlist.
+  and writes `test-results.xml`. Each test also runs under the stack's fixed per-test
+  timeout, which fails only a hung test, never a merely slow one.
 
 `make tests` is the fast iteration target, not this gate: it skips the coverage gate,
-the security scan and any speed check, so a green `make tests` says nothing about
+and the security scan, so a green `make tests` says nothing about
 `make pr_check`.
 
 This skill always runs the full check. Before opening a PR, the `pr-check-scope` rule
@@ -45,10 +42,7 @@ Report:
 1. Lint result — if it reports a formatting violation, run `make format` to auto-fix, then re-run.
 2. Security findings, with the package or file and the advisory or rule.
 3. Test pass/fail summary and total count; any failures with file path, line number, and
-   failed assertion; and any coverage shortfall against the 80% gate.
-4. Speed offenders, where the repo has a speed check (test name and duration), with the
-   remedy in this order: speed the test up (usually mock the slow dependency) → move it
-   to a slower test group → allowlist it with a reason and a tracking issue (Python: `tests/slow_test_allowlist.txt`; React:
-   `slow_test_allowlist.txt`).
+   failed assertion; any coverage shortfall against the 80% gate; and any test that hit
+   the per-test timeout, with what it was waiting on (fix the wait; don't raise the limit).
 
 If checks fail, fix the issues and re-run before finishing.

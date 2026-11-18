@@ -74,7 +74,7 @@ THEN run, in order:
   changes are only legitimate initialization output, then stage and commit:
   `git add -A && git commit -m "chore: initialize from agentic-ai-dev-template"`.
 - Run `make deps && make pr_check` yourself to confirm the stack is green
-  (`pr_check` mirrors CI: lint, security, coverage gate, per-test speed check;
+  (`pr_check` mirrors CI: lint, security, coverage gate;
   fix anything red before proceeding).
 - Reconfirm `git remote get-url origin` matches `TARGET_REPO`, push only there,
   and open the PR explicitly against the same repository:
@@ -125,7 +125,7 @@ settings, skip confirmation prompts, or continue after a preflight failure.
   `.agents/rules/`, plus harness-agnostic skills in `.agents/skills/` (Claude Code
   reads them via the `.claude/skills` symlink; Cursor natively).
 - **`Makefile` orchestration** with identical verbs across stacks
-  (`make deps|format|lint|tests|coverage|test_speed_check|security|pr_check`) and `make cc` to drive
+  (`make deps|format|lint|tests|coverage|security|pr_check`) and `make cc` to drive
   Claude Code.
 - **Canonical repo settings** in `.github/repo-settings/` — applied first with
   `make apply_repo_settings_bootstrap` and finalized after the setup PR merges
@@ -210,8 +210,8 @@ Each migration file defines both `upgrade()` and `downgrade()`.
 
 ### `.github/pr-reviewer.json`: structured settings
 
-Names the active PR reviewer and its adapter, the review-round caps
-(`review_rounds`) and the per-test speed budget (`test_speed`). To use a reviewer this
+Names the active PR reviewer and its adapter and the review-round caps
+(`review_rounds`). To use a reviewer this
 template doesn't ship, add an adapter entry and point its `notes` at a notes file your
 repo owns. The skill reads it after any bundled notes; a path that leaves the repo or
 names no file is rejected.
