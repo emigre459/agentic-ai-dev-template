@@ -154,7 +154,11 @@ def test_old_hook_is_gone() -> None:
 
 def test_claude_settings_keeps_allow_list_and_stop() -> None:
     data = json.loads((REPO / ".claude/settings.json").read_text())
-    assert data["permissions"]["allow"] == CLAUDE_ALLOW
+    # The gate change must not drop or reorder any entry it found; entries
+    # other changes add later (e.g. new skill commands) are fine.
+    allow = data["permissions"]["allow"]
+    missing = [entry for entry in CLAUDE_ALLOW if entry not in allow]
+    assert not missing, f"allow entries removed: {missing}"
     assert data["hooks"]["Stop"] == [
         {
             "hooks": [
