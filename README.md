@@ -540,10 +540,10 @@ PR merged so far.
 **In this template**, a release also has a follow-up: the `release` skill offers to
 open a PR on a `release-pin-vX.Y.Z` branch that runs `make skills_lock TAG=vX.Y.Z`,
 recording the tag and hashes in `.github/template-skills-lock.json`. Repos made from
-the template start from that tag, with that file as their `skills-lock.json`. The
-template keeps no root `skills-lock.json`: the skills CLI hides every skill a source
-repo's root lock lists, so `npx skills add` would find none. Merge it like any other PR; it is a separate step because the tag
-cannot exist before the release does.
+the template start from that tag, with that file as their `skills-lock.json`. Merge it
+like any other PR; it is a separate step because the tag cannot exist before the
+release does. The template keeps no root `skills-lock.json`: the skills CLI hides every
+skill a source repo's root lock lists, so `npx skills add` would find none.
 
 **In your own repo**, the same flow works once it has the release pieces:
 `.github/release-drafter.yml`, the `release-drafter.yml` and `release.yml` workflows,
