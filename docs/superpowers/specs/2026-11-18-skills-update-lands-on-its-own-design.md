@@ -360,3 +360,26 @@ repo itself the run skips, so the check happens in the consumer repo).
 - Whether `ci.yml` keeps its `workflow_dispatch:` trigger (harmless either way; this
   card doesn't require removing it, and `test_ci_accepts_workflow_dispatch` can stay
   or go accordingly).
+
+## Amendment: 2026-11-18, the template must be installable by the skills CLI
+
+**Found by the live test (Part 1, step 4).** The update action's `npx skills@1.8.1 add emigre459/agentic-ai-dev-template#v0.1.0 --skill …` found none of the 14 skills, for two reasons that every release so far shares:
+
+1. **The template's own root `skills-lock.json` hides its skills.** The CLI's `discoverSkills` reads the source repo's own lock (`sourceLockedSkillNames`). It then drops every skill under an agent skill directory (`.agents/skills/`, `.claude/skills/`, …) whose name that lock lists, treating it as an installed copy rather than a published skill (`isInstalledProjectSkill`). I reproduced it with the pinned CLI: with the lock present it found 0 real skills; with it removed, 14.
+2. **`upgrade-deps/SKILL.md`'s `description` is invalid YAML** (an unquoted `: `), so the CLI skips that file.
+
+`make init` is unaffected, because it extracts skills from the tag with git. `npx skills add` and the nightly update are both broken.
+
+**Decided with the user: fix it in this PR.**
+
+- **The template's lock moves to `.github/template-skills-lock.json`.**
+  - Template-side readers use the new path: `init_template.py`, `skills-lock.mjs` (`write` and `check --template`), `make skills_lock`, the `release` skill's re-pin step, and the docs.
+  - `make init` writes the new repo's lock to `skills-lock.json`, so template-made repos and every consumer-facing piece are unchanged: the drift check's consumer mode, the update action, the lane and `upgrade-deps`.
+  - The template ships no root `skills-lock.json`.
+- **Valid frontmatter.** `upgrade-deps`'s `description` is quoted. A default-lane test parses every `.agents/skills/*/SKILL.md` frontmatter with a strict YAML parser and requires string `name` and `description` values.
+- **An installability guard.** A template-only CI job, `skills installable`, runs the pinned CLI's real install of every locked skill from the checkout into a temp project and fails unless every skill installs. The script is template machinery, so `make init` strips the job like the other template-only jobs. Its argv-building and result checks are unit-tested with a fake `npx`.
+- **The `demo-skill` fixture is marked `metadata: internal: true`**, so `npx skills add` never offers it to users. Its pinned hash is regenerated.
+- **Rejected alternatives:**
+  - publishing from a root `skills/` folder (two copies of every skill, and every lock's `skillPath` changes);
+  - dropping the template's lock (it loses the pin `make init` and the drift check rely on).
+- **Live test:** the published `v0.1.0` stays broken, so Part 1 uses a throwaway source repo carrying this branch's tree with its own `v0.1.0` release. Nothing is released from the real template before merge.

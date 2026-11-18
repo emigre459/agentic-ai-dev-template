@@ -233,3 +233,45 @@ Interview copy (exact):
   - adoption: drop the `gh workflow run ci.yml` paragraph and `workflow_dispatch` from the drift-job trigger list, and add the setup command.
 - [ ] **Step 4: Run** `uv run pytest tests/template -q` → PASS.
 - [ ] **Step 5: Commit and push:** `git commit -m "Document the App setup, the skills-update lane and auto-merge (#82)"`, then `git push`.
+
+---
+
+## Amendment tasks (spec "Amendment: 2026-11-18, the template must be installable by the skills CLI")
+
+### Task 6: Move the template's lock to `.github/template-skills-lock.json`
+
+**Files:**
+- `git mv skills-lock.json .github/template-skills-lock.json`
+- `scripts/init_template.py`: read the template lock from the new path (`_LOCK_FILE` → a template-path constant plus a consumer-path constant). `make init` writes the verified lock to `skills-lock.json` in the new repo and removes `.github/template-skills-lock.json`. Every place that rewrites the lock (e.g. `_drop_stack_only_skills`) works on the right file at the right moment.
+- `.github/actions/skills-drift/skills-lock.mjs`: `write` and `check --template` read and write `.github/template-skills-lock.json`. Plain `check` (consumer mode) still reads `skills-lock.json`. Update the header comments.
+- `.github/actions/skills-drift/action.yml` (descriptions), `Makefile` (`skills_lock` help text), `.agents/skills/release/SKILL.md` (the re-pin step names the file), `.agents/rules/shared/sync-core-dev-skills-upstream.md` (where it says the template's pin), and `README.md`, wherever a sentence is about the *template's own* lock. Consumer-facing text keeps `skills-lock.json`.
+- Tests: update `tests/template/test_skills_lock.py`, `test_initialize.py`, `test_root_hygiene.py` and any other test reading the template's lock (`grep -rn "skills-lock.json" tests/template`).
+
+**New tests:**
+- `test_template_ships_no_root_skills_lock`: the repo root has no `skills-lock.json`, and `.github/template-skills-lock.json` exists with every `.agents/skills/*` folder that isn't a symlink.
+- `test_init_writes_the_consumer_lock`: after init (use the existing init test harness), `skills-lock.json` exists at the new root with the template lock's content (minus stack-only drops), and `.github/template-skills-lock.json` is gone.
+- `skills-lock.mjs`: template-mode `check` and `write` use the new path (extend the existing mjs tests in `test_skills_lock.py`).
+
+**Verify:** `uv run pytest tests/template -q` and `make machinery_lint`; `node .github/actions/skills-drift/skills-lock.mjs check --root . --template` exits 0.
+
+### Task 7: Valid frontmatter, and an internal fixture
+
+- Quote `upgrade-deps/SKILL.md`'s `description` (YAML double-quoted, with inner quotes escaped), or reword it so it parses. Keep the wording identical if quoting is enough.
+- New test `tests/template/test_skill_frontmatter.py`: for every `.agents/skills/*/SKILL.md`, the frontmatter parses with `yaml.safe_load` (strict), `name` and `description` are non-empty strings, and `name` equals the folder name. Do the same for `tests/template/fixtures/**/SKILL.md`. If `yaml` isn't in the tooling env, add `pyyaml` to the template tooling dev dependencies with `uv add --dev`.
+- `tests/template/fixtures/skills_lock/demo-skill/SKILL.md`: add `metadata:\n  internal: true`, and update the pinned hash the fixture test expects (recompute with `skills-lock.mjs`'s hash function, the same way the test derives it).
+- The skill-hash change for `upgrade-deps` goes into the template lock with `make skills_lock` (keeping its recorded tag), only if a test (`test_shipped_lock_is_current` or the drift check) requires it. Follow what that test demands.
+
+**Verify:** `uv run pytest tests/template -q`; the new test fails before the quoting fix.
+
+### Task 8: The `skills installable` CI guard
+
+- New `scripts/check_skills_installable.py` (template machinery, stdlib only):
+  - reads the skill names from `.github/template-skills-lock.json`, and the CLI version from `.github/actions/skills-cli/package.json`;
+  - in a fresh temp directory (`git init`), runs `npx -y skills@<version> add <repo root> --skill <name> ... -a universal -y` with `DISABLE_TELEMETRY=1`;
+  - exits 0 only if every name has `<tmp>/.agents/skills/<name>/SKILL.md`. Otherwise it exits 1, naming the missing skills and printing the CLI's output tail.
+  - `NPX_CMD` env is the test seam.
+- `tests/template/test_check_skills_installable.py` (default lane, a fake `npx` on `NPX_CMD`): the argv is exactly that command; all installed → 0; one missing → 1 naming it; a CLI failure → 1 with the output.
+- `.github/workflows/ci.yml`: a template-only job named `skills installable`, with checkout, Node 22, setup-python per the existing jobs' pattern, then `python3 scripts/check_skills_installable.py`. It runs on the same triggers as the other jobs. Make `make init` strip it the same way it strips the other template-only jobs, and extend the init test that asserts which jobs survive.
+- Run the script for real once locally (network) and paste its output into the report: it must install all 14.
+
+**Verify:** `uv run pytest tests/template -q`, `make machinery_lint`, and the real local run passing.
