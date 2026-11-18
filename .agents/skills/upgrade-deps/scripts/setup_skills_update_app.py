@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create the repo owner's GitHub App for the nightly skills update, in two clicks.
 
-The nightly ``skills update`` workflow needs an App (``SKILLS_UPDATE_APP_ID`` +
+The nightly ``skills update`` workflow needs an App (``SKILLS_UPDATE_APP_CLIENT_ID`` +
 ``SKILLS_UPDATE_APP_PRIVATE_KEY``) or a PAT (``SKILLS_UPDATE_TOKEN``) and fails
 without one. This script sets up the App through GitHub's manifest flow ("Registering
 a GitHub App from a manifest"):
@@ -12,9 +12,9 @@ a GitHub App from a manifest"):
    Create**;
 3. take GitHub's redirect on a one-shot ``127.0.0.1`` listener (or a pasted URL with
    ``--no-browser``), checking ``state``;
-4. trade the code for the App's id, slug and private key
+4. trade the code for the App's id, client id, slug and private key
    (``gh api -X POST /app-manifests/<code>/conversions``);
-5. store the id and key as Actions secrets, the key on ``gh``'s stdin only;
+5. store the client id and key as Actions secrets, the key on ``gh``'s stdin only;
 6. open the App's install page; **the person clicks Install**;
 7. add ``<slug>[bot]`` to ``.github/skills-update-lane.json`` so the review gate's
    skills-update lane accepts the App's PRs.
@@ -62,7 +62,7 @@ from typing import Any, NamedTuple, NoReturn
 DEFAULT_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
 LANE_FILE = Path(".github") / "skills-update-lane.json"
 LANE_BRANCH = "skills-update"
-APP_ID_SECRET_NAME = "SKILLS_UPDATE_APP_ID"
+APP_CLIENT_ID_SECRET_NAME = "SKILLS_UPDATE_APP_CLIENT_ID"
 APP_KEY_SECRET_NAME = "SKILLS_UPDATE_APP_PRIVATE_KEY"
 CALLBACK_PATH = "/callback"
 # How long the listener waits for the person to review the page and click Create
@@ -99,7 +99,9 @@ class AppCredentials(NamedTuple):
     Attributes
     ----------
     app_id : int
-        The App's numeric id (``SKILLS_UPDATE_APP_ID``).
+        The App's numeric id (shown in the summary only).
+    client_id : str
+        The App's Client ID, like ``Iv23li...`` (``SKILLS_UPDATE_APP_CLIENT_ID``).
     slug : str
         The App's URL slug; its bot login is ``<slug>[bot]``.
     pem : str
@@ -107,13 +109,15 @@ class AppCredentials(NamedTuple):
     """
 
     app_id: int
+    client_id: str
     slug: str
     pem: str
 
     def __repr__(self) -> str:
         """Show the id and slug, never the key."""
         return (
-            f"AppCredentials(app_id={self.app_id!r}, slug={self.slug!r}, pem=<hidden>)"
+            f"AppCredentials(app_id={self.app_id!r}, client_id={self.client_id!r}, "
+            f"slug={self.slug!r}, pem=<hidden>)"
         )
 
 
@@ -431,8 +435,8 @@ def convert_manifest(code: str) -> AppCredentials:
         raise SetupError("the manifest code is malformed")
     out = _gh(["api", "-X", "POST", f"/app-manifests/{code}/conversions"])
     bad = SetupError(
-        "GitHub's manifest conversion response was missing the App's id, slug "
-        "or key (response not shown: it holds the private key)"
+        "GitHub's manifest conversion response was missing the App's id, client id, "
+        "slug or key (response not shown: it holds the private key)"
     )
     try:
         data = json.loads(out)
@@ -441,20 +445,23 @@ def convert_manifest(code: str) -> AppCredentials:
     if not isinstance(data, dict):
         raise bad
     app_id, slug, pem = data.get("id"), data.get("slug"), data.get("pem")
+    client_id = data.get("client_id")
     if (
         not isinstance(app_id, int)
         or isinstance(app_id, bool)
+        or not isinstance(client_id, str)
+        or not client_id
         or not isinstance(slug, str)
         or not slug
         or not isinstance(pem, str)
         or not pem.strip()
     ):
         raise bad
-    return AppCredentials(app_id=app_id, slug=slug, pem=pem)
+    return AppCredentials(app_id=app_id, client_id=client_id, slug=slug, pem=pem)
 
 
 def set_secrets(repo: str, creds: AppCredentials, org_secrets_org: str | None) -> None:
-    """Store the App id and key as Actions secrets; the key goes on stdin only.
+    """Store the App client id and key as Actions secrets; the key goes on stdin only.
 
     Parameters
     ----------
@@ -482,7 +489,7 @@ def set_secrets(repo: str, creds: AppCredentials, org_secrets_org: str | None) -
         ]
     else:
         scope = ["--repo", repo]
-    _gh(["secret", "set", APP_ID_SECRET_NAME, "--body", str(creds.app_id), *scope])
+    _gh(["secret", "set", APP_CLIENT_ID_SECRET_NAME, "--body", creds.client_id, *scope])
     _gh(
         ["secret", "set", APP_KEY_SECRET_NAME, *scope],
         stdin_text=creds.pem,
@@ -540,7 +547,7 @@ def add_repo_to_org_secrets(org: str, repo: str, repo_id: int) -> None:
         A secret doesn't exist in the org (create it once with ``--org-secrets``),
         or ``gh`` failed.
     """
-    for name in (APP_ID_SECRET_NAME, APP_KEY_SECRET_NAME):
+    for name in (APP_CLIENT_ID_SECRET_NAME, APP_KEY_SECRET_NAME):
         args = [
             "api",
             "-X",
@@ -890,7 +897,8 @@ def _recovery(args: argparse.Namespace, creds: AppCredentials) -> str:
     return (
         f"The App {slug} (id {creds.app_id}) was created, but its key was not stored "
         f"and this script keeps no copy. Generate a new private key at {settings}, "
-        f"run `gh secret set {APP_ID_SECRET_NAME} {scope} --body {creds.app_id}` and "
+        f"run `gh secret set {APP_CLIENT_ID_SECRET_NAME} {scope} "
+        f"--body {creds.client_id}` and "
         f"`gh secret set {APP_KEY_SECRET_NAME} {scope} < the-key.pem`, delete the "
         f"downloaded key, {finish}"
     )
@@ -905,27 +913,32 @@ def _run(args: argparse.Namespace) -> None:
         _check_existing_app(repo, checked.owner_type, args.org)
         add_repo_to_org_secrets(args.org, repo, checked.repo_id)
         done.append(
-            f"Added {repo} to the org secrets {APP_ID_SECRET_NAME} and "
+            f"Added {repo} to the org secrets {APP_CLIENT_ID_SECRET_NAME} and "
             f"{APP_KEY_SECRET_NAME} of {args.org} (other repos keep theirs)."
         )
     else:
         _check_owner(repo, checked.owner_type, args.org, args.org_secrets)
-        if args.org_secrets and org_secret_exists(args.org, APP_ID_SECRET_NAME):
+        client_id_name = APP_CLIENT_ID_SECRET_NAME
+        if args.org_secrets and org_secret_exists(args.org, client_id_name):
             raise SetupError(
-                f"the org secret {APP_ID_SECRET_NAME} already exists in {args.org}: "
+                f"the org secret {client_id_name} already exists in {args.org}: "
                 "it belongs to an existing App, and this script never overwrites it. "
                 f"Rerun with --existing-app <that App's slug> --org {args.org} to add "
                 f"{repo} to it."
             )
         creds = _create_app(args)
         slug = creds.slug
-        done.append(f"Created the App {slug} (id {creds.app_id}).")
+        done.append(
+            f"Created the App {slug} (id {creds.app_id}, client id {creds.client_id})."
+        )
         try:
             set_secrets(repo, creds, args.org if args.org_secrets else None)
         except SetupError as exc:
             raise SetupError(f"{exc}\n{_recovery(args, creds)}") from None
         where = f"org {args.org}, visible to {repo}" if args.org_secrets else repo
-        done.append(f"Set {APP_ID_SECRET_NAME} and {APP_KEY_SECRET_NAME} on {where}.")
+        done.append(
+            f"Set {APP_CLIENT_ID_SECRET_NAME} and {APP_KEY_SECRET_NAME} on {where}."
+        )
     install = f"https://github.com/apps/{slug}/installations/new"
     check = (
         'run "skills update" by hand from the Actions tab '

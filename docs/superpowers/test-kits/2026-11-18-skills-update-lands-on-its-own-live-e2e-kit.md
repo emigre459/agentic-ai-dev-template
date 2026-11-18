@@ -101,7 +101,7 @@ sleep 20; gh run list -R "$REPO" --workflow skills-update.yml --limit 1
 gh run view -R "$REPO" --log-failed $(gh run list -R "$REPO" --workflow skills-update.yml --limit 1 --json databaseId --jq '.[0].databaseId') | grep '::error::\|No SKILLS_UPDATE'
 ```
 
-Expected: the run fails, and the log says `No SKILLS_UPDATE_APP_ID/SKILLS_UPDATE_APP_PRIVATE_KEY (GitHub App) or SKILLS_UPDATE_TOKEN (PAT) secret is set. Set one up with: python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo <you>/skills-update-e2e ...`. The repo name must be your real one, not a literal `$GITHUB_REPOSITORY`.
+Expected: the run fails, and the log says `No SKILLS_UPDATE_APP_CLIENT_ID/SKILLS_UPDATE_APP_PRIVATE_KEY (GitHub App) or SKILLS_UPDATE_TOKEN (PAT) secret is set. Set one up with: python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo <you>/skills-update-e2e ...`. The repo name must be your real one, not a literal `$GITHUB_REPOSITORY`.
 
 ## 2. Set up the App: two clicks
 
@@ -113,14 +113,16 @@ python3 "$T/.agents/skills/upgrade-deps/scripts/setup_skills_update_app.py" --re
 
 1. A browser tab opens on GitHub's "Create GitHub App" page, pre-filled as `skills-update-e2e-skills-update` with contents and pull requests: write and no webhook. **Click Create.**
 2. GitHub redirects to `127.0.0.1`. The script stores the two secrets and opens the install page. **Click Install** and pick only `skills-update-e2e`, then press Enter in the terminal.
-3. The script prints a summary with the App ID and slug, and says it wrote `.github/skills-update-lane.json`.
+3. The script prints a summary with the App ID, Client ID and slug, and says it wrote `.github/skills-update-lane.json`.
 
 If the redirect never arrives (for example, a remote shell), rerun with `--no-browser` and paste the redirect URL within the hour. If an App was created but the script died before collecting its key, delete that App at https://github.com/settings/apps before you retry.
+
+A scratch repo set up before the Client ID change has `SKILLS_UPDATE_APP_ID` instead of `SKILLS_UPDATE_APP_CLIENT_ID`. Re-running the setup script with `--existing-app` doesn't apply to a personal repo, so the simplest path is to run `gh secret set SKILLS_UPDATE_APP_CLIENT_ID -R "$REPO"`, pasting the Client ID from the App's settings page (a string like `Iv23li...`, not the numeric App ID), then `gh secret delete SKILLS_UPDATE_APP_ID -R "$REPO"`.
 
 **Check 2:**
 
 ```bash
-gh secret list -R "$REPO"            # SKILLS_UPDATE_APP_ID and SKILLS_UPDATE_APP_PRIVATE_KEY
+gh secret list -R "$REPO"            # SKILLS_UPDATE_APP_CLIENT_ID and SKILLS_UPDATE_APP_PRIVATE_KEY
 cat .github/skills-update-lane.json  # {"branch": "skills-update", "authors": ["<slug>[bot]"]}
 git status --short                   # the key appears nowhere on disk: only the lane file is new
 ```

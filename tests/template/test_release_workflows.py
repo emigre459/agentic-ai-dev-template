@@ -280,7 +280,7 @@ def test_readme_covers_install_pin_update_telemetry_release() -> None:
         "DISABLE_TELEMETRY=1",
         "#v",
         "SKILLS_UPDATE_TOKEN",
-        "SKILLS_UPDATE_APP_ID",
+        "SKILLS_UPDATE_APP_CLIENT_ID",
         "skills drift",
         "release.yml",
         "skills-update",

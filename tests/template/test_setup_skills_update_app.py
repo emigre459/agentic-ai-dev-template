@@ -148,10 +148,12 @@ def gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
 
 
 def _creds() -> Any:
-    return app.AppCredentials(app_id=42, slug="acme-skills", pem=PEM)
+    return app.AppCredentials(
+        app_id=42, client_id="Iv1.abc", slug="acme-skills", pem=PEM
+    )
 
 
-ORG_SECRETS = ["SKILLS_UPDATE_APP_ID", "SKILLS_UPDATE_APP_PRIVATE_KEY"]
+ORG_SECRETS = ["SKILLS_UPDATE_APP_CLIENT_ID", "SKILLS_UPDATE_APP_PRIVATE_KEY"]
 EXISTING = ["--repo", "acme/repo", "--org", "acme", "--existing-app", "acme-skills"]
 INSTALL_URL = "https://github.com/apps/acme-skills/installations/new"
 
@@ -328,7 +330,12 @@ def test_wait_for_callback_times_out() -> None:
 
 def test_convert_manifest_posts_the_code(gh: FakeGh) -> None:
     creds = app.convert_manifest("abc123")
-    assert (creds.app_id, creds.slug, creds.pem) == (42, "acme-skills", PEM)
+    assert (creds.app_id, creds.client_id, creds.slug, creds.pem) == (
+        42,
+        "Iv1.abc",
+        "acme-skills",
+        PEM,
+    )
     (call,) = gh.calls()
     assert call["argv"] == ["api", "-X", "POST", "/app-manifests/abc123/conversions"]
 
@@ -336,12 +343,16 @@ def test_convert_manifest_posts_the_code(gh: FakeGh) -> None:
 @pytest.mark.parametrize(
     "broken",
     [
-        {"id": 42, "slug": "acme-skills", "pem": None},
-        {"id": 42, "slug": "acme-skills", "pem": ""},
-        {"id": 42, "slug": "", "pem": PEM},
-        {"id": 42, "slug": None, "pem": PEM},
-        {"id": "42", "slug": "acme-skills", "pem": PEM},
-        {"id": True, "slug": "acme-skills", "pem": PEM},
+        {"id": 42, "client_id": "Iv23li", "slug": "acme-skills", "pem": None},
+        {"id": 42, "client_id": "Iv23li", "slug": "acme-skills", "pem": ""},
+        {"id": 42, "client_id": "Iv23li", "slug": "", "pem": PEM},
+        {"id": 42, "client_id": "Iv23li", "slug": None, "pem": PEM},
+        {"id": "42", "client_id": "Iv23li", "slug": "acme-skills", "pem": PEM},
+        {"id": True, "client_id": "Iv23li", "slug": "acme-skills", "pem": PEM},
+        {"id": 42, "slug": "acme-skills", "pem": PEM},
+        {"id": 42, "client_id": "", "slug": "acme-skills", "pem": PEM},
+        {"id": 42, "client_id": None, "slug": "acme-skills", "pem": PEM},
+        {"id": 42, "client_id": 7, "slug": "acme-skills", "pem": PEM},
     ],
 )
 def test_convert_manifest_requires_real_fields(
@@ -367,11 +378,11 @@ def test_set_secrets_sends_the_key_on_stdin_only(gh: FakeGh) -> None:
     calls = gh.calls()
     assert all("SECRET" not in arg for call in calls for arg in call["argv"])
     by_name = {call["argv"][2]: call for call in calls}
-    id_call = by_name["SKILLS_UPDATE_APP_ID"]
+    id_call = by_name["SKILLS_UPDATE_APP_CLIENT_ID"]
     key_call = by_name["SKILLS_UPDATE_APP_PRIVATE_KEY"]
-    assert id_call["argv"][:3] == ["secret", "set", "SKILLS_UPDATE_APP_ID"]
+    assert id_call["argv"][:3] == ["secret", "set", "SKILLS_UPDATE_APP_CLIENT_ID"]
     assert "--body" in id_call["argv"]
-    assert id_call["argv"][id_call["argv"].index("--body") + 1] == "42"
+    assert id_call["argv"][id_call["argv"].index("--body") + 1] == "Iv1.abc"
     assert key_call["stdin"] == PEM
     assert "--body" not in key_call["argv"]
     for call in calls:
@@ -606,7 +617,7 @@ def test_main_existing_app_fails_clearly_without_the_org_secrets(
     _feed(monkeypatch, "\n")
     assert app.main([*EXISTING, "--no-browser"]) == 1
     captured = capsys.readouterr()
-    assert "SKILLS_UPDATE_APP_ID" in captured.err
+    assert "SKILLS_UPDATE_APP_CLIENT_ID" in captured.err
     assert "acme" in captured.err and "--org-secrets" in captured.err
     assert INSTALL_URL not in captured.out
     assert not (tmp_path / ".github").exists()
@@ -684,7 +695,7 @@ def test_main_create_flow_end_to_end(
     calls = [c["argv"] for c in gh.calls()]
     assert ["api", "-X", "POST", "/app-manifests/abc123/conversions"] in calls
     names = [argv[2] for argv in calls if argv[:2] == ["secret", "set"]]
-    assert names == ["SKILLS_UPDATE_APP_ID", "SKILLS_UPDATE_APP_PRIVATE_KEY"]
+    assert names == ["SKILLS_UPDATE_APP_CLIENT_ID", "SKILLS_UPDATE_APP_PRIVATE_KEY"]
     assert all("SECRET" not in arg for argv in calls for arg in argv)
 
     lane = json.loads((tmp_path / ".github" / "skills-update-lane.json").read_text())
@@ -818,7 +829,7 @@ def test_main_org_secrets_refuses_when_the_org_already_has_them(
 ) -> None:
     """An existing org secret belongs to an App already; never overwrite it."""
     _enter_repo(tmp_path, monkeypatch)
-    gh.configure(org_secrets=["SKILLS_UPDATE_APP_ID"])
+    gh.configure(org_secrets=["SKILLS_UPDATE_APP_CLIENT_ID"])
     opened: list[str] = []
 
     def fake_open(url: str) -> bool:
@@ -834,7 +845,7 @@ def test_main_org_secrets_refuses_when_the_org_already_has_them(
     argv = ["--repo", "acme/repo", "--org", "acme", "--org-secrets"]
     assert app.main(argv) == 1
     err = capsys.readouterr().err
-    assert "SKILLS_UPDATE_APP_ID" in err and "--existing-app" in err
+    assert "SKILLS_UPDATE_APP_CLIENT_ID" in err and "--existing-app" in err
     assert opened == []
     joined = [" ".join(c["argv"]) for c in gh.calls()]
     assert not any("app-manifests" in j or "secret set" in j for j in joined)

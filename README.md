@@ -402,7 +402,7 @@ pushes made with that token do not trigger CI):
 
 | Secret | Effect |
 |--------|--------|
-| `SKILLS_UPDATE_APP_ID` + `SKILLS_UPDATE_APP_PRIVATE_KEY` | A GitHub App you install on the repo, with contents and pull requests: write. Recommended. Its pushes trigger the PR's CI normally. Set both: with only one of them set, the nightly run fails. |
+| `SKILLS_UPDATE_APP_CLIENT_ID` + `SKILLS_UPDATE_APP_PRIVATE_KEY` | A GitHub App you install on the repo, with contents and pull requests: write. Recommended. Its pushes trigger the PR's CI normally. Set both: with only one of them set, the nightly run fails. Store the App's **Client ID** (a string like `Iv23li...`, on the App's settings page under "Client ID"), not the numeric App ID. |
 | `SKILLS_UPDATE_TOKEN` | A fine-grained personal access token with contents and pull requests: write on the repo. Its pushes trigger the PR's CI normally. Own it with a dedicated machine account, never a person: the lane trusts the token's login. Set it with `gh secret set SKILLS_UPDATE_TOKEN --repo <owner/name>`, which prompts for the value. |
 
 With neither, the nightly run fails with an error that names the setup command. To

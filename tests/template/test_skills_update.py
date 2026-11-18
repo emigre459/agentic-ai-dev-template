@@ -1181,18 +1181,19 @@ def test_update_workflow_token_precedence() -> None:
     assert steps.index(probe) < steps.index(app) < steps.index(pick)
 
     assert probe["env"] == {
-        "APP_ID": "${{ secrets.SKILLS_UPDATE_APP_ID }}",
+        "APP_CLIENT_ID": "${{ secrets.SKILLS_UPDATE_APP_CLIENT_ID }}",
         "APP_KEY": "${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}",
         "PAT": "${{ secrets.SKILLS_UPDATE_TOKEN }}",
     }
     assert "create-github-app-token" in app["uses"]
     assert "steps.secrets.outputs.has_app == 'true'" in app["if"]
     assert app["with"] == {
-        "app-id": "${{ secrets.SKILLS_UPDATE_APP_ID }}",
+        "client-id": "${{ secrets.SKILLS_UPDATE_APP_CLIENT_ID }}",
         "private-key": "${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}",
         "permission-contents": "write",
         "permission-pull-requests": "write",
     }
+    assert "app-id" not in app["with"]
     assert pick["env"]["APP_TOKEN"] == "${{ steps.app.outputs.token }}"
     assert pick["env"]["SKILLS_UPDATE_TOKEN"] == "${{ secrets.SKILLS_UPDATE_TOKEN }}"
     assert "GITHUB_TOKEN" not in pick["env"]
@@ -1205,11 +1206,11 @@ def test_update_workflow_token_precedence() -> None:
     }
     assert holders == {
         "secrets": [
-            "SKILLS_UPDATE_APP_ID",
+            "SKILLS_UPDATE_APP_CLIENT_ID",
             "SKILLS_UPDATE_APP_PRIVATE_KEY",
             "SKILLS_UPDATE_TOKEN",
         ],
-        "app": ["SKILLS_UPDATE_APP_ID", "SKILLS_UPDATE_APP_PRIVATE_KEY"],
+        "app": ["SKILLS_UPDATE_APP_CLIENT_ID", "SKILLS_UPDATE_APP_PRIVATE_KEY"],
         "token": ["SKILLS_UPDATE_TOKEN"],
     }
 
@@ -1230,9 +1231,9 @@ def test_update_workflow_grants_no_actions_write() -> None:
     ("env", "has_app", "has_pat"),
     [
         ({}, "false", "false"),
-        ({"APP_ID": "id-4242", "APP_KEY": "key-SECRET"}, "true", "false"),
+        ({"APP_CLIENT_ID": "id-4242", "APP_KEY": "key-SECRET"}, "true", "false"),
         (
-            {"APP_ID": "id-4242", "APP_KEY": "key-SECRET", "PAT": "pat-SECRET"},
+            {"APP_CLIENT_ID": "id-4242", "APP_KEY": "key-SECRET", "PAT": "pat-SECRET"},
             "true",
             "true",
         ),
@@ -1261,8 +1262,8 @@ def test_secrets_probe_writes_only_booleans(
 @pytest.mark.parametrize(
     "env",
     [
-        {"APP_ID": "id-4242", "APP_KEY": ""},
-        {"APP_ID": "", "APP_KEY": "key-SECRET", "PAT": "pat-SECRET"},
+        {"APP_CLIENT_ID": "id-4242", "APP_KEY": ""},
+        {"APP_CLIENT_ID": "", "APP_KEY": "key-SECRET", "PAT": "pat-SECRET"},
     ],
     ids=["id-only", "key-only-with-pat"],
 )
@@ -1281,7 +1282,7 @@ def test_secrets_probe_fails_on_a_half_configured_app(
     # A misconfiguration fails the run; it never falls back to another token.
     assert result.returncode == 1
     assert "::error::" in result.stdout
-    assert "SKILLS_UPDATE_APP_ID" in result.stdout
+    assert "SKILLS_UPDATE_APP_CLIENT_ID" in result.stdout
     assert "SKILLS_UPDATE_APP_PRIVATE_KEY" in result.stdout
     assert out.read_text() == ""
     assert all(v not in result.stdout + result.stderr for v in env.values() if v)
@@ -1341,7 +1342,7 @@ def test_token_step_fails_with_neither_app_nor_pat(
     assert result.returncode == 1
     shown = result.stdout + result.stderr
     assert "::error::" in shown
-    assert "SKILLS_UPDATE_APP_ID" in shown and "SKILLS_UPDATE_TOKEN" in shown
+    assert "SKILLS_UPDATE_APP_CLIENT_ID" in shown and "SKILLS_UPDATE_TOKEN" in shown
     # The setup command names the real repo, not a literal "$GITHUB_REPOSITORY".
     assert "setup_skills_update_app.py --repo acme/widgets" in shown
     assert "$GITHUB_REPOSITORY" not in shown

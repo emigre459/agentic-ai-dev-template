@@ -5,8 +5,8 @@ name: skills update
 # main already has them. The PR enables auto-merge, so it lands once its required
 # checks pass. One of these secrets sets the identity that pushes the branch and
 # opens the PR (its push triggers the PR's CI); with neither, the run fails:
-#   SKILLS_UPDATE_APP_ID + SKILLS_UPDATE_APP_PRIVATE_KEY  a GitHub App
-#   SKILLS_UPDATE_TOKEN                                   a fine-grained PAT
+#   SKILLS_UPDATE_APP_CLIENT_ID + SKILLS_UPDATE_APP_PRIVATE_KEY  a GitHub App
+#   SKILLS_UPDATE_TOKEN                                         a fine-grained PAT
 # GITHUB_TOKEN is not an option: its pushes do not trigger CI.
 #
 # `make init` rewrites the local action path below to the remote action at the
@@ -71,15 +71,15 @@ jobs:
         id: secrets
         if: steps.template.outputs.is_template != 'true'
         env:
-          APP_ID: ${{ secrets.SKILLS_UPDATE_APP_ID }}
+          APP_CLIENT_ID: ${{ secrets.SKILLS_UPDATE_APP_CLIENT_ID }}
           APP_KEY: ${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}
           PAT: ${{ secrets.SKILLS_UPDATE_TOKEN }}
         run: |
           has_app=false
-          if [ -n "${APP_ID:-}" ] && [ -n "${APP_KEY:-}" ]; then
+          if [ -n "${APP_CLIENT_ID:-}" ] && [ -n "${APP_KEY:-}" ]; then
             has_app=true
-          elif [ -n "${APP_ID:-}" ] || [ -n "${APP_KEY:-}" ]; then
-            echo "::error::Only one of SKILLS_UPDATE_APP_ID and SKILLS_UPDATE_APP_PRIVATE_KEY is set. Set both to use the GitHub App, or delete the one that is set."
+          elif [ -n "${APP_CLIENT_ID:-}" ] || [ -n "${APP_KEY:-}" ]; then
+            echo "::error::Only one of SKILLS_UPDATE_APP_CLIENT_ID and SKILLS_UPDATE_APP_PRIVATE_KEY is set. Set both to use the GitHub App, or delete the one that is set."
             exit 1
           fi
           has_pat=false
@@ -93,7 +93,7 @@ jobs:
           && steps.secrets.outputs.has_app == 'true'
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.SKILLS_UPDATE_APP_ID }}
+          client-id: ${{ secrets.SKILLS_UPDATE_APP_CLIENT_ID }}
           private-key: ${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
@@ -111,7 +111,7 @@ jobs:
           elif [ -n "${SKILLS_UPDATE_TOKEN:-}" ]; then
             value="$SKILLS_UPDATE_TOKEN"
           else
-            echo "::error::No SKILLS_UPDATE_APP_ID/SKILLS_UPDATE_APP_PRIVATE_KEY (GitHub App) or SKILLS_UPDATE_TOKEN (PAT) secret is set. Set one up with: python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo ${GITHUB_REPOSITORY:-<owner/name>} (add --org <org> for an org-owned repo; see the README, \"Staying up to date\")."
+            echo "::error::No SKILLS_UPDATE_APP_CLIENT_ID/SKILLS_UPDATE_APP_PRIVATE_KEY (GitHub App) or SKILLS_UPDATE_TOKEN (PAT) secret is set. Set one up with: python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo ${GITHUB_REPOSITORY:-<owner/name>} (add --org <org> for an org-owned repo; see the README, \"Staying up to date\")."
             exit 1
           fi
           echo "::add-mask::$value"
