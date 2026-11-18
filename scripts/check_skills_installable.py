@@ -9,7 +9,8 @@ if every skill named in ``.github/template-skills-lock.json`` lands at
 uninstallable (a root ``skills-lock.json`` hiding the skills, invalid
 frontmatter).
 
-Set ``NPX_CMD`` to substitute the ``npx`` executable (the test seam).
+Set ``NPX_CMD`` to substitute the ``npx`` executable (the test seam) and
+``SKILLS_INSTALL_TIMEOUT`` (seconds, default 600) to bound the install.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _TAIL_LINES = 40
+_DEFAULT_TIMEOUT_S = 600
 
 
 def skill_names(repo: Path = REPO_ROOT) -> list[str]:
@@ -70,6 +72,13 @@ def main() -> int:
         0 if all skills installed, 1 otherwise.
     """
     names = skill_names()
+    if not names:
+        print(
+            "the lock lists no skills (.github/template-skills-lock.json)",
+            file=sys.stderr,
+        )
+        return 1
+    timeout = float(os.environ.get("SKILLS_INSTALL_TIMEOUT", _DEFAULT_TIMEOUT_S))
     argv = [
         os.environ.get("NPX_CMD", "npx"),
         "-y",
@@ -87,14 +96,22 @@ def main() -> int:
         subprocess.run(  # nosec B603 B607 -- fixed argv, no shell
             ["git", "init", "-q"], cwd=project, check=True
         )
-        proc = subprocess.run(  # nosec B603 B607 -- fixed argv, no shell
-            argv,
-            cwd=project,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            proc = subprocess.run(  # nosec B603 B607 -- fixed argv, no shell
+                argv,
+                cwd=project,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+        except FileNotFoundError:
+            print(f"npx not found: {argv[0]}", file=sys.stderr)
+            return 1
+        except subprocess.TimeoutExpired:
+            print(f"skills CLI timed out after {timeout:g}s", file=sys.stderr)
+            return 1
         output = (proc.stdout + proc.stderr).strip()
         tail = "\n".join(output.splitlines()[-_TAIL_LINES:])
         missing = [

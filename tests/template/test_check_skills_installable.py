@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess  # nosec B404 -- fixed argv, in-repo script, no shell
 import sys
@@ -28,6 +29,9 @@ from pathlib import Path
 Path(os.environ["FAKE_ARGV"]).write_text(
     json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(),
                 "telemetry": os.environ.get("DISABLE_TELEMETRY")}))
+if os.environ.get("FAKE_SLEEP"):
+    import time
+    time.sleep(float(os.environ["FAKE_SLEEP"]))
 if os.environ.get("FAKE_FAIL"):
     print("boom: cannot install")
     sys.exit(3)
@@ -42,7 +46,9 @@ for name in [argv[i + 1] for i, a in enumerate(argv) if a == "--skill"]:
 """
 
 
-def _run(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
+def _run(
+    tmp_path: Path, script: Path = _SCRIPT, **env: str
+) -> subprocess.CompletedProcess[str]:
     impl = tmp_path / "npx_impl.py"
     impl.write_text(_FAKE)
     fake = tmp_path / "npx"
@@ -55,7 +61,7 @@ def _run(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
         **env,
     }
     return subprocess.run(  # nosec B603 -- fixed argv
-        [sys.executable, str(_SCRIPT)],
+        [sys.executable, str(script)],
         capture_output=True,
         text=True,
         env=full_env,
@@ -91,3 +97,41 @@ def test_cli_failure_fails_with_its_output(tmp_path: Path) -> None:
     result = _run(tmp_path, FAKE_FAIL="1")
     assert result.returncode == 1
     assert "boom: cannot install" in result.stdout + result.stderr
+
+
+def _copy_with_lock(tmp_path: Path, skills: dict[str, object]) -> Path:
+    """Copy the script into a fake repo whose lock lists ``skills``."""
+    root = tmp_path / "repo"
+    (root / "scripts").mkdir(parents=True)
+    (root / ".github" / "actions" / "skills-cli").mkdir(parents=True)
+    shutil.copy(_SCRIPT, root / "scripts" / _SCRIPT.name)
+    shutil.copy(
+        _REPO / ".github" / "actions" / "skills-cli" / "package.json",
+        root / ".github" / "actions" / "skills-cli" / "package.json",
+    )
+    (root / ".github" / "template-skills-lock.json").write_text(
+        json.dumps({"version": 2, "skills": skills})
+    )
+    return root / "scripts" / _SCRIPT.name
+
+
+def test_empty_lock_fails_instead_of_passing(tmp_path: Path) -> None:
+    result = _run(tmp_path, script=_copy_with_lock(tmp_path, {}))
+    assert result.returncode == 1
+    assert "no skills" in (result.stdout + result.stderr).lower()
+
+
+def test_timeout_fails_cleanly(tmp_path: Path) -> None:
+    result = _run(tmp_path, FAKE_SLEEP="30", SKILLS_INSTALL_TIMEOUT="1")
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "timed out" in out
+    assert "Traceback" not in out
+
+
+def test_missing_npx_fails_cleanly(tmp_path: Path) -> None:
+    result = _run(tmp_path, NPX_CMD=str(tmp_path / "no-such-npx"))
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "not found" in out
+    assert "Traceback" not in out
