@@ -6,7 +6,7 @@ Issue: #83 (epic #51). Status: approved 2026-11-18. Size: small change.
 
 The template ships a per-test speed guard (`scripts/check_test_speed.py`, `make
 test_speed_check`) on both stacks. Its leading downstream repo retired the same guard
-on 2026-11-17 (Gridium/gridium-agent#3081, closing its #2996): the solo re-measure cost
+on 2026-11-17 (the leading downstream repo's PR #3081, closing its #2996): the solo re-measure cost
 minutes on every run and most failures were machine-contention flakes. Consumers of
 this template should not inherit a gate their leading repo dropped. A fixed, generous
 per-test timeout replaces it as the only time-based block: hitting it means a test is

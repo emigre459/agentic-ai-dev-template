@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Python per-test limit: `timeout = 60` in `stacks/python/pyproject.toml` `[tool.pytest.ini_options]`; no `timeout_method` line (plugin default). Comment states the derivation: about 3x downstream's measured 20.5 s slowest default-lane test (Gridium/gridium-agent#3081); the template's own slowest is 0.066 s; switch to `timeout_method = "thread"` if the code under test uses SIGALRM.
+- Python per-test limit: `timeout = 60` in `stacks/python/pyproject.toml` `[tool.pytest.ini_options]`; no `timeout_method` line (plugin default). Comment states the derivation: about 3x downstream's measured 20.5 s slowest default-lane test (the leading downstream repo's PR #3081); the template's own slowest is 0.066 s; switch to `timeout_method = "thread"` if the code under test uses SIGALRM.
 - React per-test limit: `testTimeout: 10_000` in `stacks/react/vitest.config.ts` `test` block. Comment: twice Vitest's 5 s default, room for slow jsdom/user-event tests; the template's own slowest is 0.037 s.
 - `pytest-timeout` joins the Python stack's `dev` dependency group via `uv add --dev pytest-timeout` (run in `stacks/python`), so `uv.lock` updates with it.
 - `skills-lock.json` is not touched (pinned entries verify against the `v0.1.0` tag).

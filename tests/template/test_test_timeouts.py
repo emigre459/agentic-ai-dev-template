@@ -9,6 +9,8 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PY_PROJECT = REPO_ROOT / "stacks" / "python" / "pyproject.toml"
 VITEST_CONFIG = REPO_ROOT / "stacks" / "react" / "vitest.config.ts"
@@ -32,4 +34,55 @@ def test_python_stack_has_pytest_timeout_as_a_dev_dependency() -> None:
 
 def test_react_stack_sets_a_10s_test_timeout() -> None:
     text = VITEST_CONFIG.read_text()
-    assert re.search(r"^\s*testTimeout:\s*10_000,", text, re.M), text
+    assert re.search(r"^\s*testTimeout:\s*10_000,", text, re.MULTILINE), text
+
+
+# --- The retired speed guard leaves no trace in the build (Make, CI, config) ---
+
+_GUARD_TERMS = re.compile(
+    r"test_speed|check_test_speed|runner_speed|slow_test_allowlist"
+    r"|_pytest_fixture_timing|speed (?:check|guard|budget)",
+    re.IGNORECASE,
+)
+_GUARD_FILES = [
+    "scripts/check_test_speed.py",
+    "scripts/runner_speed.py",
+    "stacks/python/tests/_pytest_fixture_timing.py",
+    "stacks/python/tests/slow_test_allowlist.txt",
+    "stacks/react/slow_test_allowlist.txt",
+]
+
+
+def test_the_guard_files_are_gone() -> None:
+    assert [p for p in _GUARD_FILES if (REPO_ROOT / p).exists()] == []
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "Makefile",
+        "stacks/python/Makefile",
+        "stacks/react/Makefile",
+        ".github/workflows/ci.yml",
+        ".github/pr-reviewer.json",
+        ".gitignore",
+        "stacks/python/tests/conftest.py",
+    ],
+)
+def test_no_build_file_names_the_speed_guard(rel: str) -> None:
+    match = _GUARD_TERMS.search((REPO_ROOT / rel).read_text())
+    assert match is None, f"{rel}: {match.group(0) if match else ''}"
+
+
+@pytest.mark.parametrize("stack", ["python", "react"])
+def test_each_stack_pr_check_runs_lint_security_then_coverage(stack: str) -> None:
+    text = (REPO_ROOT / "stacks" / stack / "Makefile").read_text()
+    assert re.search(r"^pr_check: lint security\b", text, re.MULTILINE)
+    assert "$(MAKE) --no-print-directory coverage" in text
+
+
+def test_react_tests_job_sets_up_no_python() -> None:
+    """Python was there only for the guard's calibration benchmark."""
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    job = ci.split("  react-tests:")[1].split("  react-security:")[0]
+    assert "setup-python" not in job
