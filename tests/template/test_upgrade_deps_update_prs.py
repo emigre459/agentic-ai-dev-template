@@ -528,6 +528,8 @@ class FakeGh:
             return self.files[path]
         if argv[:2] == ["git", "merge-tree"]:
             return "tree1\n"
+        if argv[:3] == ["git", "update-ref", "-d"]:
+            return ""
         if argv[:3] == ["gh", "repo", "view"]:
             return json.dumps({"nameWithOwner": "o/r"})
         if argv[:3] == ["gh", "pr", "list"]:
@@ -762,3 +764,56 @@ def test_an_older_interpreter_gets_the_version_message_not_a_traceback() -> None
     assert result.returncode == 64, result.stderr
     assert "needs Python 3.11+" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+# --- _changes_main: the PR head goes into a private ref that is deleted after ---
+
+
+class RefRunner:
+    """Answers only what ``_changes_main`` runs; records every call."""
+
+    def __init__(self, *, conflict: bool = False, delete_fails: bool = False) -> None:
+        self.conflict = conflict
+        self.delete_fails = delete_fails
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: Sequence[str]) -> str:
+        argv = list(argv)
+        self.calls.append(argv)
+        if argv[:2] == ["git", "fetch"]:
+            return ""
+        if argv[:2] == ["git", "merge-tree"]:
+            if self.conflict:
+                raise update_prs.GhError("merge conflict")
+            return "tree1\n"
+        if argv[:2] == ["git", "rev-parse"]:
+            return "tree0\n"
+        if argv[:3] == ["git", "update-ref", "-d"]:
+            if self.delete_fails:
+                raise update_prs.GhError("cannot lock ref")
+            return ""
+        raise AssertionError(f"unexpected command {argv}")
+
+
+_PRIVATE_REF = "refs/upgrade-deps/pr-7"
+_DELETE = ["git", "update-ref", "-d", _PRIVATE_REF]
+
+
+def test_changes_main_fetches_into_a_private_ref_and_deletes_it() -> None:
+    runner = RefRunner()
+    assert update_prs._changes_main(runner, "refs/remotes/origin/main", 7) is True
+    assert runner.calls[0][-1] == f"+refs/pull/7/head:{_PRIVATE_REF}"
+    assert runner.calls[-1] == _DELETE
+    assert not any("refs/remotes/origin/pr-" in " ".join(c) for c in runner.calls)
+
+
+def test_changes_main_deletes_the_ref_when_merge_tree_conflicts() -> None:
+    runner = RefRunner(conflict=True)
+    assert update_prs._changes_main(runner, "refs/remotes/origin/main", 7) is None
+    assert runner.calls[-1] == _DELETE
+
+
+def test_changes_main_tolerates_a_failed_ref_delete() -> None:
+    runner = RefRunner(delete_fails=True)
+    assert update_prs._changes_main(runner, "refs/remotes/origin/main", 7) is True
+    assert runner.calls[-1] == _DELETE

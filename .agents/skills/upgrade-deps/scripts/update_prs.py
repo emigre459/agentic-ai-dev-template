@@ -1043,14 +1043,24 @@ def _segment(head: str) -> str | None:
 
 
 def _changes_main(runner: Runner, base_ref: str, number: int) -> bool | None:
-    ref = f"refs/remotes/origin/pr-{number}"
+    # A private namespace, deleted after: the PR head never shows up in the
+    # user's `git branch -r`, tab completion or anything their remotes manage.
+    ref = f"refs/upgrade-deps/pr-{number}"
     runner(["git", "fetch", "-q", "origin", f"+refs/pull/{number}/head:{ref}"])
     try:
-        tree = runner(["git", "merge-tree", "--write-tree", base_ref, ref])
-    except GhError:
-        return None
-    base_tree = runner(["git", "rev-parse", f"{base_ref}^{{tree}}"]).strip()
-    return tree.split("\n", 1)[0].strip() != base_tree
+        try:
+            tree = runner(["git", "merge-tree", "--write-tree", base_ref, ref])
+        except GhError:
+            return None
+        base_tree = runner(["git", "rev-parse", f"{base_ref}^{{tree}}"]).strip()
+        return tree.split("\n", 1)[0].strip() != base_tree
+    finally:
+        try:
+            runner(["git", "update-ref", "-d", ref])
+        except GhError:
+            # Best-effort cleanup: a leftover private ref is harmless, and a
+            # failed delete must not hide the verdict or abort the sweep.
+            pass
 
 
 def collect(
