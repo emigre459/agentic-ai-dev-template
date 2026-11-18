@@ -77,7 +77,7 @@ For a full review (quarterly, or on request), classify every open issue:
 
 Non-negotiable method rules:
 
-- **Ground every verdict in the repo, not in the card.** Read AGENTS.md constraints, grep for the card's named modules/tests, check `git log` / closed issues for what already landed. A card citing `BmsSnapshot`, `analysis.py`, deepagents-as-runtime, or other deleted artifacts is prima facie stale.
+- **Ground every verdict in the repo, not in the card.** Read AGENTS.md constraints, grep for the card's named modules/tests, check `git log` / closed issues for what already landed. A card citing a module, type or framework the repo has since deleted or replaced is prima facie stale.
 - **Scale with subagents.** For >30 issues, fan out one analysis agent per thematic cluster (~15-30 issues each), each instructed to verify claims against code and return per-issue: bucket, status (current/stale/duplicate-of/subsumed-by), action (keep/amend/merge/close/re-parent), one-line rationale, plus cluster-level epic-structure verdict + critical path. Dump all issue bodies to one JSON first (`gh api --paginate .../issues?state=open`) so agents don't re-fetch.
 - **Check phantom blockers**: any open card whose declared blocker is CLOSED gets flagged — these silently idle high-value work.
 - **Produce-before-consume check**: for each data-producing investment, name its consumer; extraction/capture work with no consuming card is a red flag either way (missing consumer card, or over-investment).

@@ -385,3 +385,10 @@ def test_skill_config_keys_are_kebab_case(skill: str) -> None:
         spaced = key.replace("-", " ")
         assert f"`{spaced}`" not in flat, spaced
         assert f"**{spaced}**" not in flat, spaced
+
+
+def test_clean_up_kanban_examples_are_generic() -> None:
+    """A vendored skill names generic artifacts, not one downstream repo's code."""
+    text = (SKILLS_DIR / "clean-up-kanban" / "SKILL.md").read_text(encoding="utf-8")
+    for downstream in ("BmsSnapshot", "analysis.py", "deepagents"):
+        assert downstream not in text, f"replace {downstream!r} with a generic example"
