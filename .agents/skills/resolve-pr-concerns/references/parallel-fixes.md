@@ -28,20 +28,20 @@ Use `superpowers:dispatching-parallel-agents` with `superpowers:using-git-worktr
 1. **Spin up worktrees**: one per bughunter, each branched off the current PR HEAD. Use `superpowers:using-git-worktrees`.
 2. **Dispatch ≤4 bughunters concurrently** (single message with multiple Agent calls). Each bughunter gets:
    - Specific scope: one concern, with full context (the bot's exact comment, file paths, line numbers, any related code excerpts).
-   - Constraints: "Only edit files within `<assigned-directory>`. Use `superpowers:test-driven-development` (RED → Verify-RED → GREEN → Verify-GREEN). Run `make pr_check` in your worktree before reporting back. Commit your fix in the worktree with a focused message referencing the concern. **Do not push.** Report back: commit SHA + one-paragraph summary of root cause and fix."
+   - Constraints: "Only edit files within `<assigned-directory>`. Use `superpowers:test-driven-development` (RED → Verify-RED → GREEN → Verify-GREEN). Run `python3 <skill-dir>/scripts/single_flight.py suite -- make pr_check` in your worktree before reporting back. Commit your fix in the worktree with a focused message referencing the concern. **Do not push.** Report back: commit SHA + one-paragraph summary of root cause and fix."
    - Worktree path so the bughunter knows where to operate.
 3. **Collect results**. Each bughunter reports a commit SHA in its worktree branch.
 4. **Serial integration gate (orchestrator-owned)**:
    - Cherry-pick each bughunter's commit onto the PR branch in the order they reported back. Each lands as its own atomic commit (no squashing — preserves per-concern granularity).
    - If a cherry-pick conflicts: directory-disjoint check missed something. Abort just that cherry-pick, drop that concern from the parallel batch, surface to user, fall back to serial for that concern.
-   - Run `make pr_check` once on the fully integrated state.
+   - Run `python3 <skill-dir>/scripts/single_flight.py suite -- make pr_check` once on the fully integrated state.
    - If `pr_check` fails on the integrated state but passed in each worktree, hidden coupling is the cause. Reset the integration (revert the cherry-picks), surface to user, fall back to serial for the affected concerns. Invoke `superpowers:systematic-debugging` to find the coupling.
 5. **Single `git push`** covers all parallel work. Then the orchestrator replies on each fixed thread with its final SHA (SKILL.md Step 4d).
 6. **Clean up worktrees** via `superpowers:using-git-worktrees` cleanup conventions (don't remove harness-owned worktrees).
 
 On a stack, a bughunter whose fix is on a lower layer runs `make lint` plus the
-focused tests for its fix instead of `make pr_check`, and the orchestrator runs
-`make pr_check` once on the integrated top layer.
+focused tests for its fix instead of the full check, and the orchestrator runs
+`python3 <skill-dir>/scripts/single_flight.py suite -- make pr_check` once on the integrated top layer.
 
 ## Red flags
 

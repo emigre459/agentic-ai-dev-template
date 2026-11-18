@@ -56,7 +56,8 @@ system tools on the user's machine itself.
    checked out: `gh stack checkout <branch>`, commit the fix there.
 2. **Restack only your own change**: `gh stack rebase --upstack --no-trunk`, then
    `gh stack push` (it pushes every layer with `--force-with-lease`).
-3. **Local gate.** `make pr_check` once, on the top layer (it contains every layer's
+3. **Local gate.** The full `make pr_check` once, through the single-flight lock
+   (`python3 <skill-dir>/scripts/single_flight.py suite -- make pr_check`), on the top layer (it contains every layer's
    change), plus `make lint` and the fix's focused tests on the layer you changed.
    A full suite per layer is redundant, and several at once can exhaust a laptop.
    Each layer's PR runs CI anyway (below).

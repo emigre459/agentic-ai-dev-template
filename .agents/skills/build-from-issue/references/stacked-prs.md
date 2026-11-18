@@ -152,12 +152,13 @@ This replaces the single-PR path of Step 11; `finishing-a-development-branch` st
 owns test verification and the cleanup checks, but its push/PR option is not taken:
 `gh stack push` pushes the layers and `gh stack submit` opens their PRs.
 
-1. **Local gate.** `make pr_check` on the **top** layer (it contains every layer's
+1. **Local gate.** The full `make pr_check` through the single-flight lock,
+   `python3 <resolve-pr-concerns skill dir>/scripts/single_flight.py suite -- make pr_check`, on the **top** layer (it contains every layer's
    change) must exit 0, plus `make lint` on each lower layer, bottom-up
    (`gh stack bottom`, then `gh stack up`). A full suite per layer is redundant, and
    several at once can exhaust a laptop. A red check is a TDD RED on the layer that
    owns the failing code: fix it there, `gh stack rebase --upstack`, and re-run the
-   top layer's `make pr_check`.
+   top layer's full check the same way.
 2. **Check the limits.** From the top layer,
    `git diff --name-only origin/main...HEAD | wc -l` must be under 300, and there
    must be no more than 4 layers. Over either: stop, and offer to split the card via

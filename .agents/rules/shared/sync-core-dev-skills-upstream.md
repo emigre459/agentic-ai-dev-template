@@ -1,17 +1,26 @@
 ---
 description: Vendored dev/workflow skills under .agents/skills/ are read-only outside the template that publishes them. Customize them through repo-owned extension points, and send changes to a skill itself upstream as a PR to the template. Does NOT apply to a repo's own runtime/domain/product skills.
-appliesTo: .agents/skills/**
+appliesTo:
+  - ".agents/skills/**"
+  - ".claude/skills/**"
 ---
 
 # Vendored skills are read-only; changes go upstream
 
+A vendored skill is consumed from the template, pinned in `skills-lock.json`, and
+replaced on update. **Stop before editing one** and send the change upstream as a PR
+to the template. Repo-specific needs go in the extension points instead:
+`.agents/skill-config/<skill>.md`, `AGENTS.md`, `.agents/rules/` and
+`.github/pr-reviewer.json`.
+
 The dev-workflow skills under `.agents/skills/` (`build-from-issue`, `plan-issues`,
 `resolve-pr-concerns`, `review-skill`, `upgrade-deps` and their siblings; each one's
 `SKILL.md` opens with a `**Repo config first:**` preflight) are published by one
-canonical template repo. Every other repo **vendors** them: installed with
-`npx skills add`, or copied in by creating the repo from the template with
-`make init`. Either way, `npx skills update` or the next template sync deletes and
-recreates each skill folder, so an edit inside one is silently lost.
+canonical template repo. Claude Code reads the same folders through the
+`.claude/skills` symlink, so the rule covers both paths. Every other repo **vendors**
+them: installed with `npx skills add`, or copied in by creating the repo from the
+template with `make init`. Either way, `npx skills update` or the next template sync
+deletes and recreates each skill folder, so an edit inside one is silently lost.
 
 ## Which repo am I in?
 
@@ -36,11 +45,13 @@ Repo-specific behavior goes in files the repo owns:
 Precedence, highest first: the user's instructions this session, then `AGENTS.md`
 and `.agents/rules/`, then `.agents/skill-config/<skill>.md`, then the skill's
 defaults. **No file can lift a skill's hard stops** (merging without the user's
-one-off OK, resolving review threads, opening or calling ready a PR without a green
-`make pr_check` and CI, weakening a gate, deleting issues, skipping a confirmation,
-installing tools, posting to an outside channel unasked, widening access, or
-sending output outside the repo). Only the user can, explicitly, in the session.
-The README's "Customizing the skills in your repo" section has an example of each.
+one-off OK, resolving review threads, opening or calling ready a PR without the
+pre-PR check `pr-check-scope` requires (the full `make pr_check` unless the diff
+qualifies for the light check) and green CI, weakening a gate, deleting issues,
+skipping a confirmation, installing tools, posting to an outside channel unasked,
+widening access, or sending output outside the repo). Only the user can,
+explicitly, in the session. The README's "Customizing the skills in your repo"
+section has an example of each.
 
 ## When a skill itself needs to change
 

@@ -37,7 +37,7 @@ except ModuleNotFoundError:  # Python < 3.11; main() reports it as a usage error
 Runner = Callable[[Sequence[str]], str]
 
 #: Alert ecosystem -> the lockfile that pins it.
-_LOCKFILE_FOR_ECOSYSTEM = {"pip": "uv.lock", "npm": "bun.lock"}
+LOCKFILE_FOR_ECOSYSTEM = {"pip": "uv.lock", "npm": "bun.lock"}
 _CLAUSE = re.compile(r"^\s*(<=|>=|<|>|=)\s*(\S+)\s*$")
 _RELEASE = re.compile(r"^v?(\d+(?:\.\d+)*)(.*)$")
 _POST = re.compile(r"^[.-]?(?:post|rev|r)\d*$", re.IGNORECASE)
@@ -61,7 +61,7 @@ def _suffix_key(rest: str) -> _SuffixKey:
     )
 
 
-def _version_key(version: str) -> tuple[tuple[int, ...], int, _SuffixKey]:
+def version_key(version: str) -> tuple[tuple[int, ...], int, _SuffixKey]:
     """Sort key: release numbers, then pre (0) < release (1) < post (2)."""
     match = _RELEASE.match(version.split("+", 1)[0].strip())
     if not match:
@@ -88,14 +88,14 @@ def in_range(version: str, vulnerable_range: str) -> bool:
     ValueError
         A clause or version that can't be parsed.
     """
-    key = _version_key(version)
+    key = version_key(version)
     for clause in vulnerable_range.split(","):
         match = _CLAUSE.match(clause)
         if not match:
             raise ValueError(
                 f"unparseable range clause {clause!r} in {vulnerable_range!r}"
             )
-        op, bound = match.group(1), _version_key(match.group(2))
+        op, bound = match.group(1), version_key(match.group(2))
         holds = {
             "<": key < bound,
             "<=": key <= bound,
@@ -108,7 +108,8 @@ def in_range(version: str, vulnerable_range: str) -> bool:
     return True
 
 
-def _normalize_pypi(name: str) -> str:
+def normalize_pypi(name: str) -> str:
+    """PEP 503-normalize a name (``Typing_Extensions`` -> ``typing-extensions``)."""
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
@@ -120,30 +121,30 @@ def lockfile_for(root: Path, manifest_path: str, ecosystem: str) -> Path | None:
     one. A lockfile manifest maps to itself; any other manifest to the lockfile
     beside it. ``None`` when the ecosystem is unsupported or doesn't match.
     """
-    name = _LOCKFILE_FOR_ECOSYSTEM.get(ecosystem)
+    name = LOCKFILE_FOR_ECOSYSTEM.get(ecosystem)
     manifest = root / manifest_path
     if name is None:
         return None
-    if manifest.name in _LOCKFILE_FOR_ECOSYSTEM.values():
+    if manifest.name in LOCKFILE_FOR_ECOSYSTEM.values():
         return manifest if manifest.name == name else None
     candidate = manifest.parent / name
     return candidate if candidate.is_file() else None
 
 
-def _uv_versions(lockfile: Path, package: str) -> list[str]:
-    data = tomllib.loads(lockfile.read_text(encoding="utf-8"))
-    wanted = _normalize_pypi(package)
+def _uv_versions(text: str, package: str) -> list[str]:
+    data = tomllib.loads(text)
+    wanted = normalize_pypi(package)
     return [
         str(entry["version"])
         for entry in data.get("package", [])
-        if _normalize_pypi(str(entry.get("name", ""))) == wanted and "version" in entry
+        if normalize_pypi(str(entry.get("name", ""))) == wanted and "version" in entry
     ]
 
 
-def _bun_versions(lockfile: Path, package: str) -> list[str]:
+def _bun_versions(text: str, package: str) -> list[str]:
     versions = []
     in_packages = False
-    for line in lockfile.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if not in_packages:
             in_packages = line.strip().startswith('"packages":')
             continue
@@ -156,16 +157,33 @@ def _bun_versions(lockfile: Path, package: str) -> list[str]:
     return versions
 
 
+def versions_in_lock(lock_name: str, text: str, package: str) -> list[str]:
+    """Every version of ``package`` in a lockfile's text (nested copies included).
+
+    ``lock_name`` is the lockfile's file name (``uv.lock`` or ``bun.lock``); ``uv.lock``
+    names are compared PEP 503-normalized. The text may come from disk or from
+    ``git show``.
+
+    Raises
+    ------
+    ValueError
+        An unsupported lockfile name.
+    """
+    if lock_name == "uv.lock":
+        return _uv_versions(text, package)
+    if lock_name == "bun.lock":
+        return _bun_versions(text, package)
+    raise ValueError(f"unsupported lockfile {lock_name!r}")
+
+
 def locked_versions(lockfile: Path, package: str, ecosystem: str) -> list[str]:
     """Every version of ``package`` locked in ``lockfile`` (nested copies included).
 
     ``ecosystem`` is the alert's (``pip`` names are compared PEP 503-normalized).
     """
-    if lockfile.name == "uv.lock":
-        return _uv_versions(lockfile, package)
-    if lockfile.name == "bun.lock":
-        return _bun_versions(lockfile, package)
-    raise ValueError(f"unsupported lockfile {lockfile.name!r}")
+    return versions_in_lock(
+        lockfile.name, lockfile.read_text(encoding="utf-8"), package
+    )
 
 
 def status_of(alert: Mapping[str, Any], root: Path) -> dict[str, Any]:
