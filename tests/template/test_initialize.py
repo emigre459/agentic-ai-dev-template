@@ -59,6 +59,7 @@ def test_initialize_python_promotes_and_prunes(template_tree: Path) -> None:
     # (otherwise the spawned repo's first CI run fails — stacks/ no longer exists)
     ci = (template_tree / ".github" / "workflows" / "ci.yml").read_text()
     assert "react" not in ci and "template machinery" not in ci
+    assert "skills installable" not in ci and "skills-installable" not in ci
     assert "STACK:" not in ci
     assert "stacks/" not in ci
     assert "working-directory: ." in ci
