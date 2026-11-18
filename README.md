@@ -5,6 +5,29 @@ practices — CI/CD, testing, agent rules/skills, and repo settings — for eith
 Python backend or a React + TypeScript frontend.
 
 <!-- INTERVIEW:start -->
+## Two ways to use this repo
+
+**1. Start a new repo from this template.** You get one of the two stacks, CI, repo
+settings and the agent infrastructure, and the skills come already installed.
+- [Start here: initialize this template](#start-here-initialize-this-template),
+  the prompt that walks you through setup
+- [What this template provides](#what-this-template-provides) and
+  [Prerequisites](#prerequisites)
+
+**2. Install the skills into a repo you already have.** This repo is also a
+versioned source of harness-agnostic dev-workflow skills (`build-from-issue`,
+`resolve-pr-concerns`, `plan-issues`, …). You install them with the `skills` CLI
+and keep them current with a nightly update PR, without adopting the template.
+- [The skills](#the-skills): what each one does
+- [Installing the skills](#installing-the-skills): `npx skills add emigre459/agentic-ai-dev-template#vX.Y.Z`
+- [Adopting the kit in an existing repo](#adopting-the-kit-in-an-existing-repo):
+  the nightly update and drift-check workflows
+- [Customizing the skills in your repo](#customizing-the-skills-in-your-repo):
+  how to change a skill's behavior without editing the vendored copy
+- [Staying up to date](#staying-up-to-date) and [The drift check](#the-drift-check)
+- [Agent hooks](#agent-hooks): the command gate isn't installed by the `skills`
+  CLI, so copy `.agents/hooks/` and the registration file for your harness by hand
+
 ## Start here: initialize this template
 
 Paste the prompt below into your agentic coding harness (Claude Code, Cursor, …).
