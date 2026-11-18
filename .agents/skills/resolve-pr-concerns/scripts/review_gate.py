@@ -14,7 +14,9 @@ a status would lag); otherwise the gate itself fails while any is open, and the
 periodic sweep picks up the resolution.
 
 A repo may opt in to a skills-update lane (``.github/skills-update-lane.json``): the
-update workflow's own PR (its bot author, its branch, this repo, no fork) whose every
+update workflow's own PR (its bot author, its branch, this repo, no fork, and a head
+the bot itself pushed: the newest push on the branch, per the repository activity
+log, made by the bot and landing on the PR's head) whose every
 changed and renamed-from path is ``skills-lock.json`` or inside a tag-pinned skill's
 folder passes as "skills-update: tag-pinned skills only, no review required" on BOTH
 halves, before the CODEOWNERS half is read. Any other PR, or no lane file, falls
@@ -47,6 +49,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import quote
 
 import merge_gate
 import path_owners
@@ -302,12 +305,43 @@ def _is_lane_pull(pull: Mapping[str, Any], lane: SkillsUpdateLane, repo: str) ->
     )
 
 
+def head_pusher(activities: object, head_sha: str) -> str | None:
+    """Return who pushed ``head_sha`` onto the branch, from its newest activity.
+
+    Only the newest entry counts: a later push by anyone else replaces the bot's
+    head, so an older bot push of the same SHA proves nothing about the branch now.
+
+    Parameters
+    ----------
+    activities : object
+        ``GET /repos/{repo}/activity?ref=refs/heads/<branch>`` as parsed JSON,
+        newest first.
+    head_sha : str
+        The PR's head SHA.
+
+    Returns
+    -------
+    str or None
+        The newest entry's actor login when its ``after`` is ``head_sha``; None for
+        an empty or malformed list, another SHA, or no actor.
+    """
+    if not isinstance(activities, list) or not activities:
+        return None
+    newest = activities[0]
+    if not isinstance(newest, dict) or newest.get("after") != head_sha:
+        return None
+    actor = newest.get("actor")
+    login = actor.get("login") if isinstance(actor, dict) else None
+    return login if isinstance(login, str) else None
+
+
 def skills_update_status(
     pull: Mapping[str, Any],
     files: Sequence[Mapping[str, Any]],
     lane: SkillsUpdateLane | None,
     folders: Sequence[str],
     repo: str,
+    pusher: str | None,
 ) -> tuple[str, str] | None:
     """Return a passing status for the skills-update PR, else None.
 
@@ -324,17 +358,21 @@ def skills_update_status(
         lane off.
     repo : str
         Repository as ``owner/name``; a head from any other repo (a fork) is refused.
+    pusher : str or None
+        Login that pushed the PR's head (``head_pusher``); None or anyone not in
+        the lane's ``authors`` is refused.
 
     Returns
     -------
     tuple[str, str] or None
-        ``SKILLS_UPDATE_STATUS``, or None when the PR isn't the update PR or
-        touches any other path.
+        ``SKILLS_UPDATE_STATUS``, or None when the PR isn't the update PR, its head
+        wasn't pushed by the lane's bot, or it touches any other path.
     """
     if (
         lane is None
         or not folders
         or not _is_lane_pull(pull, lane, repo)
+        or pusher not in lane.authors
         or not files
         or int(pull["changed_files"]) != len(files)
     ):
@@ -620,7 +658,10 @@ def _skills_update(
     Reads nothing from the PR unless the repo opted in with a lane file and the lock
     has tag-pinned skills. With ``head_sha`` given, a push since it was read moves
     the head, so the files would belong to a different head: fail closed (the push
-    triggers its own run). With it None the head is the pull's own.
+    triggers its own run). With it None the head is the pull's own. A lane PR's
+    head must have been pushed by the lane's bot (``head_pusher``); an unreadable
+    activity log turns the lane off for the PR, and one that hasn't caught up with
+    the push yet fails closed until the periodic sweep re-reads it.
     """
     lane = _cached_skills_update_lane(SKILLS_UPDATE_LANE_FILE)
     folders = _cached_tag_pinned_folders(SKILLS_LOCK_FILE) if lane else ()
@@ -631,14 +672,28 @@ def _skills_update(
     if head_sha is not None and head != head_sha:
         return head_sha, None
     if not _is_lane_pull(pull, lane, repo):
-        return head, None  # skip the paginated files read for every other PR
+        return head, None  # skip the activity and files reads for every other PR
+    ref = quote(f"refs/heads/{lane.branch}", safe="/")
+    try:
+        activities = reviewer_state._gh_json(
+            ["api", f"repos/{repo}/activity?ref={ref}&per_page=1"]
+        )
+    except (subprocess.CalledProcessError, ValueError) as exc:
+        print(
+            f"{repo}#{pr}: skills-update lane: activity unreadable, lane off: {exc}",
+            file=sys.stderr,
+        )
+        return head, None
+    pusher = head_pusher(activities, head)
+    if pusher not in lane.authors:
+        return head, None
     listed = (
         reviewer_state._gh_json(
             ["api", "--paginate", f"repos/{repo}/pulls/{pr}/files?per_page=100"]
         )
         or []
     )
-    return head, skills_update_status(pull, listed, lane, folders, repo)
+    return head, skills_update_status(pull, listed, lane, folders, repo, pusher)
 
 
 def _threads_enforced(repo: str) -> bool:

@@ -156,6 +156,7 @@ def test_readme_customizing_documents_skills_update_lane() -> None:
     start = readme.index("## Customizing the skills in your repo")
     end = readme.index("## Branch pattern")
     assert ".github/skills-update-lane.json" in readme[start:end]
+    assert "pushed by one of its `authors`" in readme[start:end]
 
 
 def test_readme_staying_up_to_date_has_no_github_token_fallback() -> None:

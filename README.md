@@ -306,10 +306,14 @@ Optional; the template ships none. With it on the default branch, `review-gate`
 passes the nightly update PR on both halves (the path owner's approval and the
 review) as `skills-update: tag-pinned skills only, no review required`, so the PR
 can merge on its own once CI is green. The PR must come from the file's `branch`, be
-opened by one of its `authors`, and touch only `skills-lock.json` and the folders
-(`.agents/skills/<name>/`, `.claude/skills/<name>/`) of skills whose lock `ref` is a
-`vX.Y.Z` tag. Anything else, such as a skill that follows a branch, any other path,
-or anyone else's PR, still needs the owner and the review. CI still runs.
+opened by one of its `authors`, have its head pushed by one of its `authors` (the
+newest push on the branch, per GitHub's repository activity log), and touch only
+`skills-lock.json` and the folders (`.agents/skills/<name>/`,
+`.claude/skills/<name>/`) of skills whose lock `ref` is a `vX.Y.Z` tag. Anything
+else, such as a skill that follows a branch, any other path, or anyone else's PR,
+still needs the owner and the review. A push to the branch by anyone else, the
+Update branch button included, takes the PR out of the lane until the bot pushes a
+fresh head. CI still runs.
 
 The file names the PR's author:
 
