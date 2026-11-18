@@ -8,7 +8,7 @@ In a private consumer repo, the nightly "Update agent skills" PR can't land with
 a person. A `github-actions[bot]` push parks its `pull_request` CI at "Approve and
 run". `review-gate` stays red because PR reviewers skip bot PRs, and a catch-all
 CODEOWNERS owner (`* @owner`) has to approve it too. Meanwhile agents keep following
-the old skill text: gridium-agent's update PR held an API-deprecation fix for 4+
+the old skill text: a downstream repo's update PR held an API-deprecation fix for 4+
 days while agents kept writing the deprecated call.
 
 When this ships, a consumer that has set an App (or PAT) secret and the lane file
