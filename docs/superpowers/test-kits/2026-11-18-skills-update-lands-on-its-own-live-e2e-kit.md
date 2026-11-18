@@ -41,6 +41,7 @@ git -C "$T" fetch -q origin --tags && git -C "$T" status -sb | head -1
 
 ```bash
 cd ~ && gh repo create "$REPO" --public --clone && cd skills-update-e2e
+git symbolic-ref HEAD refs/heads/main   # the clone of an empty repo starts on your init.defaultBranch (often master)
 git -C "$T" archive v0.1.0 .agents/skills | tar -x
 cp "$T/skills-lock.json" .
 python3 -c "import json;p='skills-lock.json';d=json.load(open(p));[e.__setitem__('ref','v0.0.1') for e in d['skills'].values()];open(p,'w').write(json.dumps(d,indent=2)+'\n')"
