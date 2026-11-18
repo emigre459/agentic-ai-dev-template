@@ -35,6 +35,7 @@ dev = [
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "pytest-socket>=0.8.1",
+    "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.6.1",
     "ruff>=0.15.20",
 ]
@@ -77,6 +78,17 @@ convention = "numpy"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-n auto -m 'not e2e and not integration' --allow-hosts=127.0.0.0/8,::1,localhost --allow-unix-socket"
+# Per-test limit (pytest-timeout): the only time-based block on a test. A test still
+# running after 60 s fails under its own name; nothing fails a test for merely being
+# slow. Derivation: about 3x the slowest healthy default-lane test (20.5 s) in the
+# leading downstream repo that retired its per-test speed guard for this; this
+# template's own slowest test runs in under 0.1 s. Hitting it means hung or badly
+# broken, not "a bit slow". The method stays the plugin default (signal on POSIX):
+# only the hung test fails and the run continues. Switch to timeout_method = "thread"
+# if the code under test uses SIGALRM itself. A test that truly needs longer takes
+# @pytest.mark.timeout(N) with a comment saying why; --timeout on the command line
+# beats both.
+timeout = 60
 # A blocked connect in a background thread surfaces only as pytest's thread-exception
 # warning; promote it to an error when it names NetworkBlocked (tests/_network_block.py).
 filterwarnings = [
