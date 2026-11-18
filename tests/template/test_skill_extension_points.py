@@ -30,7 +30,8 @@ PREFLIGHT_TEMPLATE = (
     "lift a hard stop (only the user can, explicitly, this session): merging "
     "without the user's one-off OK, resolving review threads, opening or calling "
     "ready a PR without the pre-PR check `pr-check-scope` requires (the full "
-    "`make pr_check` unless the diff qualifies for the light check) and green CI, "
+    "`make pr_check` unless the diff qualifies for the light check; if the repo has "
+    "no `pr-check-scope` rule, the full `make pr_check`) and green CI, "
     "weakening a gate, deleting "
     "issues, skipping a confirmation, installing tools, posting to an outside "
     "channel unasked, or widening access or sending output outside the repo. Skip "
@@ -385,3 +386,26 @@ def test_skill_config_keys_are_kebab_case(skill: str) -> None:
         spaced = key.replace("-", " ")
         assert f"`{spaced}`" not in flat, spaced
         assert f"**{spaced}**" not in flat, spaced
+
+
+def test_clean_up_kanban_examples_are_generic() -> None:
+    """A vendored skill names generic artifacts, not one downstream repo's code."""
+    text = (SKILLS_DIR / "clean-up-kanban" / "SKILL.md").read_text(encoding="utf-8")
+    for downstream in ("BmsSnapshot", "analysis.py", "deepagents"):
+        assert downstream not in text, f"replace {downstream!r} with a generic example"
+
+
+_FALLBACK = (
+    "unless the diff qualifies for the light check; if the repo has no "
+    "`pr-check-scope` rule, the full `make pr_check`)"
+)
+
+
+@pytest.mark.parametrize(
+    "rel", ["README.md", ".agents/rules/shared/sync-core-dev-skills-upstream.md"]
+)
+def test_other_hard_stop_lists_carry_the_light_check_fallback(rel: str) -> None:
+    """The README and the sync rule restate the preflight's hard stops verbatim."""
+    text = " ".join((REPO_ROOT / rel).read_text(encoding="utf-8").split())
+    assert "unless the diff qualifies for the light check" in text
+    assert _FALLBACK in text, f"{rel}: add the no-pr-check-scope fallback"

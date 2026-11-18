@@ -21,6 +21,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+import yaml
 
 _REPO = Path(__file__).resolve().parents[2]
 _CONFIG = _REPO / ".github" / "pr-reviewer.json"
@@ -663,3 +664,31 @@ def test_single_flight_full_check_is_allow_listed() -> None:
         f"Add {expected!r} to .claude/settings.json permissions.allow so agents can "
         "run the locked full check without a prompt."
     )
+
+
+_ANCHORED_LOCK = (
+    "python3 .agents/skills/resolve-pr-concerns/scripts/single_flight.py "
+    "suite -- make pr_check"
+)
+
+
+def test_pr_check_allow_lists_only_the_anchored_lock_command() -> None:
+    """``*single_flight.py`` would allow a planted script of that name anywhere."""
+    lines = (_SKILLS / "pr-check" / "SKILL.md").read_text().splitlines()
+    end = lines.index("---", 1)
+    allowed = str(yaml.safe_load("\n".join(lines[1:end]))["allowed-tools"])
+    body = "\n".join(lines[end + 1 :])
+    assert f"Bash({_ANCHORED_LOCK})" in allowed
+    assert "*single_flight.py" not in allowed
+    # The body keeps the placeholder (validate.py: a skill runs only its own scripts
+    # by a concrete path) and names the canonical dir the entry is anchored to.
+    assert "<resolve-pr-concerns skill dir>/scripts/single_flight.py" in body
+    assert "`.agents/skills/resolve-pr-concerns`" in body
+
+
+def test_release_check_skips_repos_without_release_pieces() -> None:
+    """No release and no drafter config: say so, suggest no version."""
+    step2 = _section(_flat(_BUILD), "## Step 2:")
+    assert "no published release and no `.github/release-drafter.yml`" in step2
+    assert "skip the bump suggestion" in step2
+    assert "suggest the first one, `v0.1.0`" in step2  # a drafter config keeps it
