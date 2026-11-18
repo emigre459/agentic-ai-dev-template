@@ -1164,6 +1164,7 @@ def test_lane_config_loading(tmp_path: Path) -> None:
 
 def test_shipped_lane_example_is_valid_and_template_ships_no_lane_file() -> None:
     assert review_gate.load_skills_update_lane(LANE_EXAMPLE) is not None
+    assert "head pushed by" in json.loads(LANE_EXAMPLE.read_text())["description"]
     assert not (REPO_ROOT / ".github" / "skills-update-lane.json").exists()
 
 
