@@ -393,3 +393,19 @@ def test_clean_up_kanban_examples_are_generic() -> None:
     text = (SKILLS_DIR / "clean-up-kanban" / "SKILL.md").read_text(encoding="utf-8")
     for downstream in ("BmsSnapshot", "analysis.py", "deepagents"):
         assert downstream not in text, f"replace {downstream!r} with a generic example"
+
+
+_FALLBACK = (
+    "unless the diff qualifies for the light check; if the repo has no "
+    "`pr-check-scope` rule, the full `make pr_check`)"
+)
+
+
+@pytest.mark.parametrize(
+    "rel", ["README.md", ".agents/rules/shared/sync-core-dev-skills-upstream.md"]
+)
+def test_other_hard_stop_lists_carry_the_light_check_fallback(rel: str) -> None:
+    """The README and the sync rule restate the preflight's hard stops verbatim."""
+    text = " ".join((REPO_ROOT / rel).read_text(encoding="utf-8").split())
+    assert "unless the diff qualifies for the light check" in text
+    assert _FALLBACK in text, f"{rel}: add the no-pr-check-scope fallback"
