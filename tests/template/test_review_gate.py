@@ -994,11 +994,12 @@ def _lane_status(
     pull: dict[str, Any] | None = None,
     lane: Any = LANE,
     folders: Any = FOLDERS,
+    pusher: Any = "acme-skills[bot]",
     **renamed: str,
 ) -> Any:
     files = _files(*names, **renamed)
     pull = pull if pull is not None else _pull(changed_files=len(files))
-    return review_gate.skills_update_status(pull, files, lane, folders, REPO)
+    return review_gate.skills_update_status(pull, files, lane, folders, REPO, pusher)
 
 
 def test_lane_passes_lock_and_tag_pinned_folders() -> None:
@@ -1042,6 +1043,8 @@ def test_lane_status_fits_a_commit_status() -> None:
         {"names": ("skills-lock.json", ".agents/skills/alpha-x/SKILL.md")},
         {"lane": None},
         {"folders": ()},
+        {"pusher": "alice"},
+        {"pusher": None},
     ],
     ids=[
         "wrong-author",
@@ -1056,12 +1059,48 @@ def test_lane_status_fits_a_commit_status() -> None:
         "lookalike-folder",
         "no-lane",
         "no-folders",
+        "pushed-by-a-person",
+        "no-pusher",
     ],
 )
 def test_lane_refuses(case: dict[str, Any]) -> None:
     kwargs = {k: v for k, v in case.items() if k not in ("names", "renamed")}
     names = case.get("names", ("skills-lock.json", ".agents/skills/alpha/SKILL.md"))
     assert _lane_status(names, **case.get("renamed", {}), **kwargs) is None
+
+
+def test_head_pusher_returns_the_newest_actor_when_it_made_the_head() -> None:
+    activities = [
+        {"after": SHA, "actor": {"login": "acme-skills[bot]"}},
+        {"after": "1" * 40, "actor": {"login": "alice"}},
+    ]
+    assert review_gate.head_pusher(activities, SHA) == "acme-skills[bot]"
+
+
+@pytest.mark.parametrize(
+    "activities",
+    [
+        [],
+        {},
+        [
+            {"after": "1" * 40, "actor": {"login": "acme-skills[bot]"}},
+            {"after": SHA, "actor": {"login": "acme-skills[bot]"}},
+        ],
+        [{"after": SHA, "actor": None}],
+        ["x"],
+        [{"after": SHA, "actor": {"login": 7}}],
+    ],
+    ids=[
+        "empty",
+        "not-a-list",
+        "bot-pushed-sha-earlier-not-newest",
+        "null-actor",
+        "entry-not-a-dict",
+        "login-not-a-string",
+    ],
+)
+def test_head_pusher_refuses(activities: Any) -> None:
+    assert review_gate.head_pusher(activities, SHA) is None
 
 
 def _write_lock(root: Path, skills: Any) -> Path:
@@ -1142,6 +1181,16 @@ class _LaneRepo:
         monkeypatch.setattr(review_gate, "SKILLS_LOCK_FILE", lock)
         review_gate._cached_skills_update_lane.cache_clear()
         review_gate._cached_tag_pinned_folders.cache_clear()
+        self.activity: Any = over.pop(
+            "activity",
+            [
+                {
+                    "activity_type": "force_push",
+                    "after": SHA,
+                    "actor": {"login": "acme-skills[bot]"},
+                }
+            ],
+        )
         self.pull = _pull(**over)
         self.names = ["skills-lock.json", ".agents/skills/alpha/SKILL.md"]
         self.pull["changed_files"] = over.get("changed_files", len(self.names))
@@ -1151,6 +1200,12 @@ class _LaneRepo:
                 return self.pull
             if args[-1] == f"repos/{REPO}/pulls/1/reviews?per_page=100":
                 return []
+            if args[-1] == (
+                f"repos/{REPO}/activity?ref=refs/heads/skills-update&per_page=1"
+            ):
+                if isinstance(self.activity, Exception):
+                    raise self.activity
+                return self.activity
             assert args[-1] == f"repos/{REPO}/pulls/1/files?per_page=100"
             return [{"filename": n} for n in self.names]
 
@@ -1238,6 +1293,49 @@ def test_a_non_lane_pr_reads_no_files_and_needs_the_owner_with_no_reviewer(
     posts = _lane_run(monkeypatch, tmp_path, None, user={"login": "alice"})
     assert [p[0] for p in posts] == ["failure"]
     assert "@owner must approve" in posts[0][1]
+
+
+_PERSON_PUSHED = [
+    {"after": SHA, "actor": {"login": "alice"}},
+    {"after": "1" * 40, "actor": {"login": "acme-skills[bot]"}},
+]
+
+
+def test_a_persons_push_on_the_bots_branch_needs_both_halves(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    posts = _lane_run(
+        monkeypatch, tmp_path, _state(verdict="none"), activity=_PERSON_PUSHED
+    )
+    assert [p[0] for p in posts] == ["failure"]
+    assert "@owner must approve" in posts[0][1]
+
+
+def test_a_persons_push_with_no_reviewer_needs_the_owner(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    posts = _lane_run(monkeypatch, tmp_path, None, activity=_PERSON_PUSHED)
+    assert [p[0] for p in posts] == ["failure"]
+    assert "@owner must approve" in posts[0][1]
+
+
+def test_a_lagging_activity_log_fails_closed(monkeypatch: Any, tmp_path: Path) -> None:
+    stale = [{"after": "1" * 40, "actor": {"login": "acme-skills[bot]"}}]
+    posts = _lane_run(monkeypatch, tmp_path, _state(verdict="none"), activity=stale)
+    assert [p[0] for p in posts] == ["failure"]
+
+
+def test_an_unreadable_activity_log_fails_closed(
+    monkeypatch: Any, tmp_path: Path, capsys: Any
+) -> None:
+    posts = _lane_run(
+        monkeypatch,
+        tmp_path,
+        _state(verdict="none"),
+        activity=subprocess.CalledProcessError(1, "gh"),
+    )
+    assert [p[0] for p in posts] == ["failure"]
+    assert "activity unreadable" in capsys.readouterr().err
 
 
 def test_a_malformed_lane_file_and_lock_say_so_on_stderr(
