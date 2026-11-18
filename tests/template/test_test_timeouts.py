@@ -88,11 +88,12 @@ def test_react_tests_job_sets_up_no_python() -> None:
     assert "setup-python" not in job
 
 
-# --- ...and no trace in the prose agents follow (skills, rules, README) ---
+# --- ...and no trace in the prose agents follow (skills, rules, README, AGENTS) ---
 
 
 def _prose_files() -> list[Path]:
-    return [*sorted((REPO_ROOT / ".agents").rglob("*.md")), REPO_ROOT / "README.md"]
+    files = sorted((REPO_ROOT / ".agents").rglob("*.md"))
+    return [*files, REPO_ROOT / "README.md", REPO_ROOT / "AGENTS.md"]
 
 
 def test_no_skill_rule_or_readme_names_the_speed_guard() -> None:
