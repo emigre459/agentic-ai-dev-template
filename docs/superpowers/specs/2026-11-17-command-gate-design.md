@@ -496,3 +496,76 @@ Deliberate new deferrals:
 - `printf "a\n"`-style double-quoted escapes;
 - `command -v`, `nice -n`, `timeout -s` and `stdbuf`;
 - lowercase-name bare assignments (`x=1`).
+
+## Amendment — 2026-11-17 (pre-merge review 4: strict grammar)
+
+A fourth pre-merge review found seven more classes of wrong allow, each confirmed
+by real execution: the zsh `:F:expr:` modifier (math evaluation reached through
+`$HOME:F:'path[$(...)]':h` and its double-quoted, `$1`, `$$` and `$#` forms);
+multi-variable `for` loops (`for f path in ...`); zsh clobber redirects (`>!`,
+`2>!`, `&>!`, `>>!`); a `> =git` target (zsh resolves `=git` through `PATH`);
+case-insensitive file systems reaching protected paths (`.GIT/hooks`); zsh
+`always` blocks; and unvetted input redirects (`< /dev/tcp/...`). The differential
+lane also skipped zsh in CI and only noticed `pwned*` files and six shim logs.
+
+Every class came from the same root cause: the gate worked by rejecting shell
+features, and bash and zsh keep supplying new ones. **User decision:** an ALLOW now
+requires the command to match a small, closed, positive grammar. This supersedes
+the feature-rejection rules of the previous amendment for ALLOW. Banned-pattern
+semantics are unchanged: a banned hit denies unless the line is in the grammar and
+every command is read-only with no output redirect (except `/dev/null`) and no
+runner option, so a hit in an ungrammatical line denies.
+
+The grammar (normative; continuations are spliced first, where the shell splices
+them):
+
+- A line is pipelines joined by `&&`, `||`, `;` or a newline (no lone `&`, no
+  `|&`), with an optional trailing `;` or newline and an optional `#` comment that
+  ends the last line.
+- A pipeline is simple commands joined by `|`.
+- A simple command is `safe_env` assignments, then wrappers (bare `nohup`,
+  `command`, `builtin`, `time`, `nice`; `timeout DURATION`; `env` with only `-i`,
+  `-u NAME` and `safe_env` assignments), then a plain command word that is not a
+  reserved word, then words and redirects, each after a blank.
+- A word is a run of plain characters (`[A-Za-z0-9_./,@%+=:*?-]`, not starting with
+  `=` or `~`), single-quoted strings and double-quoted strings. Inside double
+  quotes: `$NAME` (not followed by `[`, `:`, `(` or `{`), `${NAME}` (not followed
+  by `[` or `:`), the escapes `\"`, `\\`, `\$`, `` \` ``, and `$(...)` whose body
+  is itself a line in the grammar, vetted like a top-level command.
+- Redirects: `>`, `>>`, `1>`, `1>>`, `2>`, `2>>`, `&>` (not followed by `!`, `|`,
+  `&`, `>`, `(` or `<`), `<` (not `<<`, `<<<`, `<>`, `<&`, `<(`), each to one plain
+  or quoted word without expansions; plus exactly `2>&1`, `>&2`, `1>&2`.
+- Output targets resolve (realpath) inside a write root, compared exactly, and
+  outside every protected path, compared case-insensitively. Input targets resolve
+  inside a write root or are `/dev/null`. Any other `/dev` path is refused.
+- Over 64 KiB, or deeper than 16 nested `$(...)`, is outside the grammar.
+
+So loops, conditionals, groups, subshells, unquoted `$`, backticks, heredocs,
+here-strings, wrapper options, non-`safe_env` assignments and unusual redirects
+all prompt. `FUNCNEST` joins the zsh integer-special exclusion for `safe_env`; the
+loop-variable rule and the zsh lowercase-specials denylist are gone (loops never
+allow).
+
+`command_gate.parse_strict` is the one recognizer; `is_fully_allowed`,
+`simple_commands`, the banned read-only check and the withhold check are all built
+on it. The old `scan_substitutions` / `split_subcommands` / `segment_allowed` /
+`_collect_segment` paths are deleted.
+
+**Builder additions (stricter than the brief):** a comment may only end the last
+line and its text may not hold `; & | < > ( ) { } $ !`, a backslash or a backtick
+(an interactive zsh without `INTERACTIVE_COMMENTS` would read `#` literally);
+control characters other than tab and newline, `*` / `?` in a command word or
+redirect target, non-ASCII redirect targets, comments inside `$(...)` and an empty
+`$(...)` are outside the grammar; withhold also matches a quote-free spelling
+(`git 'push'`).
+
+The differential lane now snapshots the whole `tmp_path` tree (paths, sizes,
+mtimes, content hashes) and fails on any change other than an append to the shim
+log or a write to a target the gate itself vetted. `PATH` holds only the shim
+directory, so an unshimmed program cannot run silently. With `CI` set, a missing
+bash or zsh fails the lane, and the CI template job installs zsh.
+
+Deliberate new deferrals (each was an ALLOW before): `for ...; do ...; done` loops,
+unquoted `$NAME` / `$#` / `${NAME}` / `$1`, unquoted `$(...)`, `[ -f x ]` and
+bracket globs (`[ab]`), a bare `CI=1`, here-strings (`<<<`), and a redirect glued to
+the previous word (`echo hi>/tmp/x`).

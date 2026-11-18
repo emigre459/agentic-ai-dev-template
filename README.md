@@ -239,7 +239,8 @@ merging without your one-off OK is a hard stop.
 ## Agent hooks
 
 `.agents/hooks/` holds one harness-neutral command gate. It auto-allows a shell
-command only when every command in it matches an allow list, denies a repo-owned list
+command only when the command fits a small, strict grammar (no loops, groups,
+unquoted `$` or unusual redirects) and every command in it matches an allow list, denies a repo-owned list
 of banned patterns in shell commands and file edits, and gives no opinion on the rest.
 Any doubt or error means no opinion, never a block. Policy lives in
 `.agents/hooks/policy.json`; allow rules in the tracked `.claude/settings.json` apply in

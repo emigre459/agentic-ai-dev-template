@@ -69,7 +69,6 @@ BASELINE_ALLOW_CASES = [
     'git add -A && git commit -m "wip"',
     'echo "HEAD: $(git rev-parse --short HEAD)"',
     "cd /x && mkdir -p /tmp/e2e && echo hi",
-    "for bid in 1 2 3; do echo $bid; uv run pytest -q 2>&1 | tail -2; done",
     # Backslash-escaped quotes inside a commit message must not desync quote
     # tracking (a `\"` is NOT a string close inside double quotes).
     'git commit -m "migrate to preset:\\"none\\" and verify"',
@@ -104,8 +103,6 @@ HARDENED_ALLOW_CASES = [
     "echo hi >&2",
     "echo hi 1>&2",
     "uv run pytest -q 2>/dev/null",
-    # A redirect with no space before it is still vetted, and allowed in-root.
-    "echo hi>/tmp/out.txt",
     # Relative redirect with no directory change resolves under CWD.
     "echo 'x' > out.txt",
     # An absolute redirect after `cd` is unaffected by the directory change.
@@ -113,7 +110,6 @@ HARDENED_ALLOW_CASES = [
     # Comments are ignored; `#` that is not word-initial is not a comment.
     "echo x # just a comment",
     "echo 'a # not a comment'",
-    "echo $#",
     # Telemetry/display env toggles are still stripped before matching.
     "PYTHONUNBUFFERED=1 uv run pytest -q",
 ]
@@ -236,9 +232,11 @@ def test_star_never_spans_operators() -> None:
 
 
 def test_simple_commands() -> None:
-    found = GATE.simple_commands("NO_COLOR=1 rg x | head -2 && echo $(git log -1)")
-    assert sorted(found) == sorted(["git log -1", "rg x", "head -2", "echo $S"])
+    found = GATE.simple_commands('NO_COLOR=1 rg x | head -2 && echo "$(git log -1)"')
+    assert sorted(found) == sorted(["git log -1", "rg x", "head -2", 'echo "$S"'])
     assert GATE.simple_commands("echo 'unterminated") is None
+    # Strict grammar (2026-11-17): an unquoted `$(...)` is outside the grammar.
+    assert GATE.simple_commands("echo $(git log -1)") is None
 
 
 def test_base_safe_env_names() -> None:
@@ -572,12 +570,8 @@ def test_adversarial_deferred(cmd: str) -> None:
 
 
 SYNTAX_ALLOW_CASES = [
-    "echo [ab] *.py",
-    'echo "$HOME" $1 $# $? $$ $@ $* $- $0 ${HOME} ${1}',
-    'echo "x$" a$ $',
     "CI=1 bunx foo",
     'CI="$(git rev-parse HEAD)" git add x',
-    "CI=$HOME git add x",
     "env -i -u FOO CI=1 bunx foo",
     "env CI=1 git add x",
     "timeout 5 git add x",
@@ -587,11 +581,8 @@ SYNTAX_ALLOW_CASES = [
     "time git add x",
     "command git add x",
     "builtin echo x",
-    "for f in a b; do echo $f; done",
     "NO_COLOR=1 git add x",
-    "CI=1",
     'git commit -m "a \\"b\\" \\$c \\\\ \\`d\\`"',
-    "[ -f x ] && echo y",
     "echo x > out.txt",
     "echo x > /repo/.gitignore",
     "echo x > /repo/.github/workflows/x.yml",
@@ -607,11 +598,11 @@ def test_syntax_subset_allowed(cmd: str) -> None:
     )
 
 
-def test_split_respects_escaped_redirect_chars() -> None:
-    assert GATE.split_subcommands("git add x \\>&touch pwned") == [
-        "git add x \\>",
-        "touch pwned",
-    ]
+def test_escaped_redirect_chars_are_outside_the_grammar() -> None:
+    # `split_subcommands` is gone (strict grammar, 2026-11-17): an unquoted
+    # backslash that is not a line continuation is outside the grammar.
+    assert GATE.parse_strict("git add x \\>&touch pwned") is None
+    assert GATE.simple_commands("git add x \\<&touch pwned") is None
 
 
 def _old_call_policy(**kwargs: Any) -> Any:
@@ -692,11 +683,9 @@ def test_read_only_forgiveness_kept_for_plain_search() -> None:
 @pytest.mark.parametrize(
     "cmd",
     [
-        "echo ${HOME} $1 ${1}",
         'echo "${HOME}/x"',
         "git commit -m 'fix (scope): x'",
         'git commit -m "feat(api): add (thing)"',
-        "echo x <<< 'here string'",
     ],
 )
 def test_plain_expansions_and_quoted_parens_still_allowed(cmd: str) -> None:
@@ -786,3 +775,328 @@ def test_continuation_does_not_hide_withheld_command() -> None:
 def test_withhold_skips_attr_source(cmd: str) -> None:
     policy = GATE.Policy(allow=("git *",), withhold=("git push *",))
     assert _shell(cmd, policy).decision == GATE.NO_OPINION
+
+
+# --- Strict grammar (pre-merge review 4, 2026-11-17) ------------------------------
+#
+# An ALLOW now needs the whole command to match a small, closed, positive grammar
+# (see the `parse_strict` docstring). These are the review-4 classes, each
+# confirmed in a real shell against the `git add *` / `echo *` allow list.
+
+GRAMMAR_CLASS_CASES = [
+    # Class 1: zsh `:F:expr:` modifier evaluates math (runs the nested `$(...)`).
+    "git add $HOME:F:'path[$(touch pwned)]':h",
+    'git add "$HOME:F:path[\\$(touch pwned)]:h"',
+    "git add \"$HOME:F:'path[\\$(touch pwned)]':h\"",
+    "git add $1:F:'path[$(touch pwned)]':h",
+    "git add $$:F:'path[$(touch pwned)]':h",
+    "git add \"$#:F:'path[\\$(touch pwned)]':h\"",
+    "git add $nope:F:'path[$(touch pwned)]':h",
+    "for y in 'path[$(touch pwned)]'; do git add $HOME:F:y:h; done",
+    # Class 2: multi-variable `for` (only the first variable used to be checked).
+    "for f path in a x; do git add y; done",
+    "for f PATH in a ./bin; do git add y; done",
+    "for f SECONDS in a 'path[$(touch pwned)]'; do git add y; done",
+    "select f in a; do git add x; break; done",
+    # Class 3: zsh clobber redirects.
+    "git add x >! .git/hooks/p",
+    "git add x 2>! .git/hooks/p",
+    "git add x &>! .git/hooks/p",
+    "echo hi >>! .git/hooks/p",
+    "git add x >! out.txt",
+    "git add x >| out.txt",
+    # Class 4: zsh `=cmd` expands to the PATH-resolved program.
+    "git add x > =git",
+    "echo pwned > =git",
+    "git add =git",
+    # Class 5: case-insensitive file systems (APFS) reach protected paths.
+    "git add x > .GIT/hooks/p",
+    "git add x > .AGENTS/hooks/policy.json",
+    "git add x > .Claude/settings.json",
+    "echo x > .Git/config",
+    "echo x > /repo/.CODEX/hooks.json",
+    "echo x > .github/HOOKS/command-gate.json",
+    # Class 6: zsh `always` blocks (and every other group / control structure).
+    "{ git add x } always { touch pwned }",
+    "if git add x { touch pwned }",
+    "for f in a { touch pwned }",
+    # Class 7: input redirects are vetted.
+    "git add x < /dev/tcp/127.0.0.1/9",
+    "git add x < /dev/udp/127.0.0.1/9",
+    "git add x < /dev/zero",
+    "git add x < /etc/passwd",
+    "echo x < ../outside.txt",
+]
+
+GRAMMAR_EDGE_DEFER_CASES = [
+    # Separators outside the grammar.
+    "git add x |& tail -1",
+    "git add x & git add y",
+    "git add x &",
+    "git add x ;; git add y",
+    # Redirect operators outside the grammar.
+    "git add x <> out.txt",
+    "git add x <& 0",
+    "git add x <<< word",
+    "git add x 3> out.txt",
+    "git add x >&1",
+    "git add x 2>&1- ",
+    "git add x &>> out.txt",
+    "git add x > out.txt>x",
+    "git add x>out.txt",
+    # `=cmd` and `~` words and targets.
+    "git add =git",
+    "echo x > ~/out.txt",
+    "echo x > ~",
+    "git add ~/x",
+    "git add ~root/x",
+    "echo x > 'a'b",
+    "echo x > *.txt",
+    'echo x > "$HOME/x"',
+    'echo x > "a\\\\b"',
+    # Unquoted `$` in any form.
+    "git add $x",
+    "git add a$x",
+    "echo $",
+    "echo $(git status --short)",
+    "CI=$x git add y",
+    # Double-quoted parameter forms outside the grammar.
+    'echo "${x:-y}"',
+    'echo "$x[1]"',
+    'echo "$x:h"',
+    'echo "${x}:h"',
+    'echo "${x}[1]"',
+    'echo "$x(1)"',
+    'echo "$1"',
+    'echo "$#"',
+    'echo "$(git status)[1]"',
+    'echo "$()"',
+    'echo "$( )"',
+    'echo "$(git status # x)"',
+    # Backticks anywhere, `!` in double quotes, ANSI-C strings.
+    'echo "a `touch pwned` b"',
+    "echo `touch pwned`",
+    'echo "hi!"',
+    "echo $'x'",
+    # Groups, subshells, tests and other command-position punctuation.
+    "{ git add x; }",
+    "( git add x )",
+    "[[ -f x ]] && git add x",
+    "[ -f x ] && git add x",
+    "! git add x",
+    "(( 1 )) && git add x",
+    "function f { git add x; }",
+    "coproc git add x",
+    "repeat 2 git add x",
+    "foreach f (a) git add x; end",
+    "until git add x; do echo; done",
+    "while git add x; do echo; done",
+    "case x in x) git add x;; esac",
+    "time -p git add x",
+    # Mid-word and unexpected punctuation.
+    "git add a#b",
+    "git add [ab]",
+    "git add x{a,b}",
+    "git add a^b",
+    "git add a\\ b",
+    "echo x #c\ngit add y",
+    "\ngit add x",
+    "git add x &&\ngit add y",
+    "git add x\n\ngit add y",
+    # Pure assignments and redirect-only commands run nothing we vetted.
+    "CI=1",
+    "CI=1; git add x",
+    "> out.txt git add x",
+    "2>&1",
+    # Command words outside the grammar.
+    '"git" add x',
+    "g*t add x",
+    "-git add x",
+    "CI= git add x",
+    "CI=~/x git add x",
+    "CI==git git add x",
+    'CI=a"b" git add x',
+    "nohup",
+    "env CI=1",
+    "env -u 1x git add x",
+]
+
+
+@pytest.mark.parametrize("cmd", GRAMMAR_CLASS_CASES + GRAMMAR_EDGE_DEFER_CASES)
+def test_strict_grammar_defers(cmd: str) -> None:
+    patterns = [*PATTERNS, "[ *", "[[ *", "tail *", "{ *", "( *", "! *"]
+    assert (
+        GATE.is_fully_allowed(cmd, patterns, ROOTS, CWD, HOME, protected=PROTECTED)
+        is False
+    )
+
+
+@pytest.mark.parametrize("cmd", GRAMMAR_CLASS_CASES)
+def test_strict_grammar_class_cases_defer_in_verdict(cmd: str) -> None:
+    policy = GATE.Policy(allow=("git *", "echo *", "touch *"))
+    verdict = GATE.shell_verdict(cmd, policy, CWD, ROOTS, HOME, protected=PROTECTED)
+    assert verdict.decision == GATE.NO_OPINION
+
+
+GRAMMAR_ALLOW_CASES = [
+    "make lint && make tests",
+    'git add -A && git commit -m "msg with (parens) and #hash"',
+    "uv run pytest tests/x.py -v 2>&1 | tail -40",
+    "NO_COLOR=1 uv run pytest -q",
+    'echo "HEAD: $(git rev-parse --short HEAD)"',
+    "git status --porcelain > /tmp/s.txt",
+    "timeout 30 make tests",
+    "env -i NO_COLOR=1 make lint",
+    'git commit -m "say \\"hi\\" now"',
+    "gh pr view 1 \\\n  --json title",
+    "make lint; make tests",
+    "make lint || make tests",
+    "make lint\nmake tests\n",
+    "make lint # run the linter",
+    "make lint; # trailing comment",
+    "  make lint  ",
+    "git add x 2> /dev/null",
+    "git add x >> /tmp/log.txt 2>&1",
+    "git add x < /dev/null",
+    "git add x < in.txt",
+    "git add x > 'out file.txt'",
+    'git add x > "out file.txt"',
+    'echo "$HOME/x" "${HOME}/y"',
+    'CI="$(git rev-parse HEAD)" git add x',
+    "git commit -m 'it''s' -m \"a\nb\"",
+    "nice nohup command builtin echo x",
+    "time make lint",
+    "env -u FOO -i make lint",
+    "git log --format=%H@%an,x:y+z -- a/b.py",
+    'echo "a $(echo "b $(git status)") c"',
+]
+
+
+@pytest.mark.parametrize("cmd", GRAMMAR_ALLOW_CASES)
+def test_strict_grammar_allows_common_shapes(cmd: str) -> None:
+    patterns = [
+        "make lint",
+        "make tests",
+        "git *",
+        "uv run *",
+        "tail *",
+        "echo *",
+        "gh pr view *",
+    ]
+    assert (
+        GATE.is_fully_allowed(cmd, patterns, ROOTS, CWD, HOME, protected=PROTECTED)
+        is True
+    )
+
+
+def test_parse_strict_shape() -> None:
+    cmds = GATE.parse_strict(
+        'CI=1 env -i timeout 5 git  commit -m "a $(git rev-parse HEAD)" '
+        "> /tmp/o 2>&1 < in.txt | tail -1"
+    )
+    assert cmds is not None
+    first, second = cmds
+    assert first.text == 'git commit -m "a $S"'
+    assert first.out_targets == ("/tmp/o",)
+    assert first.in_targets == ("in.txt",)
+    assert [c.text for c in first.substitutions] == ["git rev-parse HEAD"]
+    assert second.text == "tail -1"
+    assert second.out_targets == () and second.substitutions == ()
+
+
+def test_parse_strict_comment_only_runs_nothing() -> None:
+    assert GATE.parse_strict("# just a note") == []
+    assert GATE.is_fully_allowed("# note", ["*"], ROOTS, CWD, HOME) is False
+
+
+def test_parse_strict_rejects_overlong_command() -> None:
+    assert GATE.parse_strict("echo " + "a" * (64 * 1024)) is None
+
+
+def test_deep_substitution_nesting_fails_closed() -> None:
+    deep = "echo " + '"$(echo ' * 2000 + "x" + ')"' * 2000
+    assert GATE.parse_strict(deep) is None
+    banned = _shell(deep + " old_call", _old_call_policy(allow=("echo *",)))
+    assert banned.decision == GATE.DENY
+
+
+def test_input_target_rules(tmp_path: Path) -> None:
+    root = str(tmp_path)
+    ok = GATE.input_target_ok
+    assert ok("/dev/null", [root], root, "/h") is True
+    assert ok("in.txt", [root], root, "/h") is True
+    assert ok("/dev/zero", [root, "/"], root, "/h") is False
+    assert ok("/dev/tcp/127.0.0.1/9", ["/"], root, "/h") is False
+    assert ok("/etc/passwd", [root], root, "/h") is False
+    assert ok("in.txt", [root], root, "/h", dir_changed=True) is False
+
+
+def test_protected_check_is_case_insensitive(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / ".git" / "hooks").mkdir(parents=True)
+    protected = [str(root / ".git")]
+    for target in (".GIT/hooks/p", ".Git/config", f"{root}/.gIt/x"):
+        assert (
+            GATE.redirect_target_ok(
+                target, [str(root)], str(root), "/h", protected=protected
+            )
+            is False
+        ), target
+    assert GATE.redirect_target_ok(
+        ".gitignore", [str(root)], str(root), "/h", protected=protected
+    )
+
+
+def test_root_containment_stays_case_exact() -> None:
+    assert GATE.redirect_target_ok("/REPO/x", ["/repo"], "/repo", "/h") is False
+
+
+def test_output_target_under_dev_defers() -> None:
+    assert GATE.redirect_target_ok("/dev/tcp/127.0.0.1/9", ["/"], "/", "/h") is False
+    assert GATE.redirect_target_ok("/dev/null", ["/repo"], "/repo", "/h") is True
+
+
+def test_loop_and_lowercase_specials_denylist_is_gone() -> None:
+    assert not hasattr(GATE, "ZSH_LOWERCASE_SPECIALS")
+    assert "FUNCNEST" in GATE.ZSH_INTEGER_SPECIALS
+    policy = GATE.Policy(
+        allow=("git add *",), safe_env=GATE.BASE_SAFE_ENV_NAMES | {"FUNCNEST"}
+    )
+    assert _shell("FUNCNEST=1 git add x", policy).decision == GATE.NO_OPINION
+
+
+def test_banned_hit_in_ungrammatical_line_denies() -> None:
+    policy = _old_call_policy(allow=("rg *",))
+    for cmd in ("rg old_call $x", "{ rg old_call; }", "rg old_call &"):
+        assert _shell(cmd, policy).decision == GATE.DENY, cmd
+    assert _shell("rg old_call 2>/dev/null | head", policy).decision != GATE.DENY
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # A comment's text may not become live syntax if `#` were read literally.
+        "git add x # ; touch pwned",
+        "git add x # && touch pwned",
+        "git add x # | sh",
+        "git add x # > .bashrc",
+        "git add x # $(touch pwned)",
+        "git add x # (note)",
+        # Control characters other than tab and newline.
+        "git add 'a\x00b'",
+        "git add x\r",
+        "git add '\x1b[31m'",
+    ],
+)
+def test_strict_grammar_hardening_defers(cmd: str) -> None:
+    assert allowed(cmd) is False
+
+
+def test_plain_comment_text_still_allowed() -> None:
+    assert allowed("git add x # stage it, then commit: done.") is True
+
+
+def test_withhold_sees_through_quotes() -> None:
+    policy = GATE.Policy(allow=("git *",), withhold=("git push *",))
+    for cmd in ("git 'push' origin x", 'git "pu"sh origin x', "git p''ush origin"):
+        assert _shell(cmd, policy).decision == GATE.NO_OPINION, cmd
