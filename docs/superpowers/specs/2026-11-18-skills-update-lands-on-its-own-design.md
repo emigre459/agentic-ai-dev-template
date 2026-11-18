@@ -27,6 +27,11 @@ other PR stays exactly as gated as it is today.
    the repo has one.
 4. Tests cover the lane and the auto-merge call. The README documents the secret, the
    lane file and the tradeoff.
+5. **Setting up the App is easy enough that failing loudly is fair.** A coding agent
+   can create the repo owner's own App, store its secrets and write the lane file as
+   part of repo setup. The person approves with two browser clicks (Create, then
+   Install). This works both in the template's "Start here" interview and when an
+   existing repo adopts the kit.
 
 ## Non-goals
 
@@ -46,6 +51,9 @@ other PR stays exactly as gated as it is today.
 - The lane changing anything in a repo that hasn't opted in.
 - A PAT or App token reaching the third-party `npx skills` steps (today's isolation
   stays).
+- The App's private key written to disk, printed, logged, put in a command line, or
+  committed. It goes from the conversion response straight into `gh secret set`'s
+  stdin.
 
 ## Decided with the user
 
@@ -58,6 +66,11 @@ other PR stays exactly as gated as it is today.
 - **The lane passes both halves** for the update workflow's own PR (#82's
   2026-11-17 amendment), so a catch-all CODEOWNERS needs no change.
 - **Identity comes from an opt-in file on the default branch** (approach 1 below).
+- **Setup helper folded into this card**, so the loud failure ships together with an
+  easy fix. There is no shared "template App": the workflow mints its token with the
+  App's private key, so one App for everyone would mean handing every consumer the
+  same key. Each owner (user or org) creates its own App once and installs it on each
+  repo.
 
 ## Approaches considered (identity of the update PR)
 
@@ -227,7 +240,73 @@ reviews, so:
   resolve them. The README says so, and the live test checks what actually happens on
   an App-authored update PR. A follow-up card follows if it stalls routinely.
 
-### 6. Tests
+### 6. Setup helper: create the App with two clicks
+
+A stdlib-only `python3` script, vendored so every consumer has it:
+`.agents/skills/upgrade-deps/scripts/setup_skills_update_app.py`. `upgrade-deps`
+already owns the update PRs. The script runs on stdlib like the review helpers, so
+it needs no project install. It uses GitHub's manifest flow (docs: "Registering a
+GitHub App from a manifest").
+
+**Create mode** (default): `--repo owner/name`, plus `--org` when the repo is
+org-owned. A private App can only be installed on the account that owns it, so an
+org repo needs an org-owned App.
+
+1. Build the manifest:
+   - `name`: default `<repo-name>-skills-update`, editable on GitHub's page.
+   - `url`: the repo URL.
+   - `public: false`.
+   - `default_permissions`: `{"contents": "write", "pull_requests": "write"}`.
+   - The webhook is off (`hook_attributes` with `active: false`).
+   - `redirect_url`: `http://127.0.0.1:<port>/callback` on a one-shot local listener.
+2. Write a small auto-submitting HTML form that POSTs `manifest` and a random
+   `state` to `https://github.com/settings/apps/new` (or
+   `organizations/<org>/settings/apps/new`), to a temp dir, and open it in the
+   browser (print the path when no browser can be opened). **The person clicks
+   Create.**
+3. The listener takes the one redirect, checks `state` (a mismatch is refused), and
+   reads `code`. The fallback when the listener can't be reached (remote shell,
+   blocked port): the person pastes the redirect URL or code, and the script still
+   checks `state`.
+4. `gh api -X POST /app-manifests/<code>/conversions` (within the hour) returns
+   `id`, `slug` and `pem`. Only `id` and `slug` are kept as values; `pem` goes
+   straight on.
+5. `gh secret set SKILLS_UPDATE_APP_ID --repo <repo> --body <id>` and
+   `gh secret set SKILLS_UPDATE_APP_PRIVATE_KEY --repo <repo>` with `pem` on
+   **stdin** (never argv or disk). With `--org-secrets`, they're set once as org
+   secrets scoped to the repo (`--org <org> --visibility selected --repos <repo>`),
+   so later repos only need the install.
+6. Open `https://github.com/apps/<slug>/installations/new`. **The person clicks
+   Install**, choosing this repo.
+7. Write `.github/skills-update-lane.json` as
+   `{"branch": "skills-update", "authors": ["<slug>[bot]"]}`, unless `--no-lane` is
+   passed. An existing file is updated to add the author, not overwritten. Print
+   what was done and what's left (commit the lane file).
+
+**Existing-App mode** (`--existing-app <slug>`): for an org whose App already exists
+with org secrets. It only runs steps 6 and 7.
+
+**Safety:** the script asks for nothing it can do itself, never prints `pem`, and
+fails with a clear message when `gh` isn't authenticated or lacks admin on the repo
+(secrets need it; the template's setup already requires admin).
+
+**Where it's offered:**
+- README "Start here" interview: a new question, "Set up the skills-update App now?
+  (recommended: two clicks) / I'll use a PAT / later (the nightly run fails until
+  then)". On yes, the agent runs the script, and the lane file goes into the init
+  PR. On PAT, the agent shows the manual PAT steps.
+- README "Adopting the kit in an existing repo" and "Staying up to date": the same
+  command.
+- `upgrade-deps/SKILL.md`: one line pointing at the script for "the nightly run fails:
+  no token".
+- The workflow's no-token `::error::` names the command.
+
+**Install check:** the script can't confirm the install through the API without an
+App JWT (stdlib Python can't sign RS256). It asks the person to confirm, and the
+README says a `workflow_dispatch` run of "skills update" proves it (in the template
+repo itself the run skips, so the check happens in the consumer repo).
+
+### 7. Tests
 
 - `tests/template/test_review_gate.py`:
   - the pure function: a pass on lock + tag-pinned folders under either root. None
@@ -257,6 +336,21 @@ reviews, so:
     App then PAT, there's no `github.token` in the pick, no `dispatch-ci` input, and
     no `actions: write`;
   - the action inputs are `token`, `branch`, `base` and `labels`.
+- `tests/template/test_setup_skills_update_app.py` (no network: a fake `gh` on
+  `PATH` and the listener's request handling tested as a pure function on a URL;
+  a real localhost bind only if the no-network rule allows it, otherwise the
+  handler is tested without a socket):
+  - the manifest has exactly the two write permissions, is private, has no active
+    webhook, and the form targets the user vs org URL;
+  - the callback with a wrong or missing `state` is refused; a pasted URL or bare
+    code is accepted;
+  - conversion → `gh secret set` calls: the id via `--body`, the key via stdin, and
+    `pem` never in any argv or stdout/stderr; `--org-secrets` uses
+    `--org/--visibility selected/--repos`;
+  - the lane file is created, and an existing one gets the author added (no
+    duplicate, other keys kept); `--no-lane` writes nothing; `--existing-app` skips
+    creation and secrets;
+  - a failed `gh` call exits non-zero with a message and no key in it.
 - The README guards in `test_readme_workflow.py` are extended for the new subsection
   if that file guards docs sections that way.
 
