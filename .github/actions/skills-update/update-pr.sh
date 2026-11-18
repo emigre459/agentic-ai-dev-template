@@ -163,7 +163,7 @@ if [ "$pushed" = true ] || [ "$created" = true ]; then
     head="$remote_sha"
   fi
   if ! "$GH_CMD" pr merge "$pr_number" --auto --squash --match-head-commit "$head"; then
-    echo "::error::could not enable auto-merge on PR #$pr_number. Turn on Settings -> General -> \"Allow auto-merge\", and check the token has contents and pull requests: write."
+    echo "::error::could not enable auto-merge on PR #$pr_number. Turn on Settings -> General -> \"Allow auto-merge\", and check the token has contents and pull requests: write; then run: gh pr merge $pr_number --auto --squash"
     exit 1
   fi
   log "Auto-merge enabled on PR #$pr_number at $head."

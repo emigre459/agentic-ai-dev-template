@@ -763,8 +763,10 @@ def test_create_on_an_already_current_branch_matches_the_remote_sha(
     helper.log.unlink()
     helper.rebuild_branch()
     helper.make_drift()
-    local_head = _git(helper.work, "rev-parse", "HEAD")  # a fresh commit, new SHA
-    result = helper.run()
+    # A different commit date makes the re-made commit's SHA differ from the remote's.
+    old = "2001-01-01T00:00:00Z"
+    result = helper.run(GIT_AUTHOR_DATE=old, GIT_COMMITTER_DATE=old)
+    local_head = _git(helper.work, "rev-parse", "HEAD")
     assert result.returncode == 0, result.stderr
     assert helper.push_count() == 1  # not pushed again
     assert len(helper.gh_calls("pr", "create")) == 1
@@ -781,6 +783,7 @@ def test_auto_merge_failure_fails_the_run(helper: _Helper) -> None:
     assert result.returncode == 1
     out = result.stdout + result.stderr
     assert "::error::" in out and "Allow auto-merge" in out
+    assert "then run: gh pr merge 7 --auto --squash" in out
 
 
 @needs_bash
