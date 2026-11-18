@@ -569,3 +569,31 @@ Deliberate new deferrals (each was an ALLOW before): `for ...; do ...; done` loo
 unquoted `$NAME` / `$#` / `${NAME}` / `$1`, unquoted `$(...)`, `[ -f x ]` and
 bracket globs (`[ab]`), a bare `CI=1`, here-strings (`<<<`), and a redirect glued to
 the previous word (`echo hi>/tmp/x`).
+
+## Amendment — 2026-11-18 (pre-merge review 5: the layers above the grammar)
+
+Review 5 found no wrong allow in the grammar itself. It found three in the layers
+built on top of it, and the controller ruled on each:
+
+- **Withhold vs expansions.** Withhold matched text in which `"$X"` stayed literal,
+  so `git pu"$NOPE"sh origin main` slipped past `Bash(git push *)`. Now, when the
+  policy has any withhold rule, a command whose argument words hold an expansion
+  (`$NAME`, `${NAME}`, `$(...)`, substitutions included) gets no opinion. Withhold
+  also matches the command as written (wrappers and assignments kept), so
+  `Bash(env *)` and `Bash(timeout *)` work.
+- **Read-only forgiveness.** Quotes are removed from every word before the runner-
+  option check (`"--pre"=sh`, `--ext"-"diff`), and a word holding an expansion or
+  an unquoted `*` / `?` makes the command not read-only (`rg old_api *` with a file
+  named `--pre=sh`).
+- **Same-line symlinks (TOCTOU).** `realpath` vets a target before anything runs,
+  so `git checkout b -- lnk && echo x >> lnk/config` wrote into `.git/config`. An
+  output redirect to anything but exactly `/dev/null` now auto-allows only when
+  every other command that may run before or alongside it (earlier list members,
+  pipeline peers, the command's own substitutions; conservatively, every command
+  in pipelines up to and including the writer's) is a read-only search.
+
+Also: `/dev/null` must be the target exactly (one matching quote pair at most);
+`.husky/`, `.githooks/` and `.pre-commit-config.yaml` join the protected paths; the
+differential lane runs withhold and banned policies against real shells.
+
+New deferral: `cd <dir> && cmd > /abs/path` (was an ALLOW).

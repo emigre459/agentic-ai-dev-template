@@ -72,7 +72,7 @@ ALLOW = (
 # looked one up on PATH would still only log).
 SHIMMED: tuple[str, ...] = ("git", "bunx", "uv", "mkdir", "tail", "grep", "gh")
 SHIMMED += ("make", "env", "timeout", "nice", "nohup", "echo", "cd", "command")
-SHIMMED += ("builtin",)
+SHIMMED += ("builtin", "rg", "ln")
 PROTECTED_DIRS = (
     ".git",
     ".claude",
@@ -83,6 +83,8 @@ PROTECTED_DIRS = (
     ".factory",
     ".augment",
     os.path.join(".github", "hooks"),
+    ".husky",
+    ".githooks",
 )
 TOUCH = "/usr/bin/touch"
 
@@ -194,7 +196,8 @@ def _sandbox(tmp_path: Path) -> tuple[Path, Path, Path]:
         path.chmod(0o755)
     for name in SHIMMED:
         shim = shims / name
-        shim.write_text(f'#!/bin/sh\necho "{name}" >> "{log}"\n')
+        # One line per call: the program name, then its arguments.
+        shim.write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\n')
         shim.chmod(0o755)
     return box, shims, log
 
@@ -269,7 +272,7 @@ def _execute(
     if not new_log.startswith(old_log):
         problems.append("calls.log was rewritten, not appended to")
     for line in new_log[len(old_log) :].splitlines():
-        if line not in SHIMMED:
+        if line.split(" ", 1)[0] not in SHIMMED:
             problems.append(f"unexpected log line {line!r}")
     return problems
 
@@ -331,3 +334,88 @@ def test_detector_catches_an_unshimmed_program(tmp_path: Path, shell: str) -> No
     _sandbox(tmp_path)
     assert _execute(exe, "touch pwned_a", tmp_path) == []
     assert _execute(exe, f"{TOUCH} pwned_b", tmp_path) == ["changed box/pwned_b"]
+
+
+# --- Policy layers (review 5): withhold rules and banned-pattern forgiveness ------
+
+LAYER_ALLOW = ("git *", "echo *", "rg *")
+WITHHOLD = ("git push *", "git commit --no-verify*", "git add -f*")
+BANNED = GATE.BannedPattern.from_dict(
+    {"pattern": "old_api", "message": "gone", "replacement": "new_api"}
+)
+# Each would run a withheld command, or a "read-only" search with a runner
+# option, if the gate allowed it.
+LAYER_BYPASSES = [
+    'git pu"$NOPE"sh origin main',
+    'git pu"${NOPE}"sh origin main',
+    'git "$(echo push)" origin main',
+    'git pu"$(git add x)"sh origin main',
+    'git commit --no-ve"$X"rify -m x',
+    'git add -"$X"f secret.env',
+    'rg old_api "--pre"=sh src',
+    'rg old_api --"pre=sh" src',
+    'rg old_api --p"$X"re=sh src',
+    'git log -G old_api --ext"-"diff',
+    "git grep old_api '--open-files-in-pager'=sh",
+    "rg old_api *",
+]
+LAYER_EXPECTED_ALLOW = ["git status --short", "rg new_api src", "git add x"]
+
+
+def _layer_verdict(cmd: str, box: Path) -> str:
+    policy = GATE.Policy(allow=LAYER_ALLOW, withhold=WITHHOLD, banned=(BANNED,))
+    protected = [str(box / d) for d in PROTECTED_DIRS]
+    root = str(box)
+    verdict = GATE.shell_verdict(cmd, policy, root, [root], root, protected=protected)
+    decision: str = verdict.decision
+    return decision
+
+
+def _layer_violations(log: Path) -> list[str]:
+    """Return logged calls a withhold rule or the banned forgiveness should stop."""
+    found = []
+    for line in log.read_text().splitlines():
+        if any(GATE.pattern_matches(w, line, "/") for w in WITHHOLD):
+            found.append(f"withheld call ran: {line!r}")
+        words = line.split()
+        if words and words[0] == "rg" and any(w.startswith("--pre") for w in words):
+            found.append(f"runner option reached rg: {line!r}")
+        if "--ext-diff" in words or any("--open-files" in w for w in words):
+            found.append(f"runner option reached git: {line!r}")
+    return found
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("cmd", LAYER_EXPECTED_ALLOW + LAYER_BYPASSES)
+def test_policy_layers_hold_in_real_shells(
+    tmp_path: Path, shell: str, cmd: str
+) -> None:
+    exe = _shell_or_skip(shell)
+    box, _, log = _sandbox(tmp_path)
+    (box / "src").mkdir()
+    (box / "--pre=sh").write_text("")  # a glob in the cwd picks this up
+    if _layer_verdict(cmd, box) != GATE.ALLOW:
+        return
+    assert _execute(exe, cmd, tmp_path, _expected_writes(cmd, box)) == [], cmd
+    assert _layer_violations(log) == [], cmd
+
+
+@pytest.mark.parametrize("cmd", LAYER_BYPASSES)
+def test_policy_layer_bypasses_are_not_allowed(tmp_path: Path, cmd: str) -> None:
+    box, _, _ = _sandbox(tmp_path)
+    assert _layer_verdict(cmd, box) != GATE.ALLOW, cmd
+
+
+@pytest.mark.parametrize("cmd", LAYER_EXPECTED_ALLOW)
+def test_policy_layer_expected_commands_are_allowed(tmp_path: Path, cmd: str) -> None:
+    box, _, _ = _sandbox(tmp_path)
+    assert _layer_verdict(cmd, box) == GATE.ALLOW, cmd
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_layer_detector_sees_a_withheld_call(tmp_path: Path, shell: str) -> None:
+    """Self-check: the lane would notice a withheld push if one ran."""
+    exe = _shell_or_skip(shell)
+    _, _, log = _sandbox(tmp_path)
+    _execute(exe, 'git pu"$NOPE"sh origin main; rg x --pre=sh', tmp_path)
+    assert len(_layer_violations(log)) == 2

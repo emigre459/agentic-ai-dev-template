@@ -105,8 +105,6 @@ HARDENED_ALLOW_CASES = [
     "uv run pytest -q 2>/dev/null",
     # Relative redirect with no directory change resolves under CWD.
     "echo 'x' > out.txt",
-    # An absolute redirect after `cd` is unaffected by the directory change.
-    "cd /tmp/wt && echo hi > /tmp/out.txt",
     # Comments are ignored; `#` that is not word-initial is not a comment.
     "echo x # just a comment",
     "echo 'a # not a comment'",
@@ -1100,3 +1098,140 @@ def test_withhold_sees_through_quotes() -> None:
     policy = GATE.Policy(allow=("git *",), withhold=("git push *",))
     for cmd in ("git 'push' origin x", 'git "pu"sh origin x', "git p''ush origin"):
         assert _shell(cmd, policy).decision == GATE.NO_OPINION, cmd
+
+
+# --- Review 5 (2026-11-18): the layers on top of the grammar ---------------------
+#
+# C1: withhold rules are matched against text in which a double-quoted expansion
+# stays literal, so `git pu"$NOPE"sh` read as `git pu$NOPEsh` and slipped past a
+# `git push *` deny. With ANY withhold rule, a word holding an expansion defers.
+
+WITHHOLD_EXPANSION_CASES = [
+    ("git push *", 'git pu"$NOPE"sh origin main'),
+    ("git push *", 'git pu"${NOPE}"sh origin main'),
+    ("git push *", 'git "$(echo push)" origin main'),
+    ("git push *", 'git pu"$(git add x)"sh origin main'),
+    ("git commit --no-verify*", 'git commit --no-ve"$X"rify -m x'),
+    ("git add -f*", 'git add -"$X"f secret.env'),
+    # An expansion inside a substitution's own words counts too.
+    ("git push *", 'echo "$(git pu"$X"sh origin)"'),
+]
+
+
+@pytest.mark.parametrize(("withhold", "cmd"), WITHHOLD_EXPANSION_CASES)
+def test_withhold_defers_on_expanding_words(withhold: str, cmd: str) -> None:
+    policy = GATE.Policy(allow=("git *", "echo *"), withhold=(withhold,))
+    assert _shell(cmd, policy).decision == GATE.NO_OPINION
+
+
+def test_expanding_words_still_allow_without_withhold_rules() -> None:
+    policy = GATE.Policy(allow=("git *", "echo *"))
+    assert _shell('git add "$HOME/x"', policy).decision == GATE.ALLOW
+    held = GATE.Policy(allow=("git *", "echo *"), withhold=("rm *",))
+    assert _shell('git add "$HOME/x"', held).decision == GATE.NO_OPINION
+    assert _shell("git add x", held).decision == GATE.ALLOW
+
+
+@pytest.mark.parametrize(
+    ("withhold", "cmd"),
+    [
+        ("env *", "env -i git status"),
+        ("timeout *", "timeout 5 git status"),
+        ("nohup *", "nohup git status"),
+        ("CI=1 git *", "CI=1 git status"),
+    ],
+)
+def test_withhold_also_matches_the_unstripped_command(withhold: str, cmd: str) -> None:
+    policy = GATE.Policy(allow=("git *",), withhold=(withhold,))
+    assert _shell(cmd, policy).decision == GATE.NO_OPINION
+    assert _shell("git status", policy).decision == GATE.ALLOW
+
+
+# C2: read-only forgiveness only stripped LEADING quotes, and ignored expansions
+# and globs, so a quoted or globbed runner option ran a program.
+
+FORGIVENESS_BYPASS_CASES = [
+    'rg old_api "--pre"=sh src',
+    'rg old_api --"pre=sh" src',
+    'rg old_api --p"$X"re=sh src',
+    'git log -G old_api --ext"-"diff',
+    "git grep old_api '--open-files-in-pager'=sh",
+    "rg old_api *",
+    "rg old_api src/?.py",
+    'rg old_api "$X"',
+    'rg old_api "$(echo --pre=sh)"',
+    'rg old_a"pi" -O',
+]
+
+
+@pytest.mark.parametrize("cmd", FORGIVENESS_BYPASS_CASES)
+def test_read_only_forgiveness_sees_through_quotes_globs_and_expansions(
+    cmd: str,
+) -> None:
+    policy = GATE.Policy(
+        allow=("rg *", "git *", "echo *"),
+        banned=(
+            GATE.BannedPattern.from_dict(
+                {"pattern": "old_a", "message": "gone", "replacement": "new"}
+            ),
+        ),
+    )
+    assert _shell(cmd, policy).decision == GATE.DENY, cmd
+
+
+def test_read_only_forgiveness_kept_for_quoted_plain_search() -> None:
+    policy = _old_call_policy(allow=("rg *",))
+    for cmd in ("rg 'old_call' src", 'rg "old_call(" -n src', "git log -S old_call"):
+        assert _shell(cmd, policy).decision != GATE.DENY, cmd
+
+
+# C3: a symlink created earlier on the same line (or by a pipeline peer, or by
+# the command's own substitution) redirects a vetted write into a protected
+# path, because realpath ran before the link existed.
+
+SAME_LINE_TOCTOU_CASES = [
+    "git checkout evil -- lnk && echo x >> lnk/config",
+    "ln -s .git lnk; echo x > lnk/config",
+    "ln -s .git lnk || echo x > lnk/config",
+    "ln -s .git lnk | echo x > lnk/config",
+    "echo x > lnk/config | ln -s .git lnk",
+    'echo "$(ln -s .git lnk)" > lnk/config',
+    'echo "$(ln -s .git lnk) $(echo x > lnk/config)"',
+    "cd /tmp/wt && echo hi > /tmp/out.txt",
+]
+
+
+@pytest.mark.parametrize("cmd", SAME_LINE_TOCTOU_CASES)
+def test_redirect_defers_when_another_command_could_run_first(cmd: str) -> None:
+    patterns = [*PATTERNS, "ln *", "git checkout *"]
+    assert (
+        GATE.is_fully_allowed(cmd, patterns, ROOTS, CWD, HOME, protected=PROTECTED)
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "uv run pytest -q > /tmp/out.txt",
+        "git status --porcelain > /tmp/s.txt 2>&1",
+        "echo x > /tmp/o && git add y",
+        "grep -r x src | tail -3 > /tmp/o",
+        "git add y && echo x > /dev/null",
+        "uv run pytest -q 2>&1 | tail -40",
+    ],
+)
+def test_redirect_still_allowed_when_nothing_else_writes_first(cmd: str) -> None:
+    assert (
+        GATE.is_fully_allowed(cmd, PATTERNS, ROOTS, CWD, HOME, protected=PROTECTED)
+        is True
+    )
+
+
+def test_dev_null_must_be_exactly_unquoted() -> None:
+    for target in ("\"/dev/null'", "'/dev/null\"", "/dev/null'", "'/dev/null"):
+        assert GATE.redirect_target_ok(target, ["/"], "/", "/h") is False, target
+        assert GATE.input_target_ok(target, ["/"], "/", "/h") is False, target
+    for target in ("/dev/null", "'/dev/null'", '"/dev/null"'):
+        assert GATE.redirect_target_ok(target, ["/repo"], "/repo", "/h") is True
+        assert GATE.input_target_ok(target, ["/repo"], "/repo", "/h") is True

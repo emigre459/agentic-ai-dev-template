@@ -42,9 +42,11 @@ MAX_READ_BYTES = 2 * 1024 * 1024
 # Set in every hook process Cursor runs (Cursor hooks docs, "Environment
 # Variables"); Cursor ALSO sets CLAUDE_PROJECT_DIR as a compatibility alias.
 CURSOR_ENV_MARKERS = ("CURSOR_PROJECT_DIR", "CURSOR_VERSION")
-# Project subtrees an allowed command may never redirect output into, even
+# Project paths an allowed command may never redirect output into, even
 # though they sit inside the project root: the gate's own policy and every
-# harness's hook config, plus VCS internals (`.git/hooks` runs code).
+# harness's hook config, plus VCS internals and the hook managers `git commit`
+# runs (`.git/hooks`, husky, `core.hooksPath` dirs, pre-commit). Compared
+# case-insensitively by `command_gate.redirect_target_ok`.
 PROTECTED_DIRS = (
     ".git",
     ".claude",
@@ -55,6 +57,9 @@ PROTECTED_DIRS = (
     ".factory",
     ".augment",
     os.path.join(".github", "hooks"),
+    ".husky",
+    ".githooks",
+    ".pre-commit-config.yaml",
 )
 
 

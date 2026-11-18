@@ -854,6 +854,12 @@ def test_gate_sh_continuation_heredoc_is_no_opinion(tmp_path: Path) -> None:
         ".github/hooks/command-gate.json",
         ".codex/hooks.json",
         "cfg/settings.json",
+        # `git commit` runs hooks configured in these.
+        ".husky/pre-commit",
+        ".HUSKY/pre-commit",
+        ".githooks/pre-commit",
+        ".pre-commit-config.yaml",
+        ".Pre-Commit-Config.YAML",
     ],
 )
 def test_protected_paths_are_never_write_targets(tmp_path: Path, target: str) -> None:

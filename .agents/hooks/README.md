@@ -53,6 +53,13 @@ A command may auto-allow only when it is made of:
   must come from inside an allowed root or `/dev/null`. Any other `/dev` path
   (`/dev/tcp/...`, `/dev/zero`, `/dev/fd/N`) prompts. A relative target in a
   command that also runs `cd`, `pushd` or `popd` prompts.
+- **Nothing else may change the file system first:** an output redirect to anything
+  but `/dev/null` auto-allows only when every other command that could run before
+  or alongside it (an earlier command on the line, a pipeline neighbour, a
+  `$(...)` in the same command) is a read-only search. Otherwise that earlier
+  command could swap a path for a symlink into `.git/` after the gate checked it
+  (`git checkout b -- lnk && echo x >> lnk/config`). A lone `cmd > /tmp/out.txt`
+  is still fine; `cd x && cmd > out.txt` prompts.
 
 Everything else always prompts, including:
 
@@ -94,15 +101,29 @@ Everything else always prompts, including:
 - **Runners run whatever the repo says:** allow-listing `make *`, `bun run *`,
   `uv run *`, `npm run *` or a test runner means anything that can edit the
   Makefile, `package.json`, `pyproject.toml` or the sources can run code through
-  them. Allow exact targets (`make lint`) where you can.
+  them. Allow exact targets (`make lint`) where you can. The template's own
+  shipped list (`.claude/settings.json`) already includes code-running entries
+  (`uv run *`, `bunx *`, `bun run *`), so the protected-path guarantee below covers
+  the gate's view of redirects, not what those programs do once they run.
+- **Broad patterns match more than the example you had in mind:** a `*` matches
+  any arguments. `gh pr comment * bugbot run*` also matches
+  `gh pr comment 1 --body-file .env bugbot run`, which posts a local file to
+  GitHub. Pin the options you mean.
+- **Withhold rules and expansions:** when any `ask` or `deny` rule exists, a
+  command whose arguments hold an expansion (`"$X"`, `"${X}"`, `"$(...)"`)
+  prompts, because the gate cannot see the value (`git pu"$X"sh` runs
+  `git push`). Withhold rules match both the command after wrappers and
+  assignments are stripped and the command as written, so `Bash(env *)` and
+  `Bash(timeout *)` withhold too.
 
 ### Protected paths
 
 Even inside an allowed root, an allowed command may never redirect output under
 `.git/`, `.claude/`, `.agents/`, `.codex/`, `.cursor/`, `.gemini/`, `.factory/`,
-`.augment/` or `.github/hooks/` in the project root. These hold the gate's own
-policy, every harness's hook registration and VCS hooks; writing there could switch
-the gate off or run code later. The check compares real paths, so a symlink does not
+`.augment/`, `.github/hooks/`, `.husky/` or `.githooks/`, or into
+`.pre-commit-config.yaml`, in the project root. These hold the gate's own policy,
+every harness's hook registration and the hooks `git commit` runs; writing there
+could switch the gate off or run code later. The check compares real paths, so a symlink does not
 get around it, and it ignores case, so `.GIT/hooks` on a case-insensitive file
 system (macOS APFS) is caught too. Root containment, by contrast, is compared
 exactly. Edits made through edit tools are a separate path and are not
@@ -120,8 +141,9 @@ harness's JSON on stdout plus the reason on stderr, always with exit 0.
   read-only set is `grep`, `egrep`, `fgrep`, `rg`, `ag`, `ack`, `cat`, `head`,
   `tail`, `less`, `wc`, `ls`, `git grep`, `git log`, `git show`, `git diff` and
   `git blame`. `rg old_call` passes. These are denied because they run a program
-  or write a file: `rg old_call | sh`, `rg old_call > out.txt`, and any word that
-  is `--pre`, `--pager`, `--hostname-bin`, `--output`, `--ext-diff`, `--textconv`,
+  or write a file: `rg old_call | sh`, `rg old_call > out.txt`, a word holding an
+  expansion (`"$X"`) or an unquoted glob (`*` could match a file named
+  `--pre=sh`), and any word that, with its quotes removed, is `--pre`, `--pager`, `--hostname-bin`, `--output`, `--ext-diff`, `--textconv`,
   `--open-files-in-pager` or an abbreviation of one (`--opt=value` included), or a
   short-option cluster holding `-O`. A banned hit in a command outside the strict
   grammar is always denied.

@@ -49,7 +49,7 @@ import os
 import re
 import unicodedata
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 # The only `NAME=value` assignments (leading a command, or after `env`) that may
@@ -140,12 +140,25 @@ class SimpleCommand:
     are the redirect targets as written (quotes kept); fd duplications such as
     ``2>&1`` are not targets. ``substitutions`` are the simple commands inside
     this command's ``"$(...)"`` bodies.
+
+    ``words`` are the command word and arguments as written (quotes kept,
+    ``$S`` for a substitution body) and ``prefix`` the stripped assignments and
+    wrappers, blanks collapsed. ``expands`` is True when an argument holds an
+    expansion (``$NAME``, ``${NAME}`` or ``$(...)``), whose value the gate
+    cannot see; ``globs`` when an argument holds an unquoted ``*`` or ``?``.
+    ``pipeline`` numbers the pipelines of one list in order, so commands with a
+    lower or equal number may run before or alongside this one.
     """
 
     text: str
     out_targets: tuple[str, ...] = ()
     in_targets: tuple[str, ...] = ()
     substitutions: tuple[SimpleCommand, ...] = ()
+    words: tuple[str, ...] = ()
+    prefix: str = ""
+    expands: bool = False
+    globs: bool = False
+    pipeline: int = 0
 
 
 def splice_continuations(cmd: str) -> str | None:
@@ -247,6 +260,7 @@ class _Parser:
         self.i = 0
         self.names = names
         self.depth = 0
+        self.expansions = 0  # count of `$` expansions read so far
 
     # -- low-level helpers -------------------------------------------------------
 
@@ -286,6 +300,7 @@ class _Parser:
             self.comment()
             return cmds
         cmds += self.pipeline()
+        index = 0
         while True:
             self.blanks()
             op = self.separator()
@@ -296,7 +311,8 @@ class _Parser:
                 self.at_list_end(nested) or (not nested and self.peek() == "#")
             ):
                 break  # a trailing `;` or newline
-            cmds += self.pipeline()
+            index += 1
+            cmds += [replace(c, pipeline=index) for c in self.pipeline()]
         self.blanks()
         if not nested and self.peek() == "#":
             self.comment()
@@ -413,13 +429,16 @@ class _Parser:
 
     def simple(self) -> SimpleCommand:
         subs: list[SimpleCommand] = []
+        start = self.i
         while self.assignment(subs):
             pass
         while self.wrapper(subs):
             pass
+        prefix = " ".join(self.s[start : self.i].split())
         words = [self.command_word()]
         outs: list[str] = []
         ins: list[str] = []
+        expands = globs = False
         while True:
             mark = self.i
             if not self.blanks():
@@ -429,16 +448,31 @@ class _Parser:
                 self.i = mark
                 break
             if not self.redirect(outs, ins):
-                words.append(self.word(subs))
+                text, word_expands, word_globs = self.word(subs)
+                words.append(text)
+                expands = expands or word_expands
+                globs = globs or word_globs
             self.need_delimiter()
-        return SimpleCommand(" ".join(words), tuple(outs), tuple(ins), tuple(subs))
+        return SimpleCommand(
+            " ".join(words),
+            tuple(outs),
+            tuple(ins),
+            tuple(subs),
+            tuple(words),
+            prefix,
+            expands,
+            globs,
+        )
 
     # -- words ---------------------------------------------------------------------
 
-    def word(self, subs: list[SimpleCommand]) -> str:
+    def word(self, subs: list[SimpleCommand]) -> tuple[str, bool, bool]:
+        """Read one word: its text, whether it expands, whether it globs."""
         if self.peek() in ("=", "~", ""):
             raise _Reject  # zsh `=cmd`, tilde expansion
         parts: list[str] = []
+        expansions = self.expansions
+        globs = False
         while True:
             c = self.peek()
             if c == "'":
@@ -446,12 +480,14 @@ class _Parser:
             elif c == '"':
                 parts.append(self.dquoted(subs, allow_expansion=True))
             elif c and c in _PLAIN:
-                parts.append(self.plain_run())
+                run = self.plain_run()
+                globs = globs or "*" in run or "?" in run
+                parts.append(run)
             else:
                 break
         if not parts:
             raise _Reject
-        return "".join(parts)
+        return "".join(parts), self.expansions != expansions, globs
 
     def squoted(self) -> str:
         end = self.s.find("'", self.i + 1)
@@ -487,6 +523,7 @@ class _Parser:
             self.i += 1
 
     def dollar_in_dq(self, subs: list[SimpleCommand]) -> str:
+        self.expansions += 1
         nxt = self.peek(1)
         if nxt == "(":
             if self.depth >= MAX_SUBSTITUTION_DEPTH:
@@ -609,11 +646,22 @@ def _fold(path: str) -> str:
     return "".join(ch for ch in folded if unicodedata.category(ch) != "Cf")
 
 
+def _unquote_target(target: str) -> str:
+    """Strip one matching pair of surrounding quotes, if there is one."""
+    t = target.strip()
+    if len(t) >= 2 and t[0] == t[-1] and t[0] in "'\"":
+        return t[1:-1]
+    return t
+
+
+def is_dev_null(target: str) -> bool:
+    """Return True when a redirect target is exactly ``/dev/null``."""
+    return _unquote_target(target) == "/dev/null"
+
+
 def _resolve_target(target: str, cwd: str, dir_changed: bool) -> tuple[str, str] | None:
     """Return the (joined, real) path of a target, or ``None`` if unverifiable."""
-    t = target.strip()
-    if len(t) >= 2 and (t[:1], t[-1:]) in (('"', '"'), ("'", "'")):
-        t = t[1:-1]
+    t = _unquote_target(target)
     if not t or any(ch in t for ch in "$*?[{`'\"\\~"):
         return None  # unresolved / glob / partial quoting / tilde -> defer
     if not t.startswith("/") and dir_changed:
@@ -666,7 +714,7 @@ def redirect_target_ok(
         True when the target may be written.
     """
     del home
-    if target.strip().strip("'\"") == "/dev/null":
+    if is_dev_null(target):
         return True
     resolved = _resolve_target(target, cwd, dir_changed)
     if resolved is None:
@@ -711,7 +759,7 @@ def input_target_ok(
         True when the target may be read.
     """
     del home
-    if target.strip().strip("'\"") == "/dev/null":
+    if is_dev_null(target):
         return True
     resolved = _resolve_target(target, cwd, dir_changed)
     if resolved is None:
@@ -850,7 +898,7 @@ def is_fully_allowed(
         True when every executed command matches the allow-list.
     """
     parsed = parse_strict(cmd, safe_env)
-    if not parsed:
+    if not parsed or _write_may_follow_another_command(parsed):
         return False
     # Also scan a quote/continuation-free copy: over-detecting a directory
     # change only defers more.
@@ -872,6 +920,31 @@ def is_fully_allowed(
         if not any(pattern_matches(p, simple.text, home) for p in patterns):
             return False
     return True
+
+
+def _write_may_follow_another_command(parsed: Sequence[SimpleCommand]) -> bool:
+    """Return True when a file write could race another command on the line.
+
+    ``realpath`` vets a redirect target before anything runs, so a command that
+    runs earlier on the same line (an earlier list member, a pipeline peer, a
+    substitution) could swap a path component for a symlink into a protected
+    directory first (``git checkout b -- lnk && echo x >> lnk/config``). So an
+    output redirect to anything but ``/dev/null`` is allowable only when every
+    other command that may run before or alongside it is a read-only search.
+    """
+    for top in parsed:
+        group = [
+            other
+            for peer in parsed
+            if peer.pipeline <= top.pipeline
+            for other in iter_commands([peer])
+        ]
+        for writer in iter_commands([top]):
+            if all(is_dev_null(t) for t in writer.out_targets):
+                continue
+            if any(o is not writer and not _is_read_only(o) for o in group):
+                return True
+    return False
 
 
 def simple_commands(
@@ -1005,8 +1078,40 @@ def _blocked(subject: str, banned: BannedPattern) -> Verdict:
     )
 
 
-def _is_read_only(simple: str) -> bool:
-    words = simple.split()
+def _unquote_word(word: str) -> str:
+    """Return the text a grammatical word stands for (quotes and escapes removed)."""
+    out: list[str] = []
+    i, quote = 0, ""
+    while i < len(word):
+        c = word[i]
+        if quote == "'":
+            if c == "'":
+                quote = ""
+            else:
+                out.append(c)
+        elif quote == '"' and c == "\\" and i + 1 < len(word):
+            out.append(word[i + 1])
+            i += 1
+        elif c == quote:
+            quote = ""
+        elif not quote and c in "'\"":
+            quote = c
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _is_read_only(simple: SimpleCommand) -> bool:
+    """Return True when a simple command is a read-only search.
+
+    A word whose value the gate cannot see (an expansion, an unquoted glob that
+    a file named ``--pre=sh`` could match) makes it not read-only. Quotes are
+    removed before the option check, so ``"--pre"=sh`` reads as ``--pre=sh``.
+    """
+    if simple.expands or simple.globs:
+        return False
+    words = [_unquote_word(w) for w in simple.words]
     if not words:
         return False
     two = " ".join(words[:2])
@@ -1015,7 +1120,7 @@ def _is_read_only(simple: str) -> bool:
     # Options that make a "search" run a program or write a file. git (and
     # some search tools) accept any unambiguous abbreviation of a long option,
     # so a prefix of one counts too; a short cluster holding `O` is `-O`.
-    for w in (w.lstrip("\"'") for w in words[1:]):
+    for w in words[1:]:
         name = w.split("=", 1)[0]
         if len(name) > 2 and name.startswith("--"):
             if any(opt.startswith(name) for opt in RUNNER_OPTIONS):
@@ -1079,19 +1184,27 @@ def shell_verdict(
         if not banned.regex.search(command):
             continue
         forgiven = flat is not None and all(
-            _is_read_only(c.text) and all(t == "/dev/null" for t in c.out_targets)
+            _is_read_only(c) and all(is_dev_null(t) for t in c.out_targets)
             for c in flat
         )
         if not forgiven:
             return _blocked("this command", banned)
     if flat is None:
         return Verdict(NO_OPINION)
-    texts = [c.text for c in flat]
-    # Also a quote-free spelling, so `git 'push'` still reads as `git push`.
-    texts += [re.sub("[\"']", "", t) for t in texts]
-    forms = texts + [_normalize_for_withhold(t) for t in texts]
-    if any(pattern_matches(w, c, home) for w in policy.withhold for c in forms):
-        return Verdict(NO_OPINION)
+    if policy.withhold:
+        # A word holding an expansion has a value withhold matching cannot see
+        # (`git pu"$NOPE"sh` runs `git push`), so it defers outright.
+        if any(c.expands for c in flat):
+            return Verdict(NO_OPINION)
+        # The command as stripped and as written (wrappers and assignments kept,
+        # so `env *` / `timeout *` rules match), plus quote-free spellings, so
+        # `git 'push'` still reads as `git push`.
+        texts = [c.text for c in flat]
+        texts += [f"{c.prefix} {c.text}" for c in flat if c.prefix]
+        texts += [re.sub("[\"']", "", t) for t in texts]
+        forms = texts + [_normalize_for_withhold(t) for t in texts]
+        if any(pattern_matches(w, c, home) for w in policy.withhold for c in forms):
+            return Verdict(NO_OPINION)
     if is_fully_allowed(
         command,
         policy.allow,
