@@ -26,7 +26,18 @@ There are two throwaway repos: a **source** that stands in for the template, and
 
 Use **public** repos: rulesets and auto-merge need GitHub Pro or Team on private personal repos, and nothing in them is secret. On a personal account, the setup script must be run by the repo's owner, which is you.
 
-**Already ran steps 1-3 before this rig changed** (your step 4 failed with `SKILLS_NO_MATCHING_SKILLS`)? Keep the scratch repo, its App and secrets. Run step 0 and step 0b below, then skip to **"3b. Re-point an existing scratch repo"**.
+**Already ran steps 1-3 before this rig changed** (your step 4 failed with `SKILLS_NO_MATCHING_SKILLS`)? The two repos are separate. Your **scratch** repo (`skills-update-e2e`, with its App, secrets, lane file and ruleset) stays as it is. The **source** repo (`skills-source-e2e`) is new: it never existed before this rig. Pick one:
+
+- **Keep the scratch repo (less work).** Run step 0 and step 0b, which create the new source, then skip to **"3b. Re-point an existing scratch repo"**, then step 4.
+- **Start fresh.** Delete the old App first: App names are unique across GitHub, so the setup script can't recreate `skills-update-e2e-skills-update` while it exists.
+
+  ```bash
+  gh repo delete "$ME/skills-update-e2e" --yes   # also deletes its secrets and ruleset; needs: gh auth refresh -s delete_repo
+  rm -rf ~/skills-update-e2e
+  open "https://github.com/settings/apps"         # skills-update-e2e-skills-update > Advanced > Delete GitHub App
+  ```
+
+  Then run every step from 0 to 4, skipping 3b.
 
 ## 0. Variables
 
