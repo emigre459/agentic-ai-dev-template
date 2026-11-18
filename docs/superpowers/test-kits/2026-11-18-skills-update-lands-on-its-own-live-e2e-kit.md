@@ -9,6 +9,10 @@ This proves, on real GitHub, what the unit tests can't:
 
 It takes about 20 minutes and needs two browser clicks. Everything happens in a throwaway repo you delete at the end.
 
+The kit has two parts:
+- **Part 1 (now, before merge)** tests this branch on the path an existing repo takes when it adopts the kit. It's rigged, because a repo made from the template can't see this branch yet.
+- **Part 2 (after merge, v0.2.0 and the re-pin)** uses the template as a template, through the README's Start-here interview. See the end of this file.
+
 **Pass criterion:** an "Update agent skills" PR authored by `<slug>[bot]` lands on `main` with no action from you after you start the workflow. Its `check` must run without approval, and its `review-gate` status must read `skills-update: tag-pinned skills only, no review required`.
 
 ## How the test is rigged
@@ -180,4 +184,96 @@ open "https://github.com/settings/apps"   # delete skills-update-e2e-skills-upda
 ## After merge (separate, with your OK)
 
 - The template's own `main` ruleset still has the Copilot rule until it's re-applied: `make finalize_repo_settings TARGET_REPO=emigre459/agentic-ai-dev-template`.
-- Cut v0.2.0 (with #84) and merge the re-pin PR, so repos made from the template get the script and the lane.
+- Cut v0.2.0 (with #84) and merge the re-pin PR, so repos made from the template get the script and the lane. Then run Part 2.
+
+---
+
+# Part 2: use the template as a template (after v0.2.0 and the re-pin)
+
+This tests the path most people take: a new repo made from the template, set up by a coding agent through the README's Start-here prompt.
+
+It proves that:
+- `make init` installs skills that include the setup script and the lane;
+- the agent offers the App at interview question 7 and runs the setup with your two clicks;
+- the lane file lands in the initialization PR;
+- the nightly run is green from day one.
+
+It takes about 30 minutes, mostly the interview and the initialization PR's CI.
+
+**Pass criterion:**
+- the initialization PR contains `.github/skills-update-lane.json` naming `<slug>[bot]`;
+- the repo has both App secrets;
+- a by-hand "skills update" run right after setup is **green** and opens no PR;
+- once a newer release exists, its update PR lands on its own, as in Part 1, Checks 3-4.
+
+## P0. Preconditions
+
+Run these from any checkout of the template. Both must hold, or the new repo gets the old skills:
+
+```bash
+gh release view -R emigre459/agentic-ai-dev-template --json tagName,isDraft --jq '.tagName + " draft=" + (.isDraft|tostring)'   # expect v0.2.0 draft=false (or newer)
+gh api repos/emigre459/agentic-ai-dev-template/contents/skills-lock.json --jq .content | base64 --decode \
+  | python3 -c "import json,sys;print(sorted({e.get('ref') for e in json.load(sys.stdin)['skills'].values()}))"   # expect ['v0.2.0'] (the re-pin merged)
+```
+
+## P1. Create the repo from the template
+
+```bash
+ME=$(gh api user --jq .login)
+REPO2="$ME/skills-update-template-e2e"
+cd ~ && gh repo create "$REPO2" --template emigre459/agentic-ai-dev-template --public --clone && cd skills-update-template-e2e
+```
+
+Use a public repo again: on a free personal account, rulesets and auto-merge need it.
+
+## P2. Run the Start-here interview with your coding agent
+
+1. Open your agent in `~/skills-update-template-e2e`.
+2. Paste the prompt from the README's "Start here: initialize this template" section.
+3. Answer the interview. Any stack works; pick the one you know best. At **question 7**, answer **now**.
+4. When the agent runs `setup_skills_update_app.py`, it should run it in the background or with a long timeout, or ask you to run it in your terminal. **Click Create**, then **click Install** on `skills-update-template-e2e` only.
+
+**Check P2:** before the agent commits, in a second terminal:
+
+```bash
+cd ~/skills-update-template-e2e
+test -f .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py && echo "script installed"
+grep -c 'def skills_update_status' .agents/skills/resolve-pr-concerns/scripts/review_gate.py      # expect 1
+grep 'skills-update@' .github/workflows/skills-update.yml                                         # expect ...@v0.2.0 (or newer)
+cat .github/skills-update-lane.json                                                               # {"branch": "skills-update", "authors": ["<slug>[bot]"]}
+gh secret list -R "$REPO2"                                                                        # both SKILLS_UPDATE_APP_* secrets
+```
+
+If the script file is missing, P0 didn't hold. The agent should then have offered the PAT path instead (that's the fallback for the window before the re-pin), and this test can't continue.
+
+## P3. Merge the initialization PR, then finalize
+
+Let the agent open the initialization PR. Then:
+
+```bash
+PR0=$(gh pr list -R "$REPO2" --state open --json number --jq '.[0].number')
+gh pr view -R "$REPO2" "$PR0" --json files --jq '[.files[].path] | map(select(. == ".github/skills-update-lane.json"))'   # expect the lane file
+```
+
+Squash-merge it once CI is green, as the interview says. Then let the agent run `make finalize_repo_settings TARGET_REPO="$REPO2"`, which turns on the required checks. It can't add a merge queue on a personal repo; that's expected.
+
+## P4. A by-hand run is green, with nothing to update
+
+```bash
+gh workflow run skills-update.yml -R "$REPO2" && sleep 10
+gh run watch -R "$REPO2" $(gh run list -R "$REPO2" --workflow skills-update.yml --limit 1 --json databaseId --jq '.[0].databaseId') --exit-status
+gh run view -R "$REPO2" --log $(gh run list -R "$REPO2" --workflow skills-update.yml --limit 1 --json databaseId --jq '.[0].databaseId') | grep -E 'No skill drift|already up to date|Nothing to do' | head -3
+```
+
+Expected: the run is green, it reports no drift, and it opens no PR. The repo is pinned to the newest release, so there's nothing to update yet. This also proves the App token minted and the install worked: a missing or uninstalled App fails before the drift check.
+
+## P5. When the next release ships: it lands on its own
+
+Leave the repo in place until the template publishes a release newer than its pin (v0.2.1, say). The next nightly run, or a by-hand one as in P4, should then open an "Update agent skills" PR authored by `<slug>[bot]`. Check it with Part 1's Check 3 and Check 4, replacing `REPO` with `REPO2`. Note that this repo's real CI checks replace Part 1's `check` job.
+
+## P6. Cleanup
+
+```bash
+gh repo delete "$REPO2" --yes
+open "https://github.com/settings/apps"   # delete skills-update-template-e2e-skills-update
+```
