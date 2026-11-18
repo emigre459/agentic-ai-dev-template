@@ -74,12 +74,32 @@ THEN run, in order:
   file lands in the initialization commit:
   `cp .agents/skills/resolve-pr-concerns/references/docs-only-paths.example.json .github/docs-only-paths.json`.
   On no, skip this: without that file every PR needs a review.
-- Only if the user answered "now" to question 7:
-  `python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo "$TARGET_REPO"`
-  (add `--org <org>` for an org-owned repo). Walk the user through the two clicks;
-  the lane file it writes lands in the initialization commit. On PAT, show the
-  "Staying up to date" PAT steps. On later, say the nightly run fails until a
-  secret is set, and give the command.
+- Question 7. After `make init` the skills come from the release pinned in
+  `skills-lock.json`, which may predate the App script: if
+  `.agents/skills/upgrade-deps/scripts/setup_skills_update_app.py` doesn't exist,
+  use the PAT path even on "now". Whatever writes `.github/skills-update-lane.json`
+  here, it lands in the initialization commit.
+    - On "now", with the script present:
+      `python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo "$TARGET_REPO"`
+      (add `--org <org>` for an org-owned repo) and walk the user through the two
+      clicks. It waits up to 10 minutes for the Create click and reads the install
+      confirmation from stdin, so run it as a background or long-timeout command,
+      or ask the user to run it in their own terminal. If the wait is cut short,
+      rerun it with `--no-browser` and paste the redirect URL from its form, or the
+      bare `code=` value from the earlier run's redirect, within the hour (GitHub's
+      code expires after one hour). If an App was created but its key was never
+      collected, delete that App (`<repo-name>-skills-update` unless renamed) at
+      https://github.com/settings/apps, or
+      `https://github.com/organizations/<org>/settings/apps` for an org, before
+      retrying: App names are unique.
+    - On PAT: the user makes a fine-grained PAT on a dedicated machine account,
+      never a person, with contents and pull requests: write on the repo. Run
+      `gh secret set SKILLS_UPDATE_TOKEN --repo "$TARGET_REPO"` (it prompts for
+      the value; never put the token in argv), then write the lane file with the
+      machine account's login:
+      `printf '{"branch": "skills-update", "authors": ["%s"]}\n' "<machine-login>" > .github/skills-update-lane.json`.
+    - On later, say the nightly run fails until a secret is set, and give the
+      command.
 - Review `git status`, `git diff --stat`, and `git diff --name-status`. Confirm the
   changes are only legitimate initialization output, then stage and commit:
   `git add -A && git commit -m "chore: initialize from agentic-ai-dev-template"`.
@@ -364,8 +384,11 @@ titled "Update agent skills" from the `skills-update` branch, labeled `dependenc
   where the repo has one), so the PR merges once its required checks pass. That
   needs "Allow auto-merge" (Settings, General), which repos made from the template
   get from `merge-settings.json`. If turning it on fails, the run fails and prints
-  `gh pr merge <N> --auto --squash` to run by hand. Without the opt-in lane (below)
-  the PR still needs its review and the path owner's approval before it merges.
+  `gh pr merge <N> --auto --squash` to run by hand. On a repo with no required
+  checks, `gh` may merge the PR at once instead of waiting for CI, so require the
+  checks (template repos get them from `make finalize_repo_settings`). Without the
+  opt-in lane (below) the PR still needs its review and the path owner's approval
+  before it merges.
 - It runs the skills CLI version the kit pins, never `npx skills` at whatever version
   is newest, so a CLI release can't change your lock or its hash format under you. A
   newer CLI reaches you with the next release of the kit.
@@ -377,7 +400,7 @@ pushes made with that token do not trigger CI):
 | Secret | Effect |
 |--------|--------|
 | `SKILLS_UPDATE_APP_ID` + `SKILLS_UPDATE_APP_PRIVATE_KEY` | A GitHub App you install on the repo, with contents and pull requests: write. Recommended. Its pushes trigger the PR's CI normally. Set both: with only one of them set, the nightly run fails. |
-| `SKILLS_UPDATE_TOKEN` | A fine-grained personal access token with contents and pull requests: write on the repo. Its pushes trigger the PR's CI normally. Own it with a dedicated machine account, never a person: the lane trusts the token's login. |
+| `SKILLS_UPDATE_TOKEN` | A fine-grained personal access token with contents and pull requests: write on the repo. Its pushes trigger the PR's CI normally. Own it with a dedicated machine account, never a person: the lane trusts the token's login. Set it with `gh secret set SKILLS_UPDATE_TOKEN --repo <owner/name>`, which prompts for the value. |
 
 With neither, the nightly run fails with an error that names the setup command. To
 create the App, run:
@@ -388,7 +411,8 @@ python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo ow
 
 Add `--org <org>` for an org-owned repo (a private App can only be installed on the
 account that owns it); `--org-secrets` sets the secrets once for the org, and
-`--existing-app <slug>` reuses an App you already made. It opens GitHub's own pages
+`--existing-app <slug>` adds another of the org's repos to that App and its org
+secrets (a personal repo needs its own App, or a PAT). It opens GitHub's own pages
 and you click Create, then Install. It stores the secrets (the key never touches
 disk), and writes `.github/skills-update-lane.json` for the App's bot login, which
 you commit (`--no-lane` skips it). For a personal repo only the repo's owner can run

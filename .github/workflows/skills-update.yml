@@ -111,7 +111,7 @@ jobs:
           elif [ -n "${SKILLS_UPDATE_TOKEN:-}" ]; then
             value="$SKILLS_UPDATE_TOKEN"
           else
-            echo '::error::No SKILLS_UPDATE_APP_ID/SKILLS_UPDATE_APP_PRIVATE_KEY (GitHub App) or SKILLS_UPDATE_TOKEN (PAT) secret is set. Set one up with: python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo "$GITHUB_REPOSITORY" (see the README, "Staying up to date").'
+            echo "::error::No SKILLS_UPDATE_APP_ID/SKILLS_UPDATE_APP_PRIVATE_KEY (GitHub App) or SKILLS_UPDATE_TOKEN (PAT) secret is set. Set one up with: python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo ${GITHUB_REPOSITORY:-<owner/name>} (add --org <org> for an org-owned repo; see the README, \"Staying up to date\")."
             exit 1
           fi
           echo "::add-mask::$value"

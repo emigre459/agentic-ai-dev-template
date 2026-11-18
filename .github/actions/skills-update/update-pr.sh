@@ -12,7 +12,7 @@
 #   SKILLS_UPDATE_SUMMARY  bump-pins.mjs's JSON; builds the PR body (may be empty or {})
 #
 # Exit codes: 0 nothing to do, or the PR is open and current; 1 a precondition is
-# violated or an unexpected git/gh call failed.
+# violated, an unexpected git/gh call failed, or auto-merge could not be enabled.
 #
 # Needs bash 3.2+ (macOS) and node (for the PR body; always present where the
 # `skills` CLI runs).
@@ -99,9 +99,9 @@ fi
 git commit -q -m "$TITLE"
 
 # --- 2. Push only when needed ----------------------------------------------
-# Every force-push re-parks a GITHUB_TOKEN PR's pull_request CI runs in
-# action_required, so skip the push when the remote branch already holds this
-# exact tree on top of the current base.
+# A force-push re-runs the PR's CI for nothing and resets its checks and its
+# auto-merge, so skip the push when the remote branch already holds this exact
+# tree on top of the current base.
 pushed=false
 new_tree="$(git rev-parse 'HEAD^{tree}')"
 base_sha="$(git rev-parse "refs/remotes/$REMOTE/$BASE")"

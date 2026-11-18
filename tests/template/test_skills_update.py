@@ -1334,12 +1334,18 @@ def test_token_step_fails_with_neither_app_nor_pat(
     tmp_path: Path, env: dict[str, str]
 ) -> None:
     # Even with the workflow's own token around, there is no fallback to it.
-    result, out = _run_token_step(tmp_path, {**env, "GITHUB_TOKEN": "ghs-default"})
+    result, out = _run_token_step(
+        tmp_path,
+        {**env, "GITHUB_TOKEN": "ghs-default", "GITHUB_REPOSITORY": "acme/widgets"},
+    )
     assert result.returncode == 1
     shown = result.stdout + result.stderr
     assert "::error::" in shown
     assert "SKILLS_UPDATE_APP_ID" in shown and "SKILLS_UPDATE_TOKEN" in shown
-    assert "setup_skills_update_app.py" in shown
+    # The setup command names the real repo, not a literal "$GITHUB_REPOSITORY".
+    assert "setup_skills_update_app.py --repo acme/widgets" in shown
+    assert "$GITHUB_REPOSITORY" not in shown
+    assert "--org <org>" in shown
     assert out.read_text() == ""
     assert "ghs-default" not in shown
 
