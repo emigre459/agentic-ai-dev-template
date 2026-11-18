@@ -64,6 +64,10 @@ Interview:
    `upstream` for the template source.
 6. For a backend, show the derived Python import package (`my-project` becomes
    `my_project`) and confirm it is acceptable.
+7. Set up the GitHub App that opens the nightly skills update PR? It takes two
+   clicks (Create, then Install) and lets that PR land on its own. Options: now
+   (recommended) / I'll use a fine-grained PAT / later (the nightly run fails
+   until one is set).
 
 THEN run, in order:
 - Run the non-mutating preflight BEFORE creating anything:
@@ -93,11 +97,37 @@ THEN run, in order:
   file lands in the initialization commit:
   `cp .agents/skills/resolve-pr-concerns/references/docs-only-paths.example.json .github/docs-only-paths.json`.
   On no, skip this: without that file every PR needs a review.
+- Question 7. After `make init` the skills come from the release pinned in
+  `skills-lock.json`, which may predate the App script: if
+  `.agents/skills/upgrade-deps/scripts/setup_skills_update_app.py` doesn't exist,
+  use the PAT path even on "now". Whatever writes `.github/skills-update-lane.json`
+  here, it lands in the initialization commit.
+    - On "now", with the script present:
+      `python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo "$TARGET_REPO"`
+      (add `--org <org>` for an org-owned repo) and walk the user through the two
+      clicks. It waits up to 10 minutes for the Create click and reads the install
+      confirmation from stdin, so run it as a background or long-timeout command,
+      or ask the user to run it in their own terminal. If the wait is cut short,
+      rerun it with `--no-browser` and paste the redirect URL from its form, or the
+      bare `code=` value from the earlier run's redirect, within the hour (GitHub's
+      code expires after one hour). If an App was created but its key was never
+      collected, delete that App (`<repo-name>-skills-update` unless renamed) at
+      https://github.com/settings/apps, or
+      `https://github.com/organizations/<org>/settings/apps` for an org, before
+      retrying: App names are unique.
+    - On PAT: the user makes a fine-grained PAT on a dedicated machine account,
+      never a person, with contents and pull requests: write on the repo. Run
+      `gh secret set SKILLS_UPDATE_TOKEN --repo "$TARGET_REPO"` (it prompts for
+      the value; never put the token in argv), then write the lane file with the
+      machine account's login:
+      `printf '{"branch": "skills-update", "authors": ["%s"]}\n' "<machine-login>" > .github/skills-update-lane.json`.
+    - On later, say the nightly run fails until a secret is set, and give the
+      command.
 - Review `git status`, `git diff --stat`, and `git diff --name-status`. Confirm the
   changes are only legitimate initialization output, then stage and commit:
   `git add -A && git commit -m "chore: initialize from agentic-ai-dev-template"`.
 - Run `make deps && make pr_check` yourself to confirm the stack is green
-  (`pr_check` mirrors CI: lint, security, coverage gate, per-test speed check;
+  (`pr_check` mirrors CI: lint, security, coverage gate;
   fix anything red before proceeding).
 - Reconfirm `git remote get-url origin` matches `TARGET_REPO`, push only there,
   and open the PR explicitly against the same repository:
@@ -148,7 +178,7 @@ settings, skip confirmation prompts, or continue after a preflight failure.
   `.agents/rules/`, plus harness-agnostic skills in `.agents/skills/` (Claude Code
   reads them via the `.claude/skills` symlink; Cursor natively).
 - **`Makefile` orchestration** with identical verbs across stacks
-  (`make deps|format|lint|tests|coverage|test_speed_check|security|pr_check`) and `make cc` to drive
+  (`make deps|format|lint|tests|coverage|security|pr_check`) and `make cc` to drive
   Claude Code.
 - **Canonical repo settings** in `.github/repo-settings/` — applied first with
   `make apply_repo_settings_bootstrap` and finalized after the setup PR merges
@@ -165,7 +195,7 @@ Each skill reads `.agents/skill-config/<skill>.md` when the repo has one (see
 | `build-from-issue` | Issue to merge-ready PR: brainstorm, spec and plan, TDD, E2E, acceptance audit, PR, follow-up | Branch pattern in its skill-config |
 | `plan-issues` | Decompose an idea or epic into issue cards on the board | — |
 | `clean-up-kanban` | Board review, epic template and hygiene rules | — |
-| `resolve-pr-concerns` | Drive an open PR to merge-ready: reviewer rounds, CI, human reviews | `.github/pr-reviewer.json`; `.github/docs-only-paths.json` (opt-in) |
+| `resolve-pr-concerns` | Drive an open PR to merge-ready: reviewer rounds, CI, human reviews | `.github/pr-reviewer.json`; `.github/docs-only-paths.json` and `.github/skills-update-lane.json` (opt-in) |
 | `pr-check` | `make pr_check` under the single-flight lock | — |
 | `run-tests` | `make tests`, the fast iteration target | — |
 | `review-skill` | Validate a skill's structure and quality | — |
@@ -195,7 +225,7 @@ rules:
 - **Hard stops no file can lift.** Only you can, explicitly, in the session:
   - merging without your one-off OK;
   - resolving review threads;
-  - opening or calling ready a PR without the pre-PR check `pr-check-scope` requires (the full `make pr_check` unless the diff qualifies for the light check) and green CI;
+  - opening or calling ready a PR without the pre-PR check `pr-check-scope` requires (the full `make pr_check` unless the diff qualifies for the light check; if the repo has no `pr-check-scope` rule, the full `make pr_check`) and green CI;
   - weakening a gate;
   - deleting issues;
   - skipping a confirmation;
@@ -233,8 +263,8 @@ Each migration file defines both `upgrade()` and `downgrade()`.
 
 ### `.github/pr-reviewer.json`: structured settings
 
-Names the active PR reviewer and its adapter, the review-round caps
-(`review_rounds`) and the per-test speed budget (`test_speed`). To use a reviewer this
+Names the active PR reviewer and its adapter and the review-round caps
+(`review_rounds`). To use a reviewer this
 template doesn't ship, add an adapter entry and point its `notes` at a notes file your
 repo owns. The skill reads it after any bundled notes; a path that leaves the repo or
 names no file is rejected.
@@ -269,6 +299,37 @@ cp .agents/skills/resolve-pr-concerns/references/docs-only-paths.example.json .g
 
 Edit its `dirs`, `dir_suffixes`, `top_level_suffix` and `excluded_names` to fit the
 repo. A malformed file opts out: no PR is docs-only.
+
+### `.github/skills-update-lane.json`: the opt-in skills-update lane
+
+Optional; the template ships none. With it on the default branch, `review-gate`
+passes the nightly update PR on both halves (the path owner's approval and the
+review) as `skills-update: tag-pinned skills only, no review required`, so the PR
+can merge on its own once CI is green. The PR must come from the file's `branch`, be
+opened by one of its `authors`, and touch only `skills-lock.json` and the folders
+(`.agents/skills/<name>/`, `.claude/skills/<name>/`) of skills whose lock `ref` is a
+`vX.Y.Z` tag. Anything else, such as a skill that follows a branch, any other path,
+or anyone else's PR, still needs the owner and the review. CI still runs.
+
+The file names the PR's author:
+
+```json
+{"branch": "skills-update", "authors": ["my-repo-skills-update[bot]"]}
+```
+
+For the App, the login is `<slug>[bot]`, and `setup_skills_update_app.py` writes the
+file for you (see "Staying up to date"). For a PAT, it is the login of the machine
+account that owns the token. To write it by hand, copy the example and edit it:
+
+```bash
+cp .agents/skills/resolve-pr-concerns/references/skills-update-lane.example.json .github/skills-update-lane.json
+```
+
+The tradeoff: upstream skill text reaches your agents without anyone reading it. That
+is why only tag-pinned skills (released upstream versions) qualify. The file must
+never list a person: the lane trusts its `authors`, so a person on it could land
+unreviewed skill changes. A malformed file opts out. A person may still need to
+resolve a reviewer's thread, since the `main` ruleset requires every thread resolved.
 
 ### `.agents/skill-config/<skill>.md`: notes for one skill
 
@@ -331,13 +392,16 @@ every harness. Details, the policy schema and the recipe for adding a harness ar
 ## Installing the skills
 
 A repo created from this template already has the skills: `make init` installs the
-release pinned in the template's `skills-lock.json` (the last re-pinned tag, not
-necessarily the newest release) and keeps that pin. To add them to any other repo,
+release pinned in the template's `.github/template-skills-lock.json` (the last
+re-pinned tag, not necessarily the newest release) and keeps that pin as the new
+repo's `skills-lock.json`. To add them to any other repo,
 install a release by its tag with the [skills CLI](https://github.com/vercel-labs/skills):
 
 ```bash
 npx skills add emigre459/agentic-ai-dev-template#vX.Y.Z
 ```
+
+This needs v0.2.0 or later: earlier releases can't be installed by the skills CLI.
 
 - **Pin a tag, not a branch.** `#vX.Y.Z` records that tag as the skill's `ref` in
   `skills-lock.json`, so the install is reproducible and the update PR (below) moves
@@ -366,19 +430,43 @@ titled "Update agent skills" from the `skills-update` branch, labeled `dependenc
   open update PR is closed, so one made stale by another merge closes within minutes,
   the way a superseded Dependabot PR does. When another merge covers only some of
   the updates, the PR shrinks to the rest.
-- It never merges itself. Review the diff and merge it like any other PR.
+- It turns on auto-merge when it pushes or opens the PR (through the merge queue
+  where the repo has one), so the PR merges once its required checks pass. That
+  needs "Allow auto-merge" (Settings, General), which repos made from the template
+  get from `merge-settings.json`. If turning it on fails, the run fails and prints
+  `gh pr merge <N> --auto --squash` to run by hand. On a repo with no required
+  checks, `gh` may merge the PR at once instead of waiting for CI, so require the
+  checks (template repos get them from `make finalize_repo_settings`). Without the
+  opt-in lane (below) the PR still needs its review and the path owner's approval
+  before it merges.
 - It runs the skills CLI version the kit pins, never `npx skills` at whatever version
   is newest, so a CLI release can't change your lock or its hash format under you. A
   newer CLI reaches you with the next release of the kit.
 
-Which identity opens the PR decides whether its CI runs. Set one of these as a
-repository secret, or neither:
+Which identity opens the PR decides whether its CI runs, so the workflow needs one
+of these as a repository secret (the workflow has no `GITHUB_TOKEN` fallback, because
+pushes made with that token do not trigger CI):
 
 | Secret | Effect |
 |--------|--------|
-| `SKILLS_UPDATE_APP_ID` + `SKILLS_UPDATE_APP_PRIVATE_KEY` | A GitHub App you install on the repo (contents, pull requests and actions: write). Its pushes trigger the PR's CI normally. Set both: with only one of them set, the nightly run fails. |
-| `SKILLS_UPDATE_TOKEN` | A fine-grained personal access token with contents and pull requests: write. Its pushes trigger the PR's CI normally. |
-| neither | The workflow's `GITHUB_TOKEN`. Its pushes do not trigger CI, so the workflow dispatches `ci.yml` on the branch instead, and the PR body says which `pull_request`-only checks (such as `review-gate`) did not run. Turn on Settings, Actions, General, "Allow GitHub Actions to create and approve pull requests", or the PR cannot be opened. |
+| `SKILLS_UPDATE_APP_CLIENT_ID` + `SKILLS_UPDATE_APP_PRIVATE_KEY` | A GitHub App you install on the repo, with contents and pull requests: write. Recommended. Its pushes trigger the PR's CI normally. Set both: with only one of them set, the nightly run fails. Store the App's **Client ID** (a string like `Iv23li...`, on the App's settings page under "Client ID"), not the numeric App ID. |
+| `SKILLS_UPDATE_TOKEN` | A fine-grained personal access token with contents and pull requests: write on the repo. Its pushes trigger the PR's CI normally. Own it with a dedicated machine account, never a person: the lane trusts the token's login. Set it with `gh secret set SKILLS_UPDATE_TOKEN --repo <owner/name>`, which prompts for the value. |
+
+With neither, the nightly run fails with an error that names the setup command. To
+create the App, run:
+
+```bash
+python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo owner/repo
+```
+
+Add `--org <org>` for an org-owned repo (a private App can only be installed on the
+account that owns it); `--org-secrets` sets the secrets once for the org, and
+`--existing-app <slug>` adds another of the org's repos to that App and its org
+secrets (a personal repo needs its own App, or a PAT). It opens GitHub's own pages
+and you click Create, then Install. It stores the secrets (the key never touches
+disk), and writes `.github/skills-update-lane.json` for the App's bot login, which
+you commit (`--no-lane` skips it). For a personal repo only the repo's owner can run
+it. To confirm the install, run "skills update" by hand from the Actions tab.
 
 On public repositories, GitHub disables scheduled workflows after 60 days without
 repository activity (private repositories are not affected). If the nightly PR stops
@@ -408,15 +496,14 @@ it can be a required check:
       - uses: emigre459/agentic-ai-dev-template/.github/actions/skills-drift@vX.Y.Z
 ```
 
-The update action's CI handling needs three things from your CI workflow. On the
-`GITHUB_TOKEN` path it runs `gh workflow run ci.yml --ref skills-update`, and a failure
-there fails the nightly run and leaves the PR without checks, so unmergeable:
+Give the copied workflow a secret to open the PR with (see "Staying up to date"):
 
-- the CI workflow has a `workflow_dispatch:` trigger, so it can be dispatched;
-- it is named `ci.yml`, or the copied workflow passes its name in the action's
-  `ci-workflow:` input;
-- the `skills drift` job runs on `pull_request`, `push` to `main`, `merge_group` and
-  `workflow_dispatch`, so the required check reports on the update PR and in the queue.
+```bash
+python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo owner/repo
+```
+
+Your CI workflow's `skills drift` job must run on `pull_request`, `push` to `main`
+and `merge_group`, so the required check reports on the update PR and in the queue.
 
 Then add `skills drift` to the required checks of your `main` ruleset (repos made
 from the template get this from `make finalize_repo_settings`).
@@ -439,7 +526,8 @@ In your repo it asks the skills CLI itself, at the version the kit pins:
 The CLI reads each skill's source from GitHub, so the job needs network access; it
 uses the job's own token for those reads. A CLI run that fails for another reason, such
 as a network error, fails the check rather than passing it: re-run the job. In this
-template the check runs offline instead, against its own skills.
+template the check runs offline instead, against its own skills and its own lock,
+`.github/template-skills-lock.json`.
 
 When it fails:
 
@@ -500,9 +588,11 @@ PR merged so far.
 
 **In this template**, a release also has a follow-up: the `release` skill offers to
 open a PR on a `release-pin-vX.Y.Z` branch that runs `make skills_lock TAG=vX.Y.Z`,
-recording the tag and hashes in `skills-lock.json`. Repos made from the template start
-from that tag. Merge it like any other PR; it is a separate step because the tag
-cannot exist before the release does.
+recording the tag and hashes in `.github/template-skills-lock.json`. Repos made from
+the template start from that tag, with that file as their `skills-lock.json`. Merge it
+like any other PR; it is a separate step because the tag cannot exist before the
+release does. The template keeps no root `skills-lock.json`: the skills CLI hides every
+skill a source repo's root lock lists, so `npx skills add` would find none.
 
 **In your own repo**, the same flow works once it has the release pieces:
 `.github/release-drafter.yml`, the `release-drafter.yml` and `release.yml` workflows,

@@ -21,6 +21,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+import yaml
 
 _REPO = Path(__file__).resolve().parents[2]
 _CONFIG = _REPO / ".github" / "pr-reviewer.json"
@@ -415,61 +416,6 @@ def test_the_preflight_documents_that_it_never_gates_a_pr_request() -> None:
     assert "separate pool" in doc
 
 
-# --- The speed guard's section shares this file (stack-neutral settings) ---
-
-# test_speed field -> allowed JSON types. Numbers may be written as ints or floats.
-_SPEED_FIELDS: dict[str, tuple[type, ...]] = {
-    "budget_seconds": (int, float),
-    "recheck_fraction": (int, float),
-    "factor_low": (int, float),
-    "factor_high": (int, float),
-    "shared_setup_budget_seconds": (int, float),
-    "default_runner_class": (str,),
-    "reference_seconds": (dict,),
-    "_note": (str,),
-}
-
-
-def _is_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def test_the_test_speed_section_is_well_formed() -> None:
-    """``scripts/check_test_speed.py`` reads its budgets from here, both stacks."""
-    speed = _load_config()["test_speed"]
-    assert set(speed) == set(_SPEED_FIELDS), sorted(set(speed) ^ set(_SPEED_FIELDS))
-    for field, types in _SPEED_FIELDS.items():
-        value = speed[field]
-        assert isinstance(value, types) and not isinstance(value, bool), field
-    for field in ("budget_seconds", "shared_setup_budget_seconds", "factor_low"):
-        assert speed[field] > 0, field
-    assert 0 < speed["recheck_fraction"] <= 1
-    assert speed["factor_low"] <= 1 <= speed["factor_high"]
-    references = speed["reference_seconds"]
-    assert references and all(
-        isinstance(name, str) and name and _is_number(secs) and secs > 0
-        for name, secs in references.items()
-    ), references
-    assert speed["default_runner_class"] in references
-    assert "\n" not in speed["_note"] and speed["_note"].strip()
-
-
-def test_the_test_speed_section_holds_the_agreed_budget() -> None:
-    speed = _load_config()["test_speed"]
-    assert speed["budget_seconds"] == 10
-    assert (speed["factor_low"], speed["factor_high"]) == (0.5, 2.0)
-    assert speed["default_runner_class"] == "ubuntu-latest"
-
-
-def test_every_loader_accepts_the_real_config_with_test_speed() -> None:
-    """The reviewer loaders ignore the speed guard's section in the real file."""
-    assert "test_speed" in _load_config()
-    state = _load_state()
-    for key in _KEYS:
-        assert state.load_reviewer(_CONFIG, key=key).key == key
-    assert state.load_round_caps(_CONFIG).local_before_final >= 1
-
-
 # --- The downstream review handling the prose must carry (helpers are bundled) ---
 
 _STACK_REF = _SKILLS / "resolve-pr-concerns" / "references" / "stacked-prs.md"
@@ -492,7 +438,6 @@ _SH_HELPER_RE = re.compile(
         "trigger_allowed",
         "final_review_due",
         "min_remaining",
-        "test_speed_check",
     ],
 )
 def test_the_skill_names_each_bundled_review_signal(phrase: str) -> None:
@@ -719,3 +664,31 @@ def test_single_flight_full_check_is_allow_listed() -> None:
         f"Add {expected!r} to .claude/settings.json permissions.allow so agents can "
         "run the locked full check without a prompt."
     )
+
+
+_ANCHORED_LOCK = (
+    "python3 .agents/skills/resolve-pr-concerns/scripts/single_flight.py "
+    "suite -- make pr_check"
+)
+
+
+def test_pr_check_allow_lists_only_the_anchored_lock_command() -> None:
+    """``*single_flight.py`` would allow a planted script of that name anywhere."""
+    lines = (_SKILLS / "pr-check" / "SKILL.md").read_text().splitlines()
+    end = lines.index("---", 1)
+    allowed = str(yaml.safe_load("\n".join(lines[1:end]))["allowed-tools"])
+    body = "\n".join(lines[end + 1 :])
+    assert f"Bash({_ANCHORED_LOCK})" in allowed
+    assert "*single_flight.py" not in allowed
+    # The body keeps the placeholder (validate.py: a skill runs only its own scripts
+    # by a concrete path) and names the canonical dir the entry is anchored to.
+    assert "<resolve-pr-concerns skill dir>/scripts/single_flight.py" in body
+    assert "`.agents/skills/resolve-pr-concerns`" in body
+
+
+def test_release_check_skips_repos_without_release_pieces() -> None:
+    """No release and no drafter config: say so, suggest no version."""
+    step2 = _section(_flat(_BUILD), "## Step 2:")
+    assert "no published release and no `.github/release-drafter.yml`" in step2
+    assert "skip the bump suggestion" in step2
+    assert "suggest the first one, `v0.1.0`" in step2  # a drafter config keeps it

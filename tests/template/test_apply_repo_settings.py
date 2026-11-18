@@ -348,6 +348,17 @@ def test_shipped_ruleset_does_not_require_up_to_date_branches() -> None:
     assert checks["parameters"]["strict_required_status_checks_policy"] is False
 
 
+def test_shipped_ruleset_has_no_copilot_review_rule() -> None:
+    """review-gate (.github/pr-reviewer.json) is the single source of review truth.
+
+    Thread resolution stays required; only the Copilot review rule is dropped.
+    """
+    ruleset = load_desired(REPO_SETTINGS).ruleset
+    assert all(r["type"] != "copilot_code_review" for r in ruleset["rules"])
+    [pr] = [r for r in ruleset["rules"] if r["type"] == "pull_request"]
+    assert pr["parameters"]["required_review_thread_resolution"] is True
+
+
 def test_bootstrap_phase_defers_the_merge_queue() -> None:
     """A queue with no required checks would merge untested; defer both together."""
     desired: dict = {

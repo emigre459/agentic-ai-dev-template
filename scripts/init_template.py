@@ -370,6 +370,12 @@ def _rename_python_package(root: Path, project_name: str) -> None:
 # --- Skills pinned to the template's latest release (#49, layer L1) -------------
 
 _TEMPLATE_SOURCE = "emigre459/agentic-ai-dev-template"
+# The template's own pin. It lives under .github/, not at the root, because the
+# skills CLI hides every skill a source repo's root skills-lock.json lists (it
+# reads them as installed copies), so a root lock would stop `npx skills add`
+# from finding the template's skills. Init moves it to the new repo's root,
+# where every consumer-side reader (drift check, update PR, lane) expects it.
+_TEMPLATE_LOCK_FILE = ".github/template-skills-lock.json"
 _LOCK_FILE = "skills-lock.json"
 _HASH_SCRIPT = Path(".github") / "actions" / "skills-drift" / "skills-lock.mjs"
 _SKILLS_DIR = Path(".agents") / "skills"
@@ -457,9 +463,15 @@ def _skill_hash(root: Path, skill_dir: Path, runner: Callable[..., Any]) -> str:
     return str(result.stdout).strip()
 
 
-def _read_skills_lock(root: Path) -> dict[str, Any] | None:
-    """Return the parsed ``skills-lock.json`` under ``root``, or None when absent."""
-    path = root / _LOCK_FILE
+def _read_skills_lock(
+    root: Path, lock_file: str = _TEMPLATE_LOCK_FILE
+) -> dict[str, Any] | None:
+    """Return the parsed lock at ``root / lock_file``, or None when absent.
+
+    ``lock_file`` defaults to the template's own lock; after
+    :func:`_move_lock_to_consumer_path` the new repo's lock is ``_LOCK_FILE``.
+    """
+    path = root / lock_file
     if not path.is_file():
         return None
     lock: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
@@ -475,7 +487,7 @@ def _check_ref(ref: str) -> str:
     """Return ``ref`` if it is a release tag (``vX.Y.Z``); raise RuntimeError if not."""
     if not isinstance(ref, str) or not _REF_RE.fullmatch(ref):
         raise RuntimeError(
-            f"{_LOCK_FILE} has ref {ref!r}, which is not a release tag like v1.2.3"
+            f"{_TEMPLATE_LOCK_FILE} has ref {ref!r}, which is not a release tag like v1.2.3"
         )
     return ref
 
@@ -494,7 +506,7 @@ def _lock_ref(lock: dict[str, Any] | None) -> str | None:
     refs = {entry.get("ref") for entry in lock.get("skills", {}).values()}
     if len(refs) > 1:
         raise RuntimeError(
-            f"{_LOCK_FILE} entries disagree on `ref` ({sorted(map(str, refs))}); "
+            f"{_TEMPLATE_LOCK_FILE} entries disagree on `ref` ({sorted(map(str, refs))}); "
             "every template skill must be pinned to the same release."
         )
     ref = next(iter(refs), None)
@@ -516,9 +528,13 @@ def _pinned_skills(lock: dict[str, Any]) -> dict[tuple[str, str], list[str]]:
             continue
         source = entry.get("source")
         if not _NAME_RE.fullmatch(name) or name in (".", ".."):
-            raise RuntimeError(f"{_LOCK_FILE} has an invalid skill name: {name!r}")
+            raise RuntimeError(
+                f"{_TEMPLATE_LOCK_FILE} has an invalid skill name: {name!r}"
+            )
         if not isinstance(source, str) or not _SOURCE_RE.fullmatch(source):
-            raise RuntimeError(f"{_LOCK_FILE}: skill {name!r} has invalid source")
+            raise RuntimeError(
+                f"{_TEMPLATE_LOCK_FILE}: skill {name!r} has invalid source"
+            )
         pinned.setdefault((source, _check_ref(entry["ref"])), []).append(name)
     return pinned
 
@@ -595,7 +611,7 @@ def _fetch_pinned_skills(
     root
         Repository root being initialized.
     lock
-        Parsed ``skills-lock.json``, or None.
+        Parsed template lock (``.github/template-skills-lock.json``), or None.
     scratch
         Existing directory for the fetched repo and extracted trees; the returned
         folders live in it, so it must outlive their use.
@@ -637,7 +653,7 @@ def _fetch_pinned_skills(
             if actual != expected:
                 raise RuntimeError(
                     f"skill {name!r} at {source}@{ref} hashes to {actual}, but "
-                    f"{_LOCK_FILE} has {expected}; refusing to initialize "
+                    f"{_TEMPLATE_LOCK_FILE} has {expected}; refusing to initialize "
                     "from a release that does not match the lock."
                 )
             verified[name] = extracted
@@ -673,10 +689,23 @@ def _install_pinned_skills(
 STACK_ONLY_SKILLS: dict[str, str] = {"write-teaching-notebook": "python"}
 
 
+def _move_lock_to_consumer_path(root: Path) -> None:
+    """Move the template's lock to ``skills-lock.json``, the new repo's own lock.
+
+    The bytes are kept as they are; a missing template lock (no skills pinned)
+    leaves nothing behind. Runs after the pinned skills are fetched and verified,
+    so a failed init leaves the template lock where a retry reads it.
+    """
+    template_lock = root / _TEMPLATE_LOCK_FILE
+    if template_lock.is_file():
+        template_lock.replace(root / _LOCK_FILE)
+
+
 def _drop_stack_only_skills(root: Path, stack: str) -> None:
     """Remove every skill in ``STACK_ONLY_SKILLS`` whose stack is not ``stack``.
 
-    Deletes ``.agents/skills/<name>`` and the skill's ``skills-lock.json`` entry,
+    Deletes ``.agents/skills/<name>`` and the skill's entry in the new repo's
+    ``skills-lock.json`` (so it runs after :func:`_move_lock_to_consumer_path`),
     so the drift check does not report a locked skill missing from the tree. The
     lock is rewritten the way the skills CLI writes it (2-space indent, final
     newline), and only when an entry was removed.
@@ -693,7 +722,7 @@ def _drop_stack_only_skills(root: Path, stack: str) -> None:
         folder = root / _SKILLS_DIR / name
         if folder.is_dir() and not folder.is_symlink():
             shutil.rmtree(folder)
-    lock = _read_skills_lock(root)
+    lock = _read_skills_lock(root, _LOCK_FILE)
     if lock is None or not dropped & set(lock.get("skills", {})):
         return
     lock["skills"] = {
@@ -873,8 +902,10 @@ def _collapse_template(
     # composite actions. All but the stack-only drop are no-ops before the first
     # release (no `ref`). They
     # come before settings and self-destruct so the machinery is still present if
-    # a later step fails.
+    # a later step fails. The template's .github/ lock becomes the new repo's root
+    # skills-lock.json first, so the stack-only drop edits the lock that ships.
     _install_pinned_skills(root, verified_skills, locked_skills)
+    _move_lock_to_consumer_path(root)
     _drop_stack_only_skills(root, stack)
     _point_actions_at_release(root, ref)
 
@@ -902,6 +933,7 @@ def _collapse_template(
     to_remove = [
         root / "scripts" / "init_template.py",
         root / "scripts" / "preflight_init.py",
+        root / "scripts" / "check_skills_installable.py",
         root / "tests" / "template",
     ]
     if stack == "react":

@@ -5,10 +5,9 @@ alwaysApply: true
 
 # Scope the pre-PR check to what the diff can break
 
-`make pr_check` is the local mirror of CI: lint, security, the full coverage run and
-(where the repo has one) the per-test speed check. It can take many minutes, and CI
-runs the required checks again on every push. For a diff that can't change what the
-full suite sees, the local run only repeats CI.
+`make pr_check` is the local mirror of CI: lint, security and the full coverage run.
+It can take many minutes, and CI runs the required checks again on every push. For a
+diff that can't change what the full suite sees, the local run only repeats CI.
 
 This rule says which check to run before opening a PR. It never lowers the bar for
 merging: the required CI checks and review still gate every PR.

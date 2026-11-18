@@ -280,7 +280,7 @@ def test_readme_covers_install_pin_update_telemetry_release() -> None:
         "DISABLE_TELEMETRY=1",
         "#v",
         "SKILLS_UPDATE_TOKEN",
-        "SKILLS_UPDATE_APP_ID",
+        "SKILLS_UPDATE_APP_CLIENT_ID",
         "skills drift",
         "release.yml",
         "skills-update",
@@ -347,8 +347,8 @@ def test_readme_states_the_adoption_and_schedule_caveats() -> None:
     readme = " ".join(_readme().split())
     assert "On public repositories, GitHub disables scheduled workflows" in readme
     assert "not necessarily the newest release" in readme
-    assert "`workflow_dispatch:` trigger" in readme
-    assert "`ci-workflow:`" in readme
+    assert "`workflow_dispatch:` trigger" not in readme
+    assert "`ci-workflow:`" not in readme
     assert "`merge_group`" in readme
 
 

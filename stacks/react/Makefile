@@ -22,13 +22,6 @@ tests: ## Run Vitest
 coverage: ## Vitest with istanbul coverage + 80% gate; writes test-results.xml (JUnit)
 	@bunx vitest run --coverage --reporter=default --reporter=junit --outputFile.junit=test-results.xml
 
-.PHONY: test_speed_check
-# Reads the last `make coverage` run's JUnit. Re-runs each suspect alone, timed
-# from its own JUnit ({junit}). The budget lives in .github/pr-reviewer.json ->
-# test_speed.
-test_speed_check: ## Per-test speed guard over the last coverage run
-	@python3 $(REPO_ROOT)/scripts/check_test_speed.py --junit test-results.xml --allowlist slow_test_allowlist.txt --config $(REPO_ROOT)/.github/pr-reviewer.json --rerun 'bunx vitest run {test} --reporter=junit --outputFile.junit={junit}'
-
 # Ignored advisories (each one weakens this gate; keep the list short):
 # - GHSA-fc5q-39xc-vjpf: picomatch <=4.0.7 ReDoS. No patched release exists
 #   (4.0.7 is the latest), and it reaches this stack only through dev tooling
@@ -39,7 +32,7 @@ security: ## Dependency CVE audit
 	@bun audit --ignore=GHSA-fc5q-39xc-vjpf
 
 .PHONY: pr_check
-# Coverage, THEN the speed check, in the recipe: the check reads the JUnit file
-# coverage writes, an order `make -j` would not guarantee between prerequisites.
-pr_check: lint security ## lint + security + coverage + per-test speed check
-	@$(MAKE) --no-print-directory coverage && $(MAKE) --no-print-directory test_speed_check
+# Coverage in the recipe, after the prerequisites: a red lint or security scan
+# stops the check before the slow suite runs.
+pr_check: lint security ## lint + security + coverage
+	@$(MAKE) --no-print-directory coverage

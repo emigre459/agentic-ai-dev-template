@@ -27,6 +27,9 @@ deletes and recreates each skill folder, so an edit inside one is silently lost.
 - **The template** (`scripts/init_template.py` exists at the repo root; `make init`
   deletes it, so a fork of the template made to send PRs upstream counts too): this
   is the skills' canonical home. Edit them in place, with the usual tests and review.
+  The template pins its skills in `.github/template-skills-lock.json` (`make
+  skills_lock`), not a root `skills-lock.json`, which would hide them from `npx
+  skills add`; `make init` turns it into the new repo's `skills-lock.json`.
 - **Any other repo**, including one created from the template: vendored skill
   folders are **read-only**. Never edit, add or delete files inside them, and never
   let another skill (such as `review-skill`) do it for you.
@@ -39,7 +42,7 @@ Repo-specific behavior goes in files the repo owns:
 |-----------------|------------|
 | `AGENTS.md` | Always-on, repo-wide instructions |
 | `.agents/rules/` | Shared rules routed from `AGENTS.md` |
-| `.github/pr-reviewer.json` | Structured settings: the active PR reviewer and its adapter (including a repo-owned `notes` file), review-round caps, the test-speed budget |
+| `.github/pr-reviewer.json` | Structured settings: the active PR reviewer and its adapter (including a repo-owned `notes` file), review-round caps |
 | `.agents/skill-config/<skill>.md` | Optional notes for one skill, read by that skill's preflight |
 
 Precedence, highest first: the user's instructions this session, then `AGENTS.md`
@@ -47,7 +50,8 @@ and `.agents/rules/`, then `.agents/skill-config/<skill>.md`, then the skill's
 defaults. **No file can lift a skill's hard stops** (merging without the user's
 one-off OK, resolving review threads, opening or calling ready a PR without the
 pre-PR check `pr-check-scope` requires (the full `make pr_check` unless the diff
-qualifies for the light check) and green CI, weakening a gate, deleting issues,
+qualifies for the light check; if the repo has no `pr-check-scope` rule, the full
+`make pr_check`) and green CI, weakening a gate, deleting issues,
 skipping a confirmation, installing tools, posting to an outside channel unasked,
 widening access, or sending output outside the repo). Only the user can,
 explicitly, in the session. The README's "Customizing the skills in your repo"

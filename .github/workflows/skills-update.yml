@@ -2,13 +2,12 @@ name: skills update
 
 # Nightly, and after a merge to main that changes skills-lock.json: open (or refresh) one
 # "Update agent skills" PR from the skills CLI's newest releases, or close it once
-# main already has them. The PR never merges itself. Secrets, all optional, pick the
-# identity that pushes the branch and opens the PR:
-#   SKILLS_UPDATE_APP_ID + SKILLS_UPDATE_APP_PRIVATE_KEY  a GitHub App (its push
-#                                                         triggers the PR's CI)
-#   SKILLS_UPDATE_TOKEN                                   a fine-grained PAT (same)
-# With neither, the run uses GITHUB_TOKEN, whose pushes do not trigger CI, so the
-# action dispatches ci.yml on the branch instead.
+# main already has them. The PR enables auto-merge, so it lands once its required
+# checks pass. One of these secrets sets the identity that pushes the branch and
+# opens the PR (its push triggers the PR's CI); with neither, the run fails:
+#   SKILLS_UPDATE_APP_CLIENT_ID + SKILLS_UPDATE_APP_PRIVATE_KEY  a GitHub App
+#   SKILLS_UPDATE_TOKEN                                         a fine-grained PAT
+# GITHUB_TOKEN is not an option: its pushes do not trigger CI.
 #
 # `make init` rewrites the local action path below to the remote action at the
 # skills release the new repo starts on; keep the `uses:` line unquoted.
@@ -43,7 +42,6 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      actions: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -73,15 +71,15 @@ jobs:
         id: secrets
         if: steps.template.outputs.is_template != 'true'
         env:
-          APP_ID: ${{ secrets.SKILLS_UPDATE_APP_ID }}
+          APP_CLIENT_ID: ${{ secrets.SKILLS_UPDATE_APP_CLIENT_ID }}
           APP_KEY: ${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}
           PAT: ${{ secrets.SKILLS_UPDATE_TOKEN }}
         run: |
           has_app=false
-          if [ -n "${APP_ID:-}" ] && [ -n "${APP_KEY:-}" ]; then
+          if [ -n "${APP_CLIENT_ID:-}" ] && [ -n "${APP_KEY:-}" ]; then
             has_app=true
-          elif [ -n "${APP_ID:-}" ] || [ -n "${APP_KEY:-}" ]; then
-            echo "::error::Only one of SKILLS_UPDATE_APP_ID and SKILLS_UPDATE_APP_PRIVATE_KEY is set. Set both to use the GitHub App, or delete the one that is set."
+          elif [ -n "${APP_CLIENT_ID:-}" ] || [ -n "${APP_KEY:-}" ]; then
+            echo "::error::Only one of SKILLS_UPDATE_APP_CLIENT_ID and SKILLS_UPDATE_APP_PRIVATE_KEY is set. Set both to use the GitHub App, or delete the one that is set."
             exit 1
           fi
           has_pat=false
@@ -95,33 +93,30 @@ jobs:
           && steps.secrets.outputs.has_app == 'true'
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.SKILLS_UPDATE_APP_ID }}
+          client-id: ${{ secrets.SKILLS_UPDATE_APP_CLIENT_ID }}
           private-key: ${{ secrets.SKILLS_UPDATE_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
-          permission-actions: write
-      # App token, else the PAT, else the workflow's GITHUB_TOKEN. Only the last
-      # needs ci.yml dispatched: App and PAT pushes trigger pull_request CI.
+      # App token, else the PAT, else fail: the workflow's GITHUB_TOKEN is no
+      # fallback, because its pushes do not trigger the PR's CI.
       - name: Choose the token
         id: token
         if: steps.template.outputs.is_template != 'true'
         env:
           APP_TOKEN: ${{ steps.app.outputs.token }}
           SKILLS_UPDATE_TOKEN: ${{ secrets.SKILLS_UPDATE_TOKEN }}
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           if [ -n "${APP_TOKEN:-}" ]; then
-            value="$APP_TOKEN"; dispatch=false
+            value="$APP_TOKEN"
           elif [ -n "${SKILLS_UPDATE_TOKEN:-}" ]; then
-            value="$SKILLS_UPDATE_TOKEN"; dispatch=false
+            value="$SKILLS_UPDATE_TOKEN"
           else
-            value="$GITHUB_TOKEN"; dispatch=true
+            echo "::error::No SKILLS_UPDATE_APP_CLIENT_ID/SKILLS_UPDATE_APP_PRIVATE_KEY (GitHub App) or SKILLS_UPDATE_TOKEN (PAT) secret is set. Set one up with: python3 .agents/skills/upgrade-deps/scripts/setup_skills_update_app.py --repo ${GITHUB_REPOSITORY:-<owner/name>} (add --org <org> for an org-owned repo; see the README, \"Staying up to date\")."
+            exit 1
           fi
           echo "::add-mask::$value"
           echo "value=$value" >> "$GITHUB_OUTPUT"
-          echo "dispatch=$dispatch" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/skills-update
         if: steps.template.outputs.is_template != 'true'
         with:
           token: ${{ steps.token.outputs.value }}
-          dispatch-ci: ${{ steps.token.outputs.dispatch }}

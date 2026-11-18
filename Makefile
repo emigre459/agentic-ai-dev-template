@@ -36,7 +36,7 @@ machinery_tests: ## Test the template machinery
 	@uv run pytest tests/template -v --tb=short
 
 .PHONY: skills_lock
-skills_lock: ## Regenerate skills-lock.json for the template's skills (TAG=vX.Y.Z records a release)
+skills_lock: ## Regenerate .github/template-skills-lock.json, the template's skill pin (TAG=vX.Y.Z records a release)
 	@node .github/actions/skills-drift/skills-lock.mjs write --root .$(if $(TAG), --tag $(TAG))
 
 .PHONY: deps
@@ -69,16 +69,11 @@ security: ## Security scan for both stacks
 	@$(MAKE) -C stacks/python security
 	@$(MAKE) -C stacks/react security
 
-.PHONY: test_speed_check
-test_speed_check: ## Per-test speed guard for both stacks (reads each stack's last coverage run)
-	@$(MAKE) -C stacks/python test_speed_check
-	@$(MAKE) -C stacks/react test_speed_check
-
 .PHONY: pr_check
-# Coverage, THEN the speed check, in the recipe: the check reads the JUnit files
-# coverage writes, an order `make -j` would not guarantee between prerequisites.
-pr_check: lint machinery_tests security ## lint + machinery tests + security + both stacks' coverage + speed check
-	@$(MAKE) --no-print-directory coverage && $(MAKE) --no-print-directory test_speed_check
+# Coverage in the recipe, after the prerequisites: a red lint, machinery test or
+# security scan stops the check before the slow suites run.
+pr_check: lint machinery_tests security ## lint + machinery tests + security + both stacks' coverage
+	@$(MAKE) --no-print-directory coverage
 
 .PHONY: init
 # The init inputs are read from the environment as $$VAR (shell), NOT interpolated

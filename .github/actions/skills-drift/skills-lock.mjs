@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Hash and drift-check vendored agent skills against skills-lock.json.
+// Hash and drift-check vendored agent skills against their lock: a repo's
+// skills-lock.json, or the template's own .github/template-skills-lock.json.
 //
 // The hash is the one the `skills` CLI writes as `computedHash` in a version-2
 // lock. It is a port of `computeSkillFolderHash` / `hashSkillFiles` from
@@ -28,7 +29,13 @@
 // and pass. A skill whose folder (with a SKILL.md) is gone is reported as
 // MISSING before the CLI runs, since the CLI reads it as an update too.
 //
-// `check --template` is for the template repo itself and never runs the CLI:
+// `check --template` and `write` are for the template repo itself, whose lock is
+// .github/template-skills-lock.json, not a root skills-lock.json: the skills CLI
+// hides every skill a source repo's root lock lists (it reads them as installed
+// copies), so a root lock would stop `npx skills add` from finding the
+// template's skills. `make init` moves it to the new repo's skills-lock.json.
+//
+// `check --template` never runs the CLI:
 // the CLI compares a lock entry without a tag against the source's default
 // branch, so every PR that edits a skill would read as an "update". An entry
 // with a `ref` is verified against that tag's copy of the skill folder (the tag
@@ -48,12 +55,15 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { promisify, stripVTControlCharacters } from 'node:util';
 
 const run = promisify(execFile);
 
+// A repo that installed the skills (plain `check`).
 const LOCK_FILE = 'skills-lock.json';
+// The template's own lock (`check --template` and `write`).
+const TEMPLATE_LOCK_FILE = '.github/template-skills-lock.json';
 // The lock version this script writes and template mode requires. Plain `check`
 // also accepts 1, which the CLI migrates.
 const LOCK_VERSION = 2;
@@ -221,9 +231,14 @@ async function hashSkillInWorkingTree(root, name) {
   return files.length === 0 ? null : digestFiles(files);
 }
 
-/** Read and validate skills-lock.json under `root`; throw UsageError if unusable. */
+/** Path of the lock `check`/`write` use under `root`: the template's or a consumer's. */
+function lockPathFor(root, { template }) {
+  return join(root, template ? TEMPLATE_LOCK_FILE : LOCK_FILE);
+}
+
+/** Read and validate the lock under `root`; throw UsageError if unusable. */
 async function readLock(root, { template }) {
-  const lockPath = join(root, LOCK_FILE);
+  const lockPath = lockPathFor(root, { template });
   let text;
   try {
     text = await readFile(lockPath, 'utf-8');
@@ -333,7 +348,7 @@ async function templateProblems(root, lock) {
         problems.push(`MISSING ${name}: no ${TEMPLATE_SKILLS_DIR}/${name} at tag ${entry.ref}`);
       } else if (actual !== entry.computedHash) {
         problems.push(
-          `DRIFT ${name}: ${TEMPLATE_SKILLS_DIR}/${name} at ${entry.ref} hashes to ${actual}, skills-lock.json has ${entry.computedHash}`,
+          `DRIFT ${name}: ${TEMPLATE_SKILLS_DIR}/${name} at ${entry.ref} hashes to ${actual}, ${TEMPLATE_LOCK_FILE} has ${entry.computedHash}`,
         );
       }
       continue;
@@ -343,7 +358,7 @@ async function templateProblems(root, lock) {
       problems.push(`MISSING ${name}: no files in ${TEMPLATE_SKILLS_DIR}/${name}`);
     } else if (actual !== entry.computedHash) {
       problems.push(
-        `DRIFT ${name}: ${TEMPLATE_SKILLS_DIR}/${name} hashes to ${actual}, skills-lock.json has ${entry.computedHash}`,
+        `DRIFT ${name}: ${TEMPLATE_SKILLS_DIR}/${name} hashes to ${actual}, ${TEMPLATE_LOCK_FILE} has ${entry.computedHash}`,
       );
     }
   }
@@ -432,8 +447,8 @@ async function check(root, { template }) {
     const remedy = ref === undefined ? '`make skills_lock`' : `\`make skills_lock TAG=${ref}\` (or TAG=<newest release tag>)`;
     console.log(
       [
-        'skills-lock.json no longer matches the template skills. If the change is',
-        `intended, run ${remedy} and commit skills-lock.json.`,
+        `${TEMPLATE_LOCK_FILE} no longer matches the template skills. If the change is`,
+        `intended, run ${remedy} and commit ${TEMPLATE_LOCK_FILE}.`,
       ].join('\n'),
     );
   } else {
@@ -500,7 +515,7 @@ async function listTemplateSkillsAtTag(root, tag) {
  * conflict) counts as pinned when its text mentions a "ref" key.
  */
 async function assertNotPinned(root) {
-  const lockPath = join(root, LOCK_FILE);
+  const lockPath = lockPathFor(root, { template: true });
   let text;
   try {
     text = await readFile(lockPath, 'utf-8');
@@ -521,12 +536,12 @@ async function assertNotPinned(root) {
   if (pinned) {
     throw new UsageError(
       `${lockPath} is pinned to a release (its entries have a "ref"); writing it without --tag would un-pin it. ` +
-        'Pass --tag <newest release tag> (make skills_lock TAG=vX.Y.Z), or delete skills-lock.json first if you mean to un-pin.',
+        `Pass --tag <newest release tag> (make skills_lock TAG=vX.Y.Z), or delete ${TEMPLATE_LOCK_FILE} first if you mean to un-pin.`,
     );
   }
 }
 
-/** Regenerate skills-lock.json for the template's own skills; return the exit code. */
+/** Regenerate the template's own lock (TEMPLATE_LOCK_FILE); return the exit code. */
 async function write(root, { tag }) {
   let names;
   if (tag !== null) {
@@ -561,7 +576,9 @@ async function write(root, { tag }) {
     };
   }
   const lock = { version: LOCK_VERSION, skills };
-  await writeFile(join(root, LOCK_FILE), `${JSON.stringify(lock, null, 2)}\n`);
+  const lockPath = lockPathFor(root, { template: true });
+  await mkdir(dirname(lockPath), { recursive: true });
+  await writeFile(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
   return 0;
 }
 
