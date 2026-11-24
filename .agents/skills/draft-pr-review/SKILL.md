@@ -230,6 +230,22 @@ a handoff note doesn't already give.
      each citing the first ("same as #<lower> `config.py:176`").
 6. **One pending review per PR**, posted as in §4. A later layer may add threads to a
    lower PR's existing pending review.
-7. **Report per layer** (§6 for each), plus one stack-level line: the merge order,
-   which layers block which, and whether a lower-layer fix will force a restack that
-   shifts the upper layers' anchors.
+7. **Report per layer** (§6 for each), then end with the **stack table**, the default
+   closing output of a stack review. It lets the user see every layer's outcome, and
+   act on it, in one place. One row per layer, bottom-up (merge order):
+
+   | Layer | PR | Pending comments | Recommended verdict | Suggested submit summary |
+   |---|---|---|---|---|
+   | 1 | #<N> <short title> | <count> (<k> Should fix, <k> Nit, …) | Request changes / Approve | <the §6 paste-ready summary, in full> |
+
+   - **Pending comments:** the count in the pending review after this round, checked
+     against the review node, broken down by severity.
+   - **Suggested submit summary:** the full text the user can paste into that PR's
+     submit box, never truncated. Keep it free of `|` and line breaks so the table
+     renders.
+   - **Threads waiting for the user's OK to resolve** (§5): add a column naming them,
+     when there are any.
+
+   Below the table, one stack-level line: the merge order, which layers block which,
+   and whether a lower-layer fix will force a restack that shifts the upper layers'
+   anchors.
