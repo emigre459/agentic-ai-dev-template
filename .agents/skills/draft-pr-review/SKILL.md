@@ -96,10 +96,10 @@ Write plain reviewer prose in the user's first person: the concrete failure scen
    **added line in the PR's net diff** against its base: the `+` side of a hunk in
    `git diff -U0 <base>...<head> -- <file>`. A line added and then removed inside the
    branch is not in the diff, and GitHub rejects the whole review if any anchor is
-   off. Check each anchor before posting:
+   off. Check each anchor before posting (it avoids awk field variables on purpose: some harnesses replace a dollar sign followed by a digit in a skill with its invocation arguments):
 
    ```bash
-   git diff -U0 "$BASE...HEAD" -- "$FILE" | awk -v L="$LINE" '/^@@/{split($3,a,/[+,]/); s=a[2]; n=(a[3]==""?1:a[3]); if (L>=s && L<s+n) f=1} END{print (f?"added":"NOT added")}'
+   git diff -U0 "$BASE...HEAD" -- "$FILE" | python3 -c 'import re,sys; L=int(sys.argv[1]); print("added" if any(int(m[0])<=L<int(m[0])+int(m[1] or 1) for m in re.findall(r"^@@ .*?\+(\d+)(?:,(\d+))? @@", sys.stdin.read(), re.M)) else "NOT added")' "$LINE"
    ```
 
    If the exact line isn't added, use the nearest added line in the same function.
@@ -201,8 +201,11 @@ a handoff note doesn't already give.
    after the author restacks it.
 2. **Go bottom-up, one layer at a time.** Review each layer against its **own base
    branch**, not the default branch (`git diff <base-head>...<layer-head>`). Use a
-   throwaway worktree per layer (`git worktree add --detach <path> <layer-head>`),
-   so the user's checkout is never switched, and remove it afterwards.
+   throwaway worktree per layer (`git worktree add --detach <path> <layer-head-sha>`),
+   so the user's checkout is never switched, and remove it afterwards. Use the head
+   SHA, not `origin/<branch>`: a `git fetch origin <branch>` doesn't always update the
+   remote-tracking ref. Tell the subagent not to install anything or create a virtual
+   environment in the worktree.
 3. **Keep a handoff note** at `<scratch>/stack-<id>/notes.md`, appended after each
    layer. It holds:
    - that layer's posted findings, one line each with `file:line`;
@@ -221,6 +224,9 @@ a handoff note doesn't already give.
    and dropped. It does not post. Read its dropped list too: an item it dropped only
    because a bot mentioned it in a summary (not a thread) may still deserve a comment.
 5. **Verify in the orchestrator**, as in §1 steps 3–5. Then **place** each finding:
+   - **A finding about live behavior in another open PR** (a sibling component, a PR
+     outside the stack) goes on that PR's pending review too, even when you also put it
+     on a follow-up card, since that PR is what ships the behavior.
    - **An upper-layer finding whose root cause is in lower-layer code** goes on the
      lower PR's pending review, anchored there. On the upper PR, add only a pointer
      line if that layer makes the problem worse.
@@ -249,3 +255,19 @@ a handoff note doesn't already give.
    Below the table, one stack-level line: the merge order, which layers block which,
    and whether a lower-layer fix will force a restack that shifts the upper layers'
    anchors.
+
+## 8. Follow-up cards a review calls for
+
+When the review shows a card is needed (work that belongs in a later PR, a pattern to
+fix across components, a deferred item that would otherwise drop off every card) and
+you already have the analysis, offer to file it yourself rather than asking the author
+to. On the user's OK:
+
+- Follow the repo's issue rules (for example `.agents/rules/shared/no-orphan-issues.md`,
+  `gh-issue-dependencies.md` and `issue-card-brevity.md`). Put it under the epic its
+  peers live in, set GH-native blocked-by, and point it at the cards that already cover
+  part of it rather than repeating them.
+- Cite `#N` in the suggested submit summary ("I've filed #N …; nothing to do for it in
+  this PR"), so the card needs no action from the author and doesn't change the verdict.
+- When the author must act on it (it changes this PR's code or tests), it's a review
+  comment labeled Should fix instead.
