@@ -196,6 +196,7 @@ Each skill reads `.agents/skill-config/<skill>.md` when the repo has one (see
 | `plan-issues` | Decompose an idea or epic into issue cards on the board | — |
 | `clean-up-kanban` | Board review, epic template and hygiene rules | — |
 | `resolve-pr-concerns` | Drive an open PR to merge-ready: reviewer rounds, CI, human reviews | `.github/pr-reviewer.json`; `.github/docs-only-paths.json` and `.github/skills-update-lane.json` (opt-in) |
+| `draft-pr-review` | Review someone else's PR for you: verify each finding, post them as a pending review you submit yourself; stack mode for dependent PRs | Finder, voice, severity labels and scratch dir in `.agents/skill-config/draft-pr-review.md` (default: `/code-review` finder, `local/pr-review/`) |
 | `pr-check` | `make pr_check` under the single-flight lock | — |
 | `run-tests` | `make tests`, the fast iteration target | — |
 | `review-skill` | Validate a skill's structure and quality | — |
