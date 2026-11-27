@@ -143,30 +143,9 @@ def load_bot_logins(config_path: Path | None = None) -> frozenset[str]:
     )
 
 
-def is_human(user: Mapping[str, Any] | None, bot_logins: Iterable[str]) -> bool:
-    """Return whether ``user`` is a person rather than a bot or a deleted account.
-
-    Parameters
-    ----------
-    user : Mapping[str, Any] | None
-        A REST ``user`` object.
-    bot_logins : Iterable[str]
-        Logins of every configured reviewer.
-
-    Returns
-    -------
-    bool
-        ``True`` for a person.
-    """
-    if not user:
-        return False
-    login = user.get("login") or ""
-    return bool(
-        login
-        and user.get("type") != "Bot"
-        and not login.endswith("[bot]")
-        and login not in set(bot_logins)
-    )
+# One rule for "human" across the skill's scripts: ``reviewer_state`` also uses it
+# to count the change requests that buy local review rounds.
+is_human = reviewer_state.is_human
 
 
 def is_answer(body: str | None) -> bool:
