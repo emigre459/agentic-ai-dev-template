@@ -66,8 +66,9 @@ system tools on the user's machine itself.
    (`reviewer_state.py` reports `verdict_carried_from`, `verdict_carry_reason:
    same_patch`), and `review-gate` counts it. Trigger the reviewer only on a layer
    that reports `needs_trigger: true` — one whose own diff changed, e.g. a conflict
-   resolution that edited a line. Final full reviews already done still count: they
-   aren't tied to the head.
+   resolution that edited a line (a reviewer that reviews locally never needs a
+   trigger: run a local round on that layer instead). Final full reviews already
+   done still count: they aren't tied to the head.
 5. **Reply with the SHA as pushed.** A later rebase rewrites it; that's accepted,
    don't re-edit old replies.
 
