@@ -284,6 +284,18 @@ names no file is rejected.
 (An adapter needs every field the shipped `bugbot` and `coderabbit` entries have; the
 fragment shows only the new ones.)
 
+`review_rounds` caps how many review rounds a PR gets around its one final full
+review. A misspelled key or a negative value fails loudly.
+
+| Key | Default | What it caps |
+|-----|---------|--------------|
+| `max_incremental_before_final` | 1 | PR incremental reviews (the trigger comment) before the final full review |
+| `max_incremental_after_final` | 3 | PR incremental reviews after it |
+| `max_fix_iterations` | 5 | The fix loop's passes |
+| `max_local_before_final` | 3 | Local review rounds before the final full review (a reviewer with `local_review`) |
+| `max_local_after_final` | 3 | Local review rounds after it |
+| `local_rounds_per_change_request` | 2 | Local rounds each human change request submitted after the final full review adds to the after-final cap |
+
 ### `.github/docs-only-paths.json`: the opt-in docs-only lane
 
 Optional; the template ships none, so by default every PR needs a review. With it on

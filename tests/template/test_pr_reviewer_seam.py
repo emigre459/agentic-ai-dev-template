@@ -728,3 +728,9 @@ def test_a_base_change_does_not_call_for_a_new_pr_review() -> None:
     for word in ("rebase", "merge from the base", "restack", "raise the cap"):
         assert word in local, word
 
+
+def test_the_readme_documents_every_round_cap() -> None:
+    readme = _flat(_REPO / "README.md")
+    config = json.loads(_CONFIG.read_text())
+    for key in config["review_rounds"]:
+        assert f"`{key}`" in readme, key
