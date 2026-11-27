@@ -5,7 +5,8 @@
     "max_incremental_after_final": 3,
     "max_fix_iterations": 5,
     "max_local_before_final": 3,
-    "max_local_after_final": 3
+    "max_local_after_final": 3,
+    "local_rounds_per_change_request": 2
   },
   "reviewers": {
     "bugbot": {

@@ -289,7 +289,9 @@ _CAPS = RoundCaps(local_before_final=2, local_after_final=1)
 
 
 def _state(comments: list[dict[str, Any]], head: str = HEAD) -> Any:
-    return reviewer_state.local_review_state(comments, CODERABBIT, _CAPS, head)
+    return reviewer_state.local_review_state(
+        comments, CODERABBIT, _CAPS, head, reviews=[]
+    )
 
 
 def test_a_record_round_trips_through_its_marker() -> None:
@@ -341,7 +343,7 @@ def test_local_rounds_after_the_final_review_count_separately() -> None:
     )
     assert state["phase"] == "after_final"
     assert state["before_final"]["used"] == 1
-    assert state["after_final"] == {"used": 1, "cap": 1}
+    assert state["after_final"] == {"used": 1, "cap": 1, "from_change_requests": 0}
     assert state["allowed"] is False
 
 
@@ -366,7 +368,7 @@ def test_a_recorded_head_needs_no_second_local_review() -> None:
 
 
 def test_a_reviewer_without_a_local_review_reports_none() -> None:
-    state = reviewer_state.local_review_state([], BUGBOT, _CAPS, HEAD)
+    state = reviewer_state.local_review_state([], BUGBOT, _CAPS, HEAD, reviews=[])
     assert state == {"configured": False}
 
 
@@ -439,6 +441,7 @@ class _Fake:
         self,
         *,
         comments: list[dict[str, Any]] | None = None,
+        reviews: list[dict[str, Any]] | None = None,
         local_head: str = HEAD,
         review: tuple[int, str, str] | BaseException = (0, "", ""),
         preflight: str = "available",
@@ -446,6 +449,7 @@ class _Fake:
         after_status: str | None = None,
     ) -> None:
         self.comments = comments or []
+        self.reviews = reviews or []
         self.local_head = local_head
         self.review = review
         self.preflight_status = preflight
@@ -465,6 +469,8 @@ class _Fake:
             return {"head": {"sha": sha, "ref": "feat"}, "base": {"ref": "main"}}
         if args[1].endswith("/issues/7/comments"):
             return self.comments
+        if args[1].endswith("/pulls/7/reviews"):
+            return self.reviews
         raise AssertionError(args)
 
     def git(self, args: Any) -> str:
@@ -603,6 +609,30 @@ def test_a_spent_budget_runs_nothing(tmp_path: Path) -> None:
     assert (result["status"], code) == ("budget_spent", 65)
     assert result["used"] == 2 and result["cap"] == 2
     assert fake.ran == []
+
+
+def test_a_change_request_after_the_final_buys_another_round(
+    tmp_path: Path,
+) -> None:
+    """The after-final round is spent, but a human asked for changes since."""
+    comments = [
+        _comment(FINAL, "2026-10-13T02:00:00Z"),
+        _comment(_FULL_DONE, "2026-10-13T02:10:00Z", "coderabbitai[bot]"),
+        _record(OLD, "2026-10-13T02:30:00Z"),
+    ]
+    spent, code = _run(tmp_path, _Fake(comments=comments))
+    assert (spent["status"], code) == ("budget_spent", 65)
+    request = {
+        "id": 9,
+        "user": {"login": "octocat", "type": "User"},
+        "state": "CHANGES_REQUESTED",
+        "submitted_at": "2026-10-13T03:00:00Z",
+    }
+    fake = _Fake(comments=comments, reviews=[request], review=(0, _ndjson(_DONE), ""))
+    result, code = _run(tmp_path, fake)
+    assert (result["status"], code) == ("reviewed", 0)
+    assert (result["phase"], result["round"], result["cap"]) == ("after_final", 2, 3)
+    assert result["detail"].startswith("round 2 of 3 after final")
 
 
 def test_an_exhausted_allowance_waits_without_reviewing(tmp_path: Path) -> None:

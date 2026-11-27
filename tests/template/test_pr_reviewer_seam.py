@@ -692,3 +692,45 @@ def test_release_check_skips_repos_without_release_pieces() -> None:
     assert "no published release and no `.github/release-drafter.yml`" in step2
     assert "skip the bump suggestion" in step2
     assert "suggest the first one, `v0.1.0`" in step2  # a drafter config keeps it
+
+
+# --- A local reviewer's one PR request, change requests and base changes (#105) ---
+
+
+def test_with_a_local_reviewer_the_final_review_is_the_only_pr_request() -> None:
+    """The summary lines don't promise a fresh PR review after every fix."""
+    overview = _section(_flat(_SKILL), "## Overview")
+    assert "the final full review is the PR's only automated request" in overview
+    assert "later checks run locally" in overview
+
+
+def test_a_change_request_buys_local_rounds_in_the_prose() -> None:
+    text = _flat(_SKILL)
+    local = _section(text, "### Local review rounds")
+    assert "local_rounds_per_change_request" in local
+    assert "from_change_requests" in local
+    assert "default 2" in local
+    budget = _section(text, "### Review-round budget")
+    assert "local_rounds_per_change_request" in budget
+
+
+def test_a_human_change_request_is_rechecked_locally_then_rerequested() -> None:
+    skill = _flat(_SKILL)
+    step4e = skill[skill.index("### 4e.") : skill.index("## Step 5: ")]
+    assert "local round" in step4e
+    assert "--add-reviewer" in step4e
+    assert "Never post a trigger or final-review comment" in step4e
+
+
+def test_a_base_change_does_not_call_for_a_new_pr_review() -> None:
+    local = _section(_flat(_SKILL), "### Local review rounds")
+    assert "does not call for a new PR review" in local
+    for word in ("rebase", "merge from the base", "restack", "raise the cap"):
+        assert word in local, word
+
+
+def test_the_readme_documents_every_round_cap() -> None:
+    readme = _flat(_REPO / "README.md")
+    config = json.loads(_CONFIG.read_text())
+    for key in config["review_rounds"]:
+        assert f"`{key}`" in readme, key

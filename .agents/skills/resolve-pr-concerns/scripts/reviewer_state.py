@@ -29,7 +29,9 @@ Also returns ``local_review``: for a reviewer whose adapter declares ``local_rev
 against an allowance separate from the PR quota), the fix rounds run locally through
 ``local_review.py`` and are budgeted here from the records it leaves on the PR
 (``review_rounds`` in the config). Such a reviewer never needs a PR trigger: the PR's
-one review request is the final full review.
+one review request is the final full review. Each human ``CHANGES_REQUESTED`` review
+submitted after that request adds ``local_rounds_per_change_request`` rounds to the
+after-final cap (``after_final.from_change_requests`` counts them).
 
 Also returns ``incremental_review_outcome``: the reviewer's answer to the newest
 trigger comment (``finished``, ``no_changes``, ``failed``, ``not_completed``,
@@ -453,7 +455,9 @@ class RoundCaps(NamedTuple):
     loop's outer safety net (the agent counts its passes, this is only the limit).
     The ``local_*`` caps apply only to a reviewer that declares ``local_review``: its
     fix rounds run locally, before the PR's one final full review and after it, and
-    ``pr_round_caps`` gives it no PR incremental rounds.
+    ``pr_round_caps`` gives it no PR incremental rounds. ``local_per_change_request``
+    is how many after-final local rounds each human ``CHANGES_REQUESTED`` review
+    submitted after the final full review adds (``local_review_state``).
     """
 
     before_final: int = 1
@@ -461,6 +465,7 @@ class RoundCaps(NamedTuple):
     fix_iterations: int = 5
     local_before_final: int = 3
     local_after_final: int = 3
+    local_per_change_request: int = 2
 
 
 DEFAULT_ROUND_CAPS = RoundCaps()
@@ -470,6 +475,7 @@ _ROUND_CAP_KEYS = {
     "max_fix_iterations": "fix_iterations",
     "max_local_before_final": "local_before_final",
     "max_local_after_final": "local_after_final",
+    "local_rounds_per_change_request": "local_per_change_request",
 }
 
 
@@ -1146,6 +1152,33 @@ def _created(comment: Mapping[str, Any]) -> str:
     return comment.get("created_at") or ""
 
 
+def is_human(user: Mapping[str, Any] | None, bot_logins: Iterable[str]) -> bool:
+    """Return whether ``user`` is a person rather than a bot or a deleted account.
+
+    Parameters
+    ----------
+    user : Mapping[str, Any] | None
+        A REST ``user`` object.
+    bot_logins : Iterable[str]
+        Reviewer bot logins to treat as non-human, besides any GitHub ``Bot``
+        account and any login ending in ``[bot]``.
+
+    Returns
+    -------
+    bool
+        ``True`` for a person.
+    """
+    if not user:
+        return False
+    login = user.get("login") or ""
+    return bool(
+        login
+        and user.get("type") != "Bot"
+        and not login.endswith("[bot]")
+        and login not in set(bot_logins)
+    )
+
+
 def _edited(comment: Mapping[str, Any]) -> str:
     return comment.get("updated_at") or comment.get("created_at") or ""
 
@@ -1365,17 +1398,55 @@ def pr_round_caps(adapter: ReviewerAdapter, caps: RoundCaps) -> RoundCaps:
     return caps._replace(before_final=0, after_final=0)
 
 
+def change_requests_after(
+    reviews: Iterable[Mapping[str, Any]], since: str | None, adapter: ReviewerAdapter
+) -> int:
+    """Count the human ``CHANGES_REQUESTED`` reviews submitted at or after ``since``.
+
+    Parameters
+    ----------
+    reviews : Iterable[Mapping[str, Any]]
+        PR reviews as returned by the GitHub REST API (``user``, ``state``,
+        ``submitted_at``).
+    since : str | None
+        When the first final-review request was made; ``None`` (no final review
+        yet) counts none.
+    adapter : ReviewerAdapter
+        Configured reviewer adapter, whose ``bot_logins`` are not human.
+
+    Returns
+    -------
+    int
+        How many reviews qualify. A dismissed request reads ``DISMISSED`` and
+        doesn't count.
+    """
+    if since is None:
+        return 0
+    return sum(
+        1
+        for r in reviews
+        if r.get("state") == "CHANGES_REQUESTED"
+        and (r.get("submitted_at") or "") >= since
+        and is_human(r.get("user"), adapter.bot_logins)
+    )
+
+
 def local_review_state(
     comments: Iterable[Mapping[str, Any]],
     adapter: ReviewerAdapter,
     caps: RoundCaps,
     head_sha: str,
+    *,
+    reviews: Iterable[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Budget the PR's local review rounds from their records.
 
     Rounds before the first final-review request the reviewer didn't refuse, and
     rounds after it, are capped separately (``local_before_final`` /
-    ``local_after_final``).
+    ``local_after_final``). Each human ``CHANGES_REQUESTED`` review submitted after
+    that request adds ``local_per_change_request`` rounds to the after-final cap:
+    the human asked for more fixes, and they are re-checked locally, never with
+    another PR review request.
 
     Parameters
     ----------
@@ -1387,13 +1458,16 @@ def local_review_state(
         Round caps.
     head_sha : str
         The PR's current head.
+    reviews : Iterable[Mapping[str, Any]]
+        PR reviews as returned by the GitHub REST API.
 
     Returns
     -------
     dict[str, Any]
         ``{"configured": False}`` with no local review; otherwise ``phase``,
-        ``before_final`` / ``after_final`` ``{used, cap}``, ``allowed``,
-        ``reviewed_head`` and ``head_findings``.
+        ``before_final`` ``{used, cap}``, ``after_final`` ``{used, cap,
+        from_change_requests}`` (``cap`` includes the change requests' rounds),
+        ``allowed``, ``reviewed_head`` and ``head_findings``.
     """
     if adapter.local_review is None:
         return {"configured": False}
@@ -1403,9 +1477,14 @@ def local_review_state(
     before = sum(1 for r in records if first_final is None or r["at"] < first_final)
     after = len(records) - before
     phase = "after_final" if first_final is not None else "before_final"
+    requests = change_requests_after(reviews, first_final, adapter)
     budget = {
         "before_final": {"used": before, "cap": caps.local_before_final},
-        "after_final": {"used": after, "cap": caps.local_after_final},
+        "after_final": {
+            "used": after,
+            "cap": caps.local_after_final + requests * caps.local_per_change_request,
+            "from_change_requests": requests,
+        },
     }
     current = budget[phase]
     on_head = [r for r in records if r["head"] == head_sha]
@@ -2241,7 +2320,9 @@ def collect_state(
         # The newest request was refused for the rate limit: wait until
         # retry_after, then re-post the SAME request. Never escalate.
         "rate_limit": rate_limit_state(comments, adapter),
-        "local_review": local_review_state(comments, adapter, caps, head_sha),
+        "local_review": local_review_state(
+            comments, adapter, caps, head_sha, reviews=raw_reviews
+        ),
         # "No changes" is free unless the head is left with no verdict: then the
         # budget must bound re-posting a trigger that gets the same answer.
         "round_budget": round_budget(

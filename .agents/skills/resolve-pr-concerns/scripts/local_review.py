@@ -7,7 +7,9 @@ on the developer's machine, against a separate allowance; the PR gets one review
 request, the final full review. Each round is recorded as a plain PR comment
 carrying a hidden ``<!-- local-review:v1 {json} -->`` marker. It mentions nobody, so
 it is not a review request, and ``reviewer_state`` budgets local rounds from those
-records (``review_rounds.max_local_before_final`` / ``max_local_after_final``).
+records (``review_rounds.max_local_before_final`` / ``max_local_after_final``, plus
+``local_rounds_per_change_request`` for each human change request submitted after
+the final full review).
 
 Run it from the PR's worktree with the head pushed. It reviews the head against
 ``merge-base HEAD origin/<base>``. It prints one JSON object and exits with its
@@ -396,13 +398,17 @@ def review(
                 local_head=local,
             )
         comments = deps.gh(["api", f"repos/{repo}/issues/{pr}/comments", "--paginate"])
+        # A human's change request after the final review buys more local rounds.
+        reviews = deps.gh(["api", f"repos/{repo}/pulls/{pr}/reviews", "--paginate"])
     except subprocess.CalledProcessError as exc:
         return done(
             "failed",
             f"could not read PR #{pr}'s head: `{' '.join(map(str, exc.cmd[:3]))}` "
             f"failed: {_stderr(exc)}",
         )
-    state = local_review_state(comments or [], adapter, caps, head)
+    state = local_review_state(
+        comments or [], adapter, caps, head, reviews=reviews or []
+    )
     if state["reviewed_head"]:
         return done(
             "already_reviewed",

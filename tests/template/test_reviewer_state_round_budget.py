@@ -190,6 +190,9 @@ def test_the_repo_config_sets_the_caps() -> None:
         fix_iterations=config["review_rounds"]["max_fix_iterations"],
         local_before_final=config["review_rounds"]["max_local_before_final"],
         local_after_final=config["review_rounds"]["max_local_after_final"],
+        local_per_change_request=config["review_rounds"][
+            "local_rounds_per_change_request"
+        ],
     )
     assert caps == RoundCaps(before_final=1, after_final=3, fix_iterations=5)
 
